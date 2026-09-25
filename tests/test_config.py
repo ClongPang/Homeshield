@@ -1,0 +1,62 @@
+"""供应商配置解析与任务路由。"""
+from __future__ import annotations
+
+import pytest
+
+from core.config import Provider, Settings
+
+
+def _settings(**kw) -> Settings:
+    providers = {
+        "DEEPSEEK": Provider("DEEPSEEK", "k1", "https://a", "deepseek-chat"),
+        "QWEN": Provider("QWEN", "k2", "https://b", "qwen-embed"),
+    }
+    return Settings(providers=providers, **kw)
+
+
+def test_role_routing():
+    s = _settings(chat_provider_name="DEEPSEEK", embed_provider_name="QWEN")
+    assert s.chat_endpoint().model == "deepseek-chat"
+    assert s.embed_endpoint().model == "qwen-embed"
+    assert s.transcribe_endpoint().model == "deepseek-chat"  # 未配置转写,回落 chat
+
+
+def test_unspecified_chat_falls_back_to_first_provider():
+    s = _settings()
+    assert s.chat_endpoint().name == "DEEPSEEK"
+    assert s.embed_endpoint() is None  # 未指名 embed → 检索退化为纯关键词
+
+
+def test_unknown_provider_fails_fast():
+    with pytest.raises(ValueError, match="CHAT_PROVIDER"):
+        _settings(chat_provider_name="TYPPO").chat_endpoint()
+    with pytest.raises(ValueError, match="EMBED_PROVIDER"):
+        _settings(embed_provider_name="TYPPO").embed_endpoint()
+
+
+def test_load_scans_env(monkeypatch, tmp_path):
+    # 与真实 .env 彻底隔离:清掉可能泄漏的变量,并指向一个空环境文件
+    for var in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
+                "QWEN_API_KEY", "CHAT_PROVIDER", "EMBED_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "k")
+    monkeypatch.setenv("CHAT_PROVIDER", "deepseek")
+    env_file = tmp_path / "test.env"
+    env_file.write_text("# empty\n", encoding="utf-8")
+    s = Settings.load(env_file=str(env_file))
+    assert set(s.providers) == {"DEEPSEEK"}
+    assert s.chat_endpoint().name == "DEEPSEEK"
+    assert s.embed_endpoint() is None
+
+
+def test_llm_routes_tasks_to_providers():
+    from core.llm import OpenAICompatLLM
+
+    llm = OpenAICompatLLM(
+        _settings(chat_provider_name="DEEPSEEK", embed_provider_name="QWEN")
+    )
+    assert llm.endpoint_for("judge").name == "DEEPSEEK"
+    assert llm.endpoint_for("features").name == "DEEPSEEK"
+    assert llm.endpoint_for("reply").name == "DEEPSEEK"
+    assert llm.endpoint_for("transcribe").name == "DEEPSEEK"
+    assert llm.endpoint_for("embed").name == "QWEN"

@@ -1,0 +1,150 @@
+<!doctype html>
+<!-- 子女控制台:链接即凭证(?token=),周报 + 成员 + 告警(历史拉取 + SSE 增量) + 待确认纠正队列 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>家中盾 · 控制台</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0; background: #10141a; color: #e8eaed; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 22px; } h2 { font-size: 16px; color: #9aa0a6; margin: 18px 0 6px; }
+  .card { background: #1a2027; border-radius: 12px; padding: 14px; margin: 10px 0; line-height: 1.6; }
+  .alert { border-left: 4px solid #e5534b; }
+  .pending { border-left: 4px solid #d29922; }
+  button { padding: 6px 12px; border: 0; border-radius: 8px; background: #2b6cb0; color: #fff; margin-right: 8px; margin-top: 8px; }
+  .muted { color: #9aa0a6; font-size: 13px; }
+  .meta { color: #9aa0a6; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <h1>家中盾 · 控制台</h1>
+  <div class="card" id="family">加载中…</div>
+  <div class="card" id="weekly"></div>
+  <h2>待你确认的纠正</h2>
+  <div id="queue"></div>
+  <h2>高危告警</h2>
+  <div id="alerts"><div class="card muted">暂无告警,等待推送…</div></div>
+</div>
+<script>
+const token = new URLSearchParams(location.search).get("token") || "";
+const role_name = (r) => (r === "adult" ? "子女" : "长辈");
+const label_name = (l) => (l === "false_positive" ? "说是误报" : "说是真骗局");
+
+function showFatal(text) {
+  document.getElementById("app").innerHTML = `<div class="card">${text}</div>`;
+}
+
+async function api(path) {
+  const resp = await fetch(path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token));
+  if (resp.status === 401) {
+    showFatal("链接已失效,请让家人重新发一条链接");
+    throw new Error("unauthorized");
+  }
+  if (!resp.ok) {
+    showFatal("服务暂时不可用,请稍后再试");
+    throw new Error("server error");
+  }
+  return resp.json();
+}
+
+const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, ...body }) });
+
+function loadFamily() {
+  api("/api/members").then(d => {
+    document.getElementById("family").textContent =
+      "家庭成员:" + d.members.map(m => `${m.name}(${role_name(m.role)})`).join("、");
+  }).catch(() => {});
+}
+
+function loadWeekly() {
+  api("/api/weekly").then(w => {
+    document.getElementById("weekly").textContent =
+      `近${w.days}天:查询 ${w.queries} 次 · 高危 ${w.dangerous} · 误报 ${w.false_positives} · 纠正 ${w.corrections}`;
+  }).catch(() => {});
+}
+
+function loadQueue() {
+  api("/api/corrections").then(d => {
+    const box = document.getElementById("queue");
+    box.innerHTML = "";
+    if (!d.pending.length) {
+      box.innerHTML = '<div class="card muted">没有等待确认的纠正。</div>';
+      return;
+    }
+    for (const item of d.pending) {
+      const div = document.createElement("div");
+      div.className = "card pending";
+      div.innerHTML = `<div>${item.by_name} ${label_name(item.label)}:</div>` +
+        `<div>${item.content}</div>` +
+        (item.note ? `<div class="meta">留言:${item.note}</div>` : "");
+      const ok = document.createElement("button");
+      ok.textContent = "同意";
+      ok.onclick = () => decide(item.id, "confirm");
+      const no = document.createElement("button");
+      no.textContent = "驳回";
+      no.style.background = "#57606a";
+      no.onclick = () => decide(item.id, "reject");
+      div.append(ok, no);
+      box.append(div);
+    }
+  }).catch(() => {});
+}
+
+function decide(id, decision) {
+  post(`/api/corrections/${id}/confirm`, { decision }).then(() => loadQueue());
+}
+
+// 历史与实时共用一张卡片;数据形状对齐 SSE payload(+ delivered_at 仅历史有)
+function alertCard(a) {
+  const div = document.createElement("div");
+  div.className = "card alert";
+  div.dataset.vid = a.verdict_id;
+  const title = document.createElement("div");
+  title.textContent = `高危 #${a.verdict_id}:${a.summary}`;
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = a.delivered_at
+    ? new Date(a.delivered_at * 1000).toLocaleString()
+    : "刚刚";
+  const b = document.createElement("button");
+  b.textContent = "记录为误报";
+  b.onclick = () =>
+    post("/api/corrections", { verdict_id: a.verdict_id, label: "false_positive" })
+      .then(() => { b.replaceWith("已记录 ✓"); loadQueue(); loadWeekly(); });
+  div.append(title, meta, b);
+  return div;
+}
+
+function loadAlerts() {
+  api("/api/alerts").then(d => {
+    const box = document.getElementById("alerts");
+    // 合并式渲染:历史请求在途时 SSE 可能已插卡片,跳过已有的 verdict
+    const fresh = d.alerts.filter(a => !box.querySelector(`[data-vid="${a.verdict_id}"]`));
+    if (!fresh.length) return;
+    if (box.querySelector(".muted")) box.innerHTML = "";
+    for (const a of fresh) box.append(alertCard(a));
+  }).catch(() => {});
+}
+
+const es = new EventSource(`/api/stream?token=${encodeURIComponent(token)}`);
+es.onerror = () => {
+  document.getElementById("alerts").innerHTML =
+    '<div class="card muted">连接中断,自动重连中…</div>';
+};
+es.addEventListener("alert", e => {
+  const a = JSON.parse(e.data);
+  const box = document.getElementById("alerts");
+  if (box.querySelector(".muted")) box.innerHTML = "";
+  if (box.querySelector(`[data-vid="${a.verdict_id}"]`)) return; // 历史已在途,避免重复卡片
+  box.prepend(alertCard(a));
+});
+
+loadFamily();
+loadWeekly();
+loadQueue();
+loadAlerts();
+</script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.homeshield.server</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/pclong/projects_dev/vibe_projects/fraud</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/pclong/.local/bin/uv</string>
+    <string>run</string>
+    <string>uvicorn</string>
+    <string>server:app</string>
+    <string>--host</string>
+    <string>0.0.0.0</string>
+    <string>--port</string>
+    <string>8000</string>
+  </array>
+  <key>KeepAlive</key>
+  <true/>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/homeshield.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/homeshield.log</string>
+</dict>
+</plist>
