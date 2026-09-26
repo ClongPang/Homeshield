@@ -3,7 +3,7 @@ import json
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from homeshield.core.pipeline import PipelineConfig
+from homeshield.core.pipeline import PIPELINE_VERSION, PipelineConfig
 from homeshield.eval.dataset import Sample
 from homeshield.eval.metrics import confusion3x3, fpr, fpr_strict, latency_percentiles, recall
 
@@ -29,6 +29,8 @@ async def run_matrix(
         for line in Path(checkpoint).read_text(encoding="utf-8").splitlines():
             if line.strip():
                 r = json.loads(line)
+                if r.get("v") != PIPELINE_VERSION:
+                    continue  # 旧引擎的断点不回放,防止用旧分数冒充新引擎
                 done[(r["config"], r["id"])] = (r["level"], r["score"], r["latency"])
     ckpt = open(checkpoint, "a", encoding="utf-8") if checkpoint else None
     try:
@@ -45,7 +47,7 @@ async def run_matrix(
                 rows.append(out)
                 if ckpt:
                     ckpt.write(json.dumps(
-                        {"config": name, "id": s.id, "level": out[0],
+                        {"v": PIPELINE_VERSION, "config": name, "id": s.id, "level": out[0],
                          "score": out[1], "latency": out[2]}, ensure_ascii=False) + "\n")
                     ckpt.flush()
                 print(f"[{name}] {i}/{len(samples)} {s.id}", flush=True)  # 进度可见性

@@ -38,6 +38,10 @@ from homeshield.core.retrieval import Retriever
 
 logger = logging.getLogger(__name__)
 
+# 判定行为语义版本:凡影响判定输出的变更(词表/提示词/分级语义/检索/模型默认)
+# 必须递增;断点续跑与评测缓存据此失效,防止用旧引擎的分数冒充新引擎。
+PIPELINE_VERSION = "1.0.0"
+
 
 @dataclass(frozen=True)
 class PipelineConfig:
