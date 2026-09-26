@@ -1,14 +1,14 @@
 """规则特征与隔离话术规则下限。"""
 import asyncio
 
-from core.features import (
+from homeshield.core.features import (
     FeatureSpec,
     assign_ids,
     extract_rules,
     rule_floor,
     supplement_llm,
 )
-from core.models import Level
+from homeshield.core.models import Level
 
 
 def test_rule_floor():
@@ -56,7 +56,7 @@ def test_supplement_filters_and_clamps():
     ]}
     specs = asyncio.run(supplement_llm(_ScriptedLLM(payload), "文本"))
     assert [(s.type, s.confidence) for s in specs] == [("money", 9), ("urgency", 5), ("escape", 10)]
-    assert all(s.type in __import__("core.knowledge.mechanics", fromlist=["REGISTRY"]).REGISTRY for s in specs)
+    assert all(s.type in __import__("homeshield.core.knowledge.mechanics", fromlist=["REGISTRY"]).REGISTRY for s in specs)
 
 
 def test_supplement_mechanic_types_feed_annotate():
@@ -64,5 +64,5 @@ def test_supplement_mechanic_types_feed_annotate():
         {"features": [{"mechanic": "isolation", "value": "别告诉家人",
                        "evidence_span": "别告诉家人", "confidence": 9}]}), "文本"))
     feats = assign_ids(specs)
-    from core.annotate import annotate_text
+    from homeshield.core.annotate import annotate_text
     assert "<隔离封口>别告诉家人</隔离封口>" in annotate_text("妈,别告诉家人,要转账", feats)

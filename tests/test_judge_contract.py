@@ -3,16 +3,16 @@ import asyncio
 
 import pytest
 
-from core.errors import DegradeError
-from core.features import assign_ids, extract_rules
-from core.judge import (
+from homeshield.core.errors import DegradeError
+from homeshield.core.features import assign_ids, extract_rules
+from homeshield.core.judge import (
     LLMJudge,
     MockJudge,
     citations_valid,
     judge_with_validation,
 )
-from core.llm import MockLLM
-from core.models import Feature, JudgeInput, JudgeOutput, Level, Mode
+from homeshield.core.llm import MockLLM
+from homeshield.core.models import Feature, JudgeInput, JudgeOutput, Level, Mode
 
 TEXT = "别告诉家人,立即转账5万元到安全账户"
 

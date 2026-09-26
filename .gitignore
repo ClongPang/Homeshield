@@ -4,7 +4,7 @@ __pycache__/
 *.db
 .env
 .pytest_cache/
-eval/out/
+data/eval_out/
 data/raw/
 .DS_Store
 *.db-shm

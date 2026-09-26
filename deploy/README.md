@@ -18,4 +18,4 @@
 
 - 公网 VPS 直接绑定 `0.0.0.0`;家用宽带用内网穿透(frp / Tailscale Funnel 等)
 - `.env` 的 `PUBLIC_BASE_URL` 填对外地址,高危告警的模板消息可点击直达控制台
-- 家人入口:`uv run python cli.py link --member-id <id> --base-url https://对外地址`,把打印的链接发到家庭群
+- 家人入口:`uv run homeshield-cli link --member-id <id> --base-url https://对外地址`,把打印的链接发到家庭群

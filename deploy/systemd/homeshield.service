@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/homeshield
-ExecStart=/usr/bin/env uv run uvicorn server:app --host 0.0.0.0 --port 8000
+ExecStart=/usr/bin/env uv run uvicorn homeshield.server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=3
 

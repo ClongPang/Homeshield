@@ -4,14 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from core.features import FEE_WORDS, IDENTITY_WORDS, ISOLATION_WORDS, TRANSFER_WORDS, URGENCY_WORDS
-from core.knowledge.mechanics import (
+from homeshield.core.features import FEE_WORDS, IDENTITY_WORDS, ISOLATION_WORDS, TRANSFER_WORDS, URGENCY_WORDS
+from homeshield.core.knowledge.mechanics import (
     MECHANICS_VERSION,
     MECHANIC_LIST,
     Function,
     REGISTRY,
 )
-from eval.contrast import annotate, check, render
+from homeshield.eval.contrast import annotate, check, render
 
 
 # ---- 注册表完整性 -------------------------------------------------------
@@ -107,7 +107,7 @@ def test_real_contrast_set_contract():
 
 
 def test_real_contrast_loads_via_eval_dataset():
-    from eval.dataset import load_dataset
+    from homeshield.eval.dataset import load_dataset
 
     samples = load_dataset("data/samples/benign_hard.jsonl")
     assert len(samples) == 14  # mechanics 扩展字段被 Sample 忽略

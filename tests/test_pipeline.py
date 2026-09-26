@@ -1,10 +1,10 @@
 """管线端到端(mock 模式):判定、规则下限、回复格式、告警落库、图片降级。"""
 import asyncio
 
-from core.deps import make_pipeline
-from core.intake import ingest
-from core.models import Level
-from core.reply import validate_reply
+from homeshield.core.deps import make_pipeline
+from homeshield.core.intake import ingest
+from homeshield.core.models import Level
+from homeshield.core.reply import validate_reply
 
 
 def test_end_to_end_dangerous(deps, family):

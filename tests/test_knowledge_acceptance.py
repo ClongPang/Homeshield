@@ -12,13 +12,13 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from core.features import extract_rules
-from core.knowledge.taxonomy import REGISTRY
-from core.models import KbCase
-from core.retrieval import Retriever
-from eval.dataset import load_dataset
+from homeshield.core.features import extract_rules
+from homeshield.core.knowledge.taxonomy import REGISTRY
+from homeshield.core.models import KbCase
+from homeshield.core.retrieval import Retriever
+from homeshield.eval.dataset import load_dataset
 
-CASES_PATH = Path("core/knowledge/cases.json")
+CASES_PATH = Path(__file__).resolve().parents[1] / "src/homeshield/core/knowledge/cases.json"
 
 
 def _cases() -> list[KbCase]:

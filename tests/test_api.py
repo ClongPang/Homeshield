@@ -2,9 +2,9 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from core.config import Settings
-from core.models import Role
-from server import create_app
+from homeshield.core.config import Settings
+from homeshield.core.models import Role
+from homeshield.server import create_app
 
 
 @pytest.fixture()

@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from kbbuild.db import connect, init_schema
-from kbbuild.export import export_eval
-from kbbuild.importer import import_official
-from kbbuild.mapping import map_scam_type
+from homeshield.kbbuild.db import connect, init_schema
+from homeshield.kbbuild.export import export_eval
+from homeshield.kbbuild.importer import import_official
+from homeshield.kbbuild.mapping import map_scam_type
 
 POLICE_SUB = "public security, prosecution, judiciary, and government agencies"
 
@@ -128,7 +128,7 @@ def test_export_eval_schema_and_gap(tmp_path, raw_dir):
     l0 = {r["case_key"]: r["text"] for r in lvl_rows if r["level"] == 0}
     assert base_text["FR1-0001"] == l0[1]
     # §6.1 加载器可直接消费两份文件(levelup 的扩展字段被忽略)
-    from eval.dataset import load_dataset
+    from homeshield.eval.dataset import load_dataset
     assert len(load_dataset(out_base)) == 5
     assert len(load_dataset(out_lvl)) == 20
 

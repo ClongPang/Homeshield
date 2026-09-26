@@ -1,8 +1,8 @@
 """回复生成:结论行代码所有权、家人告知后缀、截断保护、回退。"""
 import asyncio
 
-from core.models import Feature, JudgeOutput, Level
-from core.reply import LLMReply, TemplateReply, validate_reply
+from homeshield.core.models import Feature, JudgeOutput, Level
+from homeshield.core.reply import LLMReply, TemplateReply, validate_reply
 
 
 class FakeLLM:

@@ -4,21 +4,25 @@ import pathlib
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-# 领域模块(端口与纯逻辑);适配器与组合根(core/db.py、core/repo.py、core/llm.py、
-# core/deps.py、core/channels/*)不在列
+# 领域模块(端口与纯逻辑);适配器与组合根(src/homeshield/core/db.py、repo.py、
+# llm.py、deps.py、channels/*)不在列
 DOMAIN_FILES = [
-    "core/config.py",
-    "core/models.py",
-    "core/errors.py",
-    "core/events.py",
-    "core/intake.py",
-    "core/features.py",
-    "core/retrieval.py",
-    "core/judge.py",
-    "core/reply.py",
-    "core/notifier.py",
-    "core/feedback.py",
-    "core/pipeline.py",
+    "src/homeshield/core/config.py",
+    "src/homeshield/core/models.py",
+    "src/homeshield/core/errors.py",
+    "src/homeshield/core/events.py",
+    "src/homeshield/core/messages.py",
+    "src/homeshield/core/intake.py",
+    "src/homeshield/core/features.py",
+    "src/homeshield/core/retrieval.py",
+    "src/homeshield/core/judge.py",
+    "src/homeshield/core/reply.py",
+    "src/homeshield/core/notifier.py",
+    "src/homeshield/core/feedback.py",
+    "src/homeshield/core/pipeline.py",
+    "src/homeshield/core/annotate.py",
+    "src/homeshield/core/binding.py",
+    "src/homeshield/core/verification.py",
 ]
 
 FORBIDDEN_ROOTS = {"openai", "fastapi", "httpx", "sqlite3", "uvicorn", "requests", "flask"}
@@ -42,7 +46,11 @@ def test_domain_modules_have_no_direct_infra_imports():
 
 
 def test_adapters_are_the_only_infra_users():
-    adapters = ["core/db.py", "core/repo.py", "core/channels/wechat.py"]
+    adapters = [
+        "src/homeshield/core/db.py",
+        "src/homeshield/core/repo.py",
+        "src/homeshield/core/channels/wechat.py",
+    ]
     infra = {"sqlite3", "httpx"}
     for rel in adapters:
         assert _imported_roots(ROOT / rel) & infra, f"{rel} 应作为适配器持有基础设施导入"

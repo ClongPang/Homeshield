@@ -4,14 +4,14 @@ import hashlib
 
 from fastapi.testclient import TestClient
 
-from core import messages
-from core.channels.wechat import WeChatChannel
-from core.config import Settings
-from core.deps import build_deps, make_pipeline
-from core.events import VerdictCompleted
-from core.intake import ingest
-from core.models import Role
-from server import _welcome_wechat, create_app
+from homeshield.core import messages
+from homeshield.core.channels.wechat import WeChatChannel
+from homeshield.core.config import Settings
+from homeshield.core.deps import build_deps, make_pipeline
+from homeshield.core.events import VerdictCompleted
+from homeshield.core.intake import ingest
+from homeshield.core.models import Role
+from homeshield.server import _welcome_wechat, create_app
 
 
 class FakeChannel:

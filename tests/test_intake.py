@@ -1,8 +1,8 @@
 """归一化与幂等。"""
 import pytest
 
-from core.intake import ingest
-from core.models import ContentType
+from homeshield.core.intake import ingest
+from homeshield.core.models import ContentType
 
 
 def test_normalize_and_idempotency(deps, family):

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.config import Provider, Settings
+from homeshield.core.config import Provider, Settings
 
 
 def _settings(**kw) -> Settings:
@@ -50,7 +50,7 @@ def test_load_scans_env(monkeypatch, tmp_path):
 
 
 def test_llm_routes_tasks_to_providers():
-    from core.llm import OpenAICompatLLM
+    from homeshield.core.llm import OpenAICompatLLM
 
     llm = OpenAICompatLLM(
         _settings(chat_provider_name="DEEPSEEK", embed_provider_name="QWEN")

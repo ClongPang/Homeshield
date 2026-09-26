@@ -4,11 +4,11 @@ import time
 
 import pytest
 
-from core.deps import make_pipeline
-from core.errors import ValidationError
-from core.feedback import CorrectionService, weekly_report
-from core.intake import ingest
-from core.models import CorrectionLabel, CorrectionStatus
+from homeshield.core.deps import make_pipeline
+from homeshield.core.errors import ValidationError
+from homeshield.core.feedback import CorrectionService, weekly_report
+from homeshield.core.intake import ingest
+from homeshield.core.models import CorrectionLabel, CorrectionStatus
 
 
 def _make_verdict(deps, family):

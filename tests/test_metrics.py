@@ -1,5 +1,5 @@
 """指标公式对拍与阈值扫描。"""
-from eval.metrics import confusion3x3, fpr, fpr_strict, latency_percentiles, recall, threshold_sweep
+from homeshield.eval.metrics import confusion3x3, fpr, fpr_strict, latency_percentiles, recall, threshold_sweep
 
 
 def test_confusion_recall_fpr():
@@ -28,7 +28,7 @@ def test_threshold_sweep_recall_monotonic():
 
 def test_report_labels_mock_as_plumbing_only():
     """报告标注数据构成,并声明 mock/合成口径仅验证管道。"""
-    from eval.report import render_report
+    from homeshield.eval.report import render_report
 
     text = render_report(
         {},

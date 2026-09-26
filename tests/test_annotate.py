@@ -1,10 +1,10 @@
 """机制内联标注与分级语义注入:重构二+五的单元与契约测试。"""
 import asyncio
 
-from core.annotate import annotate_text
-from core.judge import LLMJudge, MockJudge
-from core.llm import MockLLM
-from core.models import Feature, JudgeInput, Level
+from homeshield.core.annotate import annotate_text
+from homeshield.core.judge import LLMJudge, MockJudge
+from homeshield.core.llm import MockLLM
+from homeshield.core.models import Feature, JudgeInput, Level
 
 
 class CaptureLLM(MockLLM):

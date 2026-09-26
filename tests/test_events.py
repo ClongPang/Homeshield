@@ -1,7 +1,7 @@
 """EventBus 分派协议:sync 内联、async await、可调用对象(__call__ 为协程)识别。"""
 import asyncio
 
-from core.events import EventBus
+from homeshield.core.events import EventBus
 
 
 class _Evt:

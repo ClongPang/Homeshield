@@ -1,14 +1,9 @@
-"""测试夹具:mock 模式全链路可跑,临时库隔离。"""
-import pathlib
-import sys
-
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-
+"""测试夹具:mock 模式全链路可跑,临时库隔离。包化后无需 sys.path hack。"""
 import pytest
 
-from core.config import Settings
-from core.deps import build_deps
-from core.models import Role
+from homeshield.core.config import Settings
+from homeshield.core.deps import build_deps
+from homeshield.core.models import Role
 
 
 @pytest.fixture()

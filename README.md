@@ -1,25 +1,25 @@
 # 家中盾(Homeshield)—— 家庭反诈联防层
 
-> 规格:《家中盾_产品定位.md》(做什么/为什么) + 《家中盾_架构技术.md》(怎么做)。
+> 规格:docs/《家中盾_产品定位.md》(做什么/为什么) + docs/《家中盾_架构技术.md》(怎么做)。
 > 本 README 只讲**工程骨架**:怎么跑、怎么设计的、扩展点在哪。
 
 ## 快速开始(Python 3.12,uv 管理)
 
 ```bash
-uv sync                       # 创建虚拟环境、锁依赖(uv.lock)
+uv sync                       # 创建虚拟环境、锁依赖;homeshield 以 editable 方式安装
 uv run pytest                 # 全部测试(MODE=mock,无需 API key,FR-10)
-uv run python cli.py init-db  # 建库
-uv run uvicorn server:app --reload          # MODE=mock 下即可完整演示
-uv run python -m eval.run_eval              # 生成 eval/report.md(FR-9)
+uv run homeshield-cli init-db # 建库
+uv run uvicorn homeshield.server:app --reload   # MODE=mock 下即可完整演示
+uv run homeshield-eval        # 生成 docs/reports/report.md(FR-9)
 ```
 
 家人入家走公众号(见下文「家人入口」);本地无微信快速演示可沿用 CLI:
 
 ```bash
-uv run python cli.py add-family --name 我的家庭
-uv run python cli.py add-member --family-id 1 --name 妈妈 --role elder
-uv run python cli.py add-member --family-id 1 --name 儿子 --role adult
-uv run python cli.py link --member-id 2 --base-url http://localhost:8000
+uv run homeshield-cli add-family --name 我的家庭
+uv run homeshield-cli add-member --family-id 1 --name 妈妈 --role elder
+uv run homeshield-cli add-member --family-id 1 --name 儿子 --role adult
+uv run homeshield-cli link --member-id 2 --base-url http://localhost:8000
 ```
 
 配置:复制 `.env.example` 为 `.env`,`MODE=llm` 时填 OpenAI 兼容接口与微信参数。
@@ -27,17 +27,25 @@ uv run python cli.py link --member-id 2 --base-url http://localhost:8000
 ## 目录
 
 ```
-core/            领域层(纯逻辑,依赖规则见 tests/test_architecture.py)
-  models.py config.py errors.py events.py
-  intake.py features.py retrieval.py judge.py reply.py notifier.py feedback.py binding.py pipeline.py
-  db.py repo.py llm.py deps.py          ← 适配器/组合根
-  knowledge/  taxonomy.py cases.json    ← 骗术分类学(12类)+ 案例种子(D1 扩到每类≥3)
-  channels/   wechat.py                 ← 微信防腐层
-eval/            评测:dataset/metrics/ablation/report/run_eval
-web/             长辈聊天页 index.html / 子女控制台 console.html
-tests/           契约测试、状态机测试、API 冒烟、架构守护
-data/samples/    评测种子样例(D2 扩到 80-100 条,记 provenance)
-server.py cli.py pyproject.toml .env.example
+src/homeshield/   唯一 Python 包(uv 安装,editable;标准 src 布局)
+  server.py       FastAPI 组合根(uvicorn homeshield.server:app)
+  cli.py          运维/演示 CLI(= homeshield-cli)
+  web/            长辈聊天页 index.html / 子女控制台 console.html / 告警落地页 alert.html
+  core/           领域层(纯逻辑,依赖规则见 tests/test_architecture.py)
+    models.py config.py errors.py events.py messages.py
+    intake.py features.py retrieval.py judge.py reply.py notifier.py
+    feedback.py binding.py annotate.py verification.py pipeline.py
+    db.py repo.py llm.py deps.py       ← 适配器/组合根
+    knowledge/  taxonomy.py mechanics.py cases.json   ← 骗术分类学+机制卡+案例种子
+    channels/   wechat.py              ← 微信防腐层
+  eval/           评测:dataset/metrics/ablation/report/run_eval/contrast(= homeshield-eval)
+  kbbuild/        离线素材库构建(= homeshield-kbcli,不依赖 .env/LLM)
+tests/            契约测试、状态机测试、API 冒烟、架构守护
+docs/             规格与产物:产品定位/架构技术/设计教训/过程总结
+  reports/        评测报告(run_eval --out 默认落点)  archive/ 交接文档归档  papers/ 参考文献
+data/             samples/ 评测样例;raw/ 原始语料(gitignore);kb_build.db 离线库(gitignore)
+deploy/           systemd/launchd 进程守护单元
+pyproject.toml uv.lock .env.example
 ```
 
 ## 设计决策(模式 → 落点 → 解决什么)
@@ -65,7 +73,7 @@ server.py cli.py pyproject.toml .env.example
 5. **评测隔离**:`run_eval` 用 `:memory:` 库,不污染主库。
 6. **超时用惰性触发,不建定时器**:`CorrectionService.decide()` 前先清算过期 pending——规则在唯一需要它的现场自执行(经评审否决了"server 内每日清扫"的过度设计);真实使用量起来后再评估是否升级为定时任务。
 7. **触点模型(双方零技术背景)**:长辈只在微信里;子女是"被通知的人 + 一次点击的反馈者"——高危时模板消息送达并直达详情落地页(`/alert/<id>`,一键反馈),线下核实发生在系统之外;console 是兜底聚合页(告警历史/队列/周报),CLI 定位为开发者工具(模型详见《产品定位》§1.2)。
-8. **异常即人话回复**:管线的意外故障在 VerificationService 收口为兜底文案(LOOK_FAILED),长辈与子女永远得到一句能懂的回应,而不是 500 或沉默;微信回执与全部提示文案集中在 core/messages.py。
+8. **异常即人话回复**:管线的意外故障在 VerificationService 收口为兜底文案(LOOK_FAILED),长辈与子女永远得到一句能懂的回应,而不是 500 或沉默;微信回执与全部提示文案集中在 src/homeshield/core/messages.py。
 9. **纠正数据以库为源**:confirmed 纠正留存于库即真实数据源,不维护并行的导出文件;需要回归验证时从库内读取,避免"导出文件过期、与库不一致"。
 10. **供应商即配置,任务经路由分发**:任意 `<NAME>_API_KEY / BASE_URL / MODEL` 在 .env 声明一个供应商;判定/补抽/回复走 `CHAT_PROVIDER`,图片转写走 `TRANSCRIBE_PROVIDER`,向量检索走 `EMBED_PROVIDER`——换供应商只改 .env,不加代码;路由键就是贯穿管线的 task 参数。
 
@@ -75,7 +83,7 @@ server.py cli.py pyproject.toml .env.example
 mock、种子样例、合成数据只有两个合法用途:**CI 管道回归**与**冷启动冒烟**。
 对着自产数据调词表/提示词/阈值/检索权重,拟合的是想象,不是现实。
 
-- `eval/report.md` 强制标注数据来源构成(adapted/synthetic/correction)与模式口径;
+- docs/reports/report.md 强制标注数据来源构成(adapted/synthetic/correction)与模式口径;
 - mock 口径的数字一律表述为"管道验证",禁止表述为产品质量;
 - 词表、提示词、阈值、检索权重的每次变更,须附真实数据复测(库内纠正重放 / 真机日志)才可合入;
 - 冷启动集(§6.1 配比)只服务起步;真实使用启动后,数据分布与扩充由回流决定。

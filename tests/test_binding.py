@@ -1,8 +1,8 @@
 """绑定域:自助开通、邀请码绑定、一次性/时限与护栏。"""
 import pytest
 
-from core.binding import ADMIN_NAME, OPEN_FAMILY_NAME, BindingError, BindingService
-from core.models import Role
+from homeshield.core.binding import ADMIN_NAME, OPEN_FAMILY_NAME, BindingError, BindingService
+from homeshield.core.models import Role
 
 
 @pytest.fixture()
