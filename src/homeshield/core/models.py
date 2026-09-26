@@ -71,6 +71,57 @@ class Message(BaseModel):
     created_at: int = Field(default_factory=utcnow)
 
 
+class Turn(BaseModel):
+    """会话中的一轮(重构四)。speaker 为空表示单条消息或未标注发言人。"""
+
+    speaker: str = ""
+    text: str
+
+
+_TURN_MARKED_RE = None  # 延迟编译见 Conversation.from_marked
+
+
+class Conversation(BaseModel):
+    """会话一等公民(重构四):单条消息 = 1 轮;聊天截图转写/多轮样本 = N 轮。"""
+
+    turns: list[Turn]
+
+    @classmethod
+    def single(cls, text: str) -> "Conversation":
+        return cls(turns=[Turn(text=text)])
+
+    @classmethod
+    def from_marked(cls, text: str) -> "Conversation":
+        """解析【第N轮】/【第N轮·发言人】标记;无标记则整体为单轮。"""
+        import re
+
+        pat = re.compile(r"【第(\d+)轮(?:·([^】]+))?】\n?")
+        parts = pat.split(text)
+        if len(parts) == 1:
+            return cls.single(text)
+        turns: list[Turn] = []
+        # parts: [前导, n1, speaker1, text1, n2, speaker2, text2, ...]
+        for i in range(1, len(parts) - 2, 3):
+            turns.append(Turn(speaker=(parts[i + 1] or "").strip(), text=parts[i + 2].strip()))
+        if not turns:
+            return cls.single(text)
+        return cls(turns=turns)
+
+    def render(self) -> str:
+        """渲染为带轮次标记的判定文本(单轮原样返回,不加标记)。"""
+        if len(self.turns) == 1 and not self.turns[0].speaker:
+            return self.turns[0].text
+        lines = []
+        for i, t in enumerate(self.turns, 1):
+            head = f"【第{i}轮】" if not t.speaker else f"【第{i}轮·{t.speaker}】"
+            lines.append(head + t.text)
+        return "\n".join(lines)
+
+    @property
+    def multi(self) -> bool:
+        return len(self.turns) > 1
+
+
 class FeatureType(StrEnum):
     AMOUNT = "amount"
     ACCOUNT = "account"
@@ -92,6 +143,7 @@ class Feature(BaseModel):
     evidence_span: str = ""
     source: str = "rule"  # rule | llm
     confidence: int | None = None  # LLM 补抽的机制置信分(0-10);规则特征为 None
+    turn: int | None = None  # 重构四:特征所在会话轮次(1 起);单轮/全局特征为 None
 
 
 class KbCase(BaseModel):

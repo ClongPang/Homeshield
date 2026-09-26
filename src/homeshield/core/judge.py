@@ -27,6 +27,7 @@ MOCK_WEIGHTS: dict[str, int] = {
     # 机制 id 权重(重构三 LLM 补抽;与 FeatureType 同构语义)
     "isolation": 3, "money": 2, "sensitive": 2, "control": 2, "antiverify": 2,
     "urgency": 1, "identity": 1, "bait": 1, "fear": 1, "emotion": 1, "escape": 1,
+    "escalation": 2,
 }
 
 
@@ -112,13 +113,19 @@ class LLMJudge:
             system += self._ANNOTATION_NOTE
         if inp.graded_semantics:
             system += self._GRADED_SEMANTICS
+        if "\n【第2轮】" in inp.text or inp.text.startswith("【第2轮】"):
+            system += (
+                "消息为多轮会话,按轮次顺序审读;"
+                "前期建立信任、后期出现索取的递进模式是多轮欺诈的典型信号。"
+            )
         payload: dict = {
             "text": inp.text[:2000],
             "features": [f.model_dump() for f in inp.features],
             "cases": [c.model_dump() for c in inp.cases],
         }
         if inp.annotated_text:
-            payload["annotated_text"] = inp.annotated_text[:2400]
+            cap = 3600 if "\n【第2轮】" in inp.text else 2400
+            payload["annotated_text"] = inp.annotated_text[:cap]
         data = await self.llm.chat_json("judge", system, json.dumps(payload, ensure_ascii=False), self._SCHEMA)
         if isinstance(data, list):  # 偶发顶层 list:取首个对象
             data = data[0] if data and isinstance(data[0], dict) else {}

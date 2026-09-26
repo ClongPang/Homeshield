@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import random
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 from homeshield.kbbuild.mapping import map_scam_type
@@ -39,6 +40,11 @@ def _mapped_pool(conn: sqlite3.Connection, lang: str) -> tuple[list[dict], dict[
             continue
         pool.append({"fr_id": r["fr_id"], "text": text, "scam_type": scam_type})
     return pool, unmapped
+
+
+def sample_pool(pool: list[dict], per_class: int, seed: int) -> list[dict]:
+    """按类均衡确定性抽样(export-eval 与 export-conversations 共用,保证案例集一致)。"""
+    return _sample(pool, per_class, seed)
 
 
 def _sample(pool: list[dict], per_class: int, seed: int) -> list[dict]:
@@ -109,6 +115,39 @@ def export_eval(
         "per_class": by_type,
         "unmapped_gap": unmapped,
     }
+
+
+def export_conversations(
+    conn: sqlite3.Connection,
+    out: str | Path,
+    lang: str = "zh",
+    per_class: int = 4,
+    seed: int = 42,
+) -> dict:
+    """导出会话体样本(重构四):每案例 level0~3 各为一轮, Fraud-R1 levelup 同构。"""
+    pool, unmapped = _mapped_pool(conn, lang)
+    picked = _sample(pool, per_class, seed)
+    source = "synthetic:llm:deepseek-r1"
+    conv_rows = []
+    for p_ in picked:
+        levels = conn.execute(
+            "SELECT level, text FROM fr_case WHERE fr_id=? AND lang=? AND level<=3 ORDER BY level",
+            (p_["fr_id"], lang),
+        ).fetchall()
+        turns = [r["text"].strip() for r in levels]
+        conv_rows.append({
+            "id": f"FR1C-{p_['fr_id']:04d}",
+            "text": "\n".join(f"【第{i}轮】{t}" for i, t in enumerate(turns, 1)),
+            "turns": turns,
+            "label": "scam",
+            "scam_type": p_["scam_type"],
+            "source": source,
+            "notes": f"Fraud-R1#{p_['fr_id']} 四轮会话(可信度→紧迫感→情绪操纵渐进)",
+        })
+    _write_jsonl(out, conv_rows)
+    by_type = Counter(c["scam_type"] for c in conv_rows)
+    return {"exported_conversations": len(conv_rows), "per_class": dict(by_type),
+            "unmapped_gap": unmapped}
 
 
 def _write_jsonl(path: str | Path, rows: list[dict]) -> None:

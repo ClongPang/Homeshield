@@ -22,11 +22,16 @@ def _make_runner(deps, member_id: int, family_id: int, config):
     pipeline = make_pipeline(deps, config)
 
     async def run(sample) -> tuple[str, int, int]:
+        content = (
+            "\n".join(f"【第{i}轮】{t}" for i, t in enumerate(sample.turns, 1))
+            if sample.turns
+            else sample.text
+        )
         intake = ingest(
             deps.repos,
             member_id=member_id,
             family_id=family_id,
-            content=sample.text,
+            content=content,
         )
         result = await pipeline.run(intake.message, intake.query_id)
         verdict = result.verdict

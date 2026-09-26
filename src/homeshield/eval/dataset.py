@@ -14,11 +14,12 @@ class Label(StrEnum):
 
 class Sample(BaseModel):
     id: str
-    text: str
+    text: str = ""  # 会话体样本(turns 非空)可为空
     label: Label
     scam_type: str | None = None  # 诈骗类才有,对齐分类学
     source: str  # adapted:<出处> | synthetic:llm:<model> | correction:<版本>
     notes: str = ""
+    turns: list[str] | None = None  # 重构四:会话体样本(轮次文本);None=单条
 
 
 def load_dataset(path: str | Path) -> list[Sample]:

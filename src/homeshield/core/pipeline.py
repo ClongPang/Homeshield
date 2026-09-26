@@ -16,14 +16,22 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
-from homeshield.core.annotate import annotate_text
+from homeshield.core.annotate import FEATURE_MECHANIC, annotate_text
 from homeshield.core.errors import DegradeError
 from homeshield.core.events import EventBus, VerdictCompleted
-from homeshield.core.features import assign_ids, extract_rules, rule_floor, supplement_llm
+from homeshield.core.features import (
+    assign_ids,
+    escalation_feature,
+    extract_rules,
+    rule_floor,
+    supplement_llm,
+)
 from homeshield.core.judge import Judge, judge_with_validation
 from homeshield.core.llm import LLMPort
 from homeshield.core.models import (
+    Conversation,
     Feature,
+    Turn,
     KbCase,
     JudgeInput,
     JudgeOutput,
@@ -40,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 # 判定行为语义版本:凡影响判定输出的变更(词表/提示词/分级语义/检索/模型默认)
 # 必须递增;断点续跑与评测缓存据此失效,防止用旧引擎的分数冒充新引擎。
-PIPELINE_VERSION = "1.0.0"
+PIPELINE_VERSION = "1.1.0"  # 重构四:会话一等公民(升级特征/逐轮标注)
 
 
 @dataclass(frozen=True)
@@ -88,11 +96,12 @@ class PipelineConfig:
 
 @dataclass(frozen=True)
 class Extraction:
-    """阶段 2 产物:特征、检索案例、规则下限。"""
+    """阶段 2 产物:会话、特征、检索案例、规则下限。"""
 
     features: list[Feature]
     cases: list[KbCase]
     rule_floor: Level
+    conversation: Conversation
 
 
 class PipelineResult(BaseModel):
@@ -103,6 +112,31 @@ class PipelineResult(BaseModel):
     latency_ms: int
     rule_floor_level: Level = Level.SAFE
     degraded: bool = False
+
+
+_TRANSCRIBE_HINT = (
+    "转写图片中的对话内容:每条消息单独一行,以发言人加冒号开头"
+    "(如 '对方:' 或 '我:');通知/公告类图片输出为一行,以 '内容:' 开头。"
+)
+_SPEAKER_LINE_RE = __import__("re").compile(r"^(对方|我|内容)\s*[::]\s*(.+)$")
+
+
+def _to_conversation(text: str, content_type: str) -> Conversation:
+    """归一化文本 → 会话(重构四)。
+
+    - 图片转写:按'发言人:'逐行分轮(≥2 行匹配才视为多轮,否则单轮兜底);
+    - 文本:解析【第N轮】标记(评测样本注入会话结构的通道),无标记即单轮。
+    """
+    if content_type == "image":
+        turns = [
+            (m.group(1), m.group(2).strip())
+            for line in text.splitlines()
+            if (m := _SPEAKER_LINE_RE.match(line.strip()))
+        ]
+        if len(turns) >= 2:
+            return Conversation(turns=[Turn(speaker=sp, text=t) for sp, t in turns])
+        return Conversation.single(text)
+    return Conversation.from_marked(text)
 
 
 @dataclass
@@ -121,18 +155,21 @@ class Pipeline:
         t0 = time.monotonic()
         try:
             text = await self._normalize_text(message)
-            extraction = await self._extract(text)
-            verdict = await self._judge(text, extraction)
+            conversation = _to_conversation(text, message.content_type.value)
+            extraction = await self._extract(conversation)
+            verdict = await self._judge(conversation, extraction)
         except DegradeError as de:
             return self._degraded(query_id, de.user_message, t0)
-        return await self._deliver(message, query_id, text, extraction, verdict, t0)
+        return await self._deliver(
+            message, query_id, conversation.render(), extraction, verdict, t0
+        )
 
     # ---- 阶段 1:归一化 ------------------------------------------------
     async def _normalize_text(self, message: Message) -> str:
         if message.content_type.value != "image":
             return message.content
         try:
-            return await self.llm.transcribe_image(message.content, "转写图片中的文字")
+            return await self.llm.transcribe_image(message.content, _TRANSCRIBE_HINT)
         except DegradeError:
             raise
         except Exception as e:  # 网络/格式失败 → 降级
@@ -140,12 +177,20 @@ class Pipeline:
             raise DegradeError("图片看不清,请把内容打成文字发我", f"transcribe failed: {e}") from e
 
     # ---- 阶段 2:特征抽取 + 检索 ----------------------------------------
-    async def _extract(self, text: str) -> Extraction:
-        rule_specs = extract_rules(text)
+    async def _extract(self, conversation: Conversation) -> Extraction:
+        rendered = conversation.render()
+        rule_specs: list[Feature] = []
+        for idx, turn in enumerate(conversation.turns, 1):
+            for spec in extract_rules(turn.text):
+                spec.turn = idx  # 逐轮归属:升级检测与证据定位依赖轮次
+                rule_specs.append(spec)
+        escalation = escalation_feature(rule_specs)
+        if escalation is not None:
+            rule_specs.append(escalation)
         # 检索 query:特征值 + 原文片段——纯特征值在弱特征消息(如仅卡号)下失效
-        retrieval_query = (" ".join(s.value for s in rule_specs) + " " + text[:80]).strip()
+        retrieval_query = (" ".join(s.value for s in rule_specs) + " " + rendered[:80]).strip()
         sup_task = (
-            asyncio.ensure_future(supplement_llm(self.llm, text))
+            asyncio.ensure_future(supplement_llm(self.llm, rendered))
             if self.config.llm_features
             else None
         )
@@ -170,17 +215,20 @@ class Pipeline:
             features=assign_ids(rule_specs + sup),
             cases=cases,
             rule_floor=rule_floor(rule_specs),
+            conversation=conversation,
         )
 
     # ---- 阶段 3:判定 ----------------------------------------------------
-    async def _judge(self, text: str, extraction: Extraction) -> JudgeOutput:
+    async def _judge(self, conversation: Conversation, extraction: Extraction) -> JudgeOutput:
+        rendered = conversation.render()
+        cap = 4000 if conversation.multi else 2000
         annotated = (
-            annotate_text(text, extraction.features)
+            annotate_text(rendered, extraction.features)
             if self.config.inline_annotation
             else None
         )
         inp = JudgeInput(
-            text=text[:2000],
+            text=rendered[:cap],
             features=extraction.features,
             cases=extraction.cases,
             annotated_text=annotated,

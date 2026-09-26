@@ -36,6 +36,7 @@ class FeatureSpec(BaseModel):
     evidence_span: str = ""
     source: str = "rule"
     confidence: int = 5  # 机制置信分(0-10);规则特征默认 5
+    turn: int = 0  # 所在会话轮次(1 起);0=单轮/全局
 
 
 def _word_hits(text: str, words: tuple[str, ...], ftype: str) -> list[FeatureSpec]:
@@ -73,6 +74,35 @@ def rule_floor(specs: list[FeatureSpec]) -> Level:
     return Level.SAFE
 
 
+_ASK_MECHANICS = ("money", "sensitive", "control")
+_TRUST_MECHANICS = ("identity", "bait", "fear", "emotion")
+
+
+def escalation_feature(specs: list[FeatureSpec]) -> FeatureSpec | None:
+    """跨轮升级信号(重构四):前轮建立信任、后轮出现索取——多轮欺诈的典型结构。
+
+    仅多轮会话计算(存在 ≥2 个不同轮次);单轮返回 None。
+    机制归属经 annotate.FEATURE_MECHANIC(特征类型→机制)。
+    """
+    from homeshield.core.annotate import FEATURE_MECHANIC
+
+    turns = {s.turn for s in specs if s.turn}
+    if len(turns) < 2:
+        return None
+    ask = [s.turn for s in specs if s.turn and FEATURE_MECHANIC.get(s.type) in _ASK_MECHANICS]
+    trust = [s.turn for s in specs if s.turn and FEATURE_MECHANIC.get(s.type) in _TRUST_MECHANICS]
+    if not ask or not trust:
+        return None
+    t_ask, t_trust = min(ask), min(trust)
+    if t_ask <= t_trust:
+        return None
+    return FeatureSpec(
+        type="escalation", turn=t_ask,
+        value=f"第{t_trust}轮起建立信任铺垫,第{t_ask}轮出现索取(渐进式话术)",
+        evidence_span="", source="rule", confidence=8,
+    )
+
+
 def assign_ids(specs: list[FeatureSpec]) -> list[Feature]:
     return [
         Feature(
@@ -82,6 +112,7 @@ def assign_ids(specs: list[FeatureSpec]) -> list[Feature]:
             evidence_span=s.evidence_span,
             source=s.source,
             confidence=s.confidence,
+            turn=s.turn or None,
         )
         for i, s in enumerate(specs)
     ]

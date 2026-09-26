@@ -13,7 +13,7 @@ from collections import Counter
 from pathlib import Path
 
 from homeshield.kbbuild.db import OFFLINE_DB_PATH, connect, init_schema
-from homeshield.kbbuild.export import export_eval
+from homeshield.kbbuild.export import export_conversations, export_eval
 from homeshield.kbbuild.importer import import_official
 
 _LANG_FILE = {"zh": "Chinese", "en": "English"}
@@ -116,6 +116,15 @@ def _cmd_mechanics_report(args) -> None:
             print(f"  {kw:<8} {n:>4}/{total}{flag}  例:{examples}")
 
 
+def _cmd_export_conversations(args) -> None:
+    conn = connect(args.db)
+    summary = export_conversations(conn, args.out, lang=args.lang,
+                                   per_class=args.per_class, seed=args.seed)
+    print("export-conversations:", json.dumps(
+        {k: v for k, v in summary.items() if k != "unmapped_gap"}, ensure_ascii=False))
+    print("→", args.out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser("kbbuild", description="离线素材库构建工具")
     ap.add_argument("--db", default=OFFLINE_DB_PATH, help="离线库路径")
@@ -133,11 +142,17 @@ def main() -> None:
     p.add_argument("--out-base", default="data/samples/fraud_r1_base.jsonl")
     p.add_argument("--out-levelup", default="data/samples/fraud_r1_levelup.jsonl")
     sub.add_parser("mechanics-report", help="机制卡种子词的语料支撑度报告(卡片评审用)")
+    p = sub.add_parser("export-conversations", help="导出会话体样本(重构四)")
+    p.add_argument("--lang", choices=["zh", "en"], default="zh")
+    p.add_argument("--per-class", type=int, default=4)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--out", default="data/samples/fraud_r1_conversations.jsonl")
 
     args = ap.parse_args()
     {"init-db": _cmd_init_db, "import": _cmd_import,
      "stats": _cmd_stats, "export-eval": _cmd_export_eval,
-     "mechanics-report": _cmd_mechanics_report}[args.cmd](args)
+     "mechanics-report": _cmd_mechanics_report,
+     "export-conversations": _cmd_export_conversations}[args.cmd](args)
 
 
 if __name__ == "__main__":
