@@ -21,9 +21,9 @@ def test_end_to_end_dangerous(deps, family):
     assert result.rule_floor_level is Level.DANGEROUS  # isolation+transfer 共现
     assert validate_reply(result.reply)
     assert "家人" in result.reply  # 非 safe 结论告知长辈:家人已知悉
-    # dangerous → alert 表留痕
+    # dangerous → alert 表留痕,覆盖全体成员(群模型告警面)
     n = deps.conn.execute("SELECT COUNT(*) c FROM alert").fetchone()["c"]
-    assert n == 1
+    assert n == len(deps.repos.member.list_members(fid))
 
 
 def test_image_transcribe_degrade(deps, family):

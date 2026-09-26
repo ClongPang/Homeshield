@@ -28,4 +28,8 @@ class TokenIn(PayloadModel):
 class MemberIn(PayloadModel):
     token: str
     name: str
-    role: str = "elder"  # elder | adult
+
+
+class TrustIn(PayloadModel):
+    token: str
+    trusted: bool

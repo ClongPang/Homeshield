@@ -10,7 +10,6 @@ from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps, make_pipeline
 from homeshield.core.events import VerdictCompleted
 from homeshield.core.intake import ingest
-from homeshield.core.models import Role
 from homeshield.api.wechat import _welcome_wechat
 from homeshield.server import create_app
 
@@ -90,7 +89,7 @@ def test_pipeline_crash_becomes_fallback_reply(deps, family, monkeypatch):
 def test_template_message_carries_console_link(deps, family):
     fid, elder_id, _ = family
     elder = deps.repos.member.get(elder_id)
-    adult = deps.repos.member.get(deps.repos.member.add(fid, "女儿", Role.ADULT, openid="o_adult"))
+    adult = deps.repos.member.get(deps.repos.member.add(fid, "女儿", openid="o_adult"))
     fake = FakeChannel()
     router = deps.alert_router
     router.wechat = fake
@@ -151,7 +150,7 @@ def test_open_command_creates_family_and_admin(tmp_path):
 
     deps = client.app.state.deps
     admin = deps.repos.member.get_by_openid("o_user")
-    assert admin is not None and admin.role is Role.ADULT
+    assert admin is not None and admin.trusted is True
     fam = deps.repos.family.get(admin.family_id)
     assert fam is not None
     assert admin.token in r.text and f"/console?token={admin.token}" in r.text
@@ -171,9 +170,9 @@ def test_bind_command_joins_family(tmp_path):
     client = _client(tmp_path)
     deps = client.app.state.deps
     fid = deps.repos.family.create("测试家庭")
-    adult_id = deps.repos.member.add(fid, "儿子", Role.ADULT)
-    elder_id = deps.repos.member.add(fid, "妈妈", Role.ELDER)
-    code = deps.binding.issue_code(deps.repos.member.get(elder_id), created_by=adult_id)
+    trusted_id = deps.repos.member.add(fid, "儿子", trusted=True)
+    elder_id = deps.repos.member.add(fid, "妈妈")
+    code = deps.binding.issue_code(deps.repos.member.get(elder_id), created_by=trusted_id)
 
     r = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code'].lower()}]]></Content>"))
     assert "绑定成功" in r.text and "测试家庭" in r.text and "妈妈" in r.text  # 家庭名+成员名
@@ -206,7 +205,7 @@ def test_bound_member_text_still_ack_and_judged(tmp_path):
     client = _client(tmp_path)
     deps = client.app.state.deps
     fid = deps.repos.family.create("测试家庭")
-    deps.repos.member.add(fid, "妈妈", Role.ELDER, openid="o_user")
+    deps.repos.member.add(fid, "妈妈", openid="o_user")
 
     r = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[这是骗子吗]]></Content>"))
     assert messages.RECEIVED_ACK in r.text

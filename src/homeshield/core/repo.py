@@ -15,7 +15,6 @@ from homeshield.core.models import (
     Level,
     Member,
     Mode,
-    Role,
     utcnow,
 )
 
@@ -31,16 +30,16 @@ class FamilyRepo:
             )
         return int(cur.lastrowid)
 
-    def create_with_admin(self, name: str, admin_name: str, openid: str) -> int:
-        """开家 + 管理员成员位同一事务:中途失败不留孤儿家庭(占 MAX_FAMILIES 名额)。"""
+    def create_with_creator(self, name: str, creator_name: str, openid: str) -> int:
+        """开群 + 创建者成员位(trusted)同一事务:中途失败不留孤儿家庭(占 MAX_FAMILIES 名额)。"""
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO family(name, created_at) VALUES(?,?)", (name, utcnow())
             )
             fid = int(cur.lastrowid)
             self.conn.execute(
-                "INSERT INTO member(family_id,name,role,openid,token,created_at) VALUES(?,?,?,?,?,?)",
-                (fid, admin_name, Role.ADULT.value, openid, _new_member_token(), utcnow()),
+                "INSERT INTO member(family_id,name,trusted,openid,token,created_at) VALUES(?,?,?,?,?,?)",
+                (fid, creator_name, 1, openid, _new_member_token(), utcnow()),
             )
         return fid
 
@@ -64,13 +63,13 @@ class MemberRepo:
         self.conn = conn
 
     def add(
-        self, family_id: int, name: str, role: Role, openid: str | None = None
+        self, family_id: int, name: str, trusted: bool = False, openid: str | None = None
     ) -> int:
         token = _new_member_token()
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO member(family_id,name,role,openid,token,created_at) VALUES(?,?,?,?,?,?)",
-                (family_id, name, role.value, openid, token, utcnow()),
+                "INSERT INTO member(family_id,name,trusted,openid,token,created_at) VALUES(?,?,?,?,?,?)",
+                (family_id, name, int(trusted), openid, token, utcnow()),
             )
         return int(cur.lastrowid)
 
@@ -79,7 +78,7 @@ class MemberRepo:
             id=row["id"],
             family_id=row["family_id"],
             name=row["name"],
-            role=Role(row["role"]),
+            trusted=bool(row["trusted"]),
             openid=row["openid"],
             token=row["token"],
         )
@@ -118,11 +117,25 @@ class MemberRepo:
         ).fetchall()
         return [self._row_to_member(r) for r in rows]
 
-    def list_adults(self, family_id: int) -> list[Member]:
-        rows = self.conn.execute(
-            "SELECT * FROM member WHERE family_id=? AND role='adult'", (family_id,)
-        ).fetchall()
-        return [self._row_to_member(r) for r in rows]
+    def set_trust(self, member_id: int, trusted: bool) -> None:
+        """信任位翻转(仅信任成员可操作,校验在服务层)。"""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE member SET trusted=? WHERE id=?", (int(trusted), member_id)
+            )
+
+    def demote_with_guard(self, member_id: int, family_id: int) -> bool:
+        """降级信任位,带群内不变式"至少保留一名其他信任成员";条件更新保证并发下原子。
+
+        返回 False 表示被护栏拦下(目标已是普通成员,或这是群内最后一名信任成员)。
+        """
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE member SET trusted=0 WHERE id=? AND family_id=? AND trusted=1"
+                " AND (SELECT COUNT(*) FROM member WHERE family_id=? AND trusted=1 AND id<>?) >= 1",
+                (member_id, family_id, family_id, member_id),
+            )
+        return cur.rowcount > 0
 
 
 class QueryRepo:

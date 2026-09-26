@@ -1,8 +1,7 @@
 """绑定域:自助开通、邀请码绑定、一次性/时限与护栏。"""
 import pytest
 
-from homeshield.core.binding import ADMIN_NAME, OPEN_FAMILY_NAME, BindingError, BindingService
-from homeshield.core.models import Role
+from homeshield.core.binding import CREATOR_NAME, OPEN_FAMILY_NAME, BindingError, BindingService
 
 
 @pytest.fixture()
@@ -16,21 +15,21 @@ def service(deps):
     )
 
 
-def test_open_family_creates_admin(service, deps):
-    admin = service.open_family("o_a")
-    assert admin.role is Role.ADULT and admin.name == ADMIN_NAME
-    assert admin.openid == "o_a" and admin.token
-    fam = deps.repos.family.get(admin.family_id)
+def test_open_family_creates_trusted_creator(service, deps):
+    creator = service.open_family("o_a")
+    assert creator.trusted is True and creator.name == CREATOR_NAME
+    assert creator.openid == "o_a" and creator.token
+    fam = deps.repos.family.get(creator.family_id)
     assert fam["name"] == OPEN_FAMILY_NAME
 
 
 def test_create_with_admin_single_transaction(deps):
     """建家与管理员同一事务:成员 openid 唯一冲突时不留孤儿家庭。"""
-    deps.repos.family.create_with_admin("家A", "管理员", "o_z")
+    deps.repos.family.create_with_creator("家A", "群主", "o_z")
     import sqlite3
 
     with pytest.raises(sqlite3.IntegrityError):
-        deps.repos.family.create_with_admin("家B", "管理员", "o_z")  # openid 冲突
+        deps.repos.family.create_with_creator("家B", "群主", "o_z")  # openid 冲突
     assert deps.repos.family.count() == 1  # 家B 未落库
 
 
@@ -114,7 +113,7 @@ def test_bind_to_bound_member_keeps_code_unconsumed(service, deps, family):
 def test_bind_openid_taken_maps_to_already_bound(service, deps, family):
     """openid 已属别的成员:换绑被拒,映射为 already_bound。"""
     fid, elder_id, adult_id = family
-    deps.repos.member.add(fid, "别人", Role.ELDER, openid="o_taken")
+    deps.repos.member.add(fid, "别人", openid="o_taken")
     code = service.issue_code(deps.repos.member.get(elder_id), created_by=adult_id)
     with pytest.raises(BindingError) as e:
         service.bind("o_taken", code["code"])
@@ -131,7 +130,7 @@ def test_bind_code_case_insensitive(service, deps, family):
 def test_ensure_member_capacity(service, deps, family):
     fid, _, _ = family
     for i in range(deps.settings.max_members):
-        deps.repos.member.add(fid, f"m{i}", Role.ELDER)
+        deps.repos.member.add(fid, f"m{i}")
     with pytest.raises(BindingError) as e:
         service.ensure_member_capacity(fid)
     assert e.value.reason == "limit"

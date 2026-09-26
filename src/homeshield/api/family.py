@@ -1,19 +1,20 @@
 """家人 API 路由:token 鉴权 + 家庭数据读写。
 
 凭证 = 不可枚举 token(链接即凭证);无/错 token 一律 401,接口不回传 token。
-所有数据按 member.family_id 隔离(告警跨家庭 404,纠正跨家庭 400);成员管理仅 adult。
+所有数据按 member.family_id 隔离(告警跨家庭 404,纠正跨家庭 400);
+成员管理与纠正确认仅信任成员(trusted)。
 """
 import json
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from homeshield.api.schemas import CorrectionIn, DecideIn, MemberIn, QueryIn, TokenIn
+from homeshield.api.schemas import CorrectionIn, DecideIn, MemberIn, QueryIn, TokenIn, TrustIn
 from homeshield.core.binding import BindingError
 from homeshield.core.deps import Deps
 from homeshield.core.errors import DuplicateMessage, HomeshieldError
 from homeshield.core.feedback import CorrectionService, weekly_report
-from homeshield.core.models import CorrectionLabel, Member, Role
+from homeshield.core.models import CorrectionLabel, Member
 from homeshield.core.verification import VerificationService
 
 
@@ -110,7 +111,7 @@ def build_family_router(
     def api_corrections_list(token: str = Query("")):
         member = member_by_token(token)
         rows = deps.repos.correction.list_pending_with_context(member.family_id)
-        return {"pending": rows}
+        return {"viewer_trusted": member.trusted, "pending": rows}
 
     @router.post("/api/corrections")
     def api_corrections(body: CorrectionIn):
@@ -136,27 +137,25 @@ def build_family_router(
     def api_members(token: str = Query("")):
         member = member_by_token(token)
         return {
+            "viewer_id": member.id,
+            "viewer_trusted": member.trusted,
             "members": [
                 {
                     "id": m.id,
                     "name": m.name,
-                    "role": m.role.value,
+                    "trusted": m.trusted,
                     "bound": m.openid is not None,
                 }
                 for m in deps.repos.member.list_members(member.family_id)
-            ]
+            ],
         }
 
     @router.post("/api/members")
     def api_add_member(body: MemberIn):
-        """创建成员位并签发绑定码;仅 adult 管理员,成员数封顶。"""
+        """创建成员位并签发绑定码;仅信任成员,成员数封顶。新位默认不受信任。"""
         member = member_by_token(body.token)
-        if member.role is not Role.ADULT:
-            raise HTTPException(403, "only adult can manage members")
-        try:
-            target_role = Role(body.role)
-        except ValueError:
-            raise HTTPException(400, "role must be elder or adult")
+        if not member.trusted:
+            raise HTTPException(403, "only trusted member can manage members")
         try:
             deps.binding.ensure_member_capacity(member.family_id)
         except BindingError:
@@ -164,14 +163,12 @@ def build_family_router(
         name = body.name.strip()
         if not name:
             raise HTTPException(400, "name is empty")
-        target = deps.repos.member.get(
-            deps.repos.member.add(member.family_id, name, target_role)
-        )
+        target = deps.repos.member.get(deps.repos.member.add(member.family_id, name))
         code = deps.binding.issue_code(target, created_by=member.id)
         return {
             "member_id": target.id,
             "name": target.name,
-            "role": target.role.value,
+            "trusted": target.trusted,
             "bind_code": code["code"],
             "bind_expires_at": code["expires_at"],
             "entry_url": target.entry_url(deps.settings.public_base_url) or None,
@@ -179,10 +176,10 @@ def build_family_router(
 
     @router.post("/api/members/{member_id}/bind-code")
     def api_reissue_bind_code(member_id: int, body: TokenIn):
-        """重发绑定码(作废旧码);管理员给自己重发即是本人微信绑定入口。"""
+        """重发绑定码(作废旧码);给自己重发即是本人微信绑定入口。"""
         member = member_by_token(body.token)
-        if member.role is not Role.ADULT:
-            raise HTTPException(403, "only adult can manage members")
+        if not member.trusted:
+            raise HTTPException(403, "only trusted member can manage members")
         target = deps.repos.member.get(member_id)
         if target is None or target.family_id != member.family_id:
             raise HTTPException(404, "member not found")
@@ -191,6 +188,24 @@ def build_family_router(
         except BindingError as e:
             raise HTTPException(400, e.reason)
         return {"bind_code": code["code"], "bind_expires_at": code["expires_at"]}
+
+    @router.post("/api/members/{member_id}/trust")
+    def api_set_trust(member_id: int, body: TrustIn):
+        """纠正信任位翻转;仅信任成员可操作,且不能改自己(防止最后一个可管理者自我降级)。"""
+        member = member_by_token(body.token)
+        if not member.trusted:
+            raise HTTPException(403, "only trusted member can manage members")
+        target = deps.repos.member.get(member_id)
+        if target is None or target.family_id != member.family_id:
+            raise HTTPException(404, "member not found")
+        if target.id == member.id:
+            raise HTTPException(400, "cannot change own trust")
+        if body.trusted or not target.trusted:
+            deps.repos.member.set_trust(target.id, body.trusted)
+        elif not deps.repos.member.demote_with_guard(target.id, member.family_id):
+            # 并发互降窗口在此关闭:条件更新保证全群永远保留一名信任成员
+            raise HTTPException(400, "cannot demote the last trusted member")
+        return {"member_id": target.id, "trusted": body.trusted}
 
     @router.get("/api/weekly")
     def api_weekly(token: str = Query("")):

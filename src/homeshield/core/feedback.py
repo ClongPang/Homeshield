@@ -6,7 +6,6 @@ from homeshield.core.errors import ValidationError
 from homeshield.core.models import (
     CorrectionLabel,
     CorrectionStatus,
-    Role,
     utcnow,
 )
 from homeshield.core.repo import Repos
@@ -39,10 +38,10 @@ class CorrectionService:
             raise ValidationError("verdict not found")
         if verdict["family_id"] != member.family_id:
             raise ValidationError("verdict not in your family")
-        # adult 直接生效;elder 进入 pending 等确认
+        # 信任成员纠正直接生效;普通成员进入 pending 等信任成员确认(数据质量防火墙)
         status = (
             CorrectionStatus.CONFIRMED
-            if member.role is Role.ADULT
+            if member.trusted
             else CorrectionStatus.PENDING
         )
         cid = self.repos.correction.insert(verdict_id, by_member_id, label, note, status)
@@ -50,8 +49,8 @@ class CorrectionService:
 
     def decide(self, correction_id: int, decided_by: int, decision: str) -> CorrectionStatus:
         decider = self.repos.member.get(decided_by)
-        if decider is None or decider.role is not Role.ADULT:
-            raise ValidationError("only adult can decide")
+        if decider is None or not decider.trusted:
+            raise ValidationError("only trusted member can decide")
         owned = self.repos.correction.get_with_family(correction_id)
         if owned is None:
             raise ValidationError("correction not found")

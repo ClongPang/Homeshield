@@ -11,7 +11,6 @@ from collections import Counter
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps, make_pipeline
 from homeshield.core.intake import ingest
-from homeshield.core.models import Role
 from homeshield.eval.ablation import run_matrix
 from homeshield.eval.dataset import load_dataset
 from homeshield.eval.metrics import threshold_sweep
@@ -63,7 +62,7 @@ def main() -> None:
     profile = Counter(s.source.split(":", 1)[0] for s in samples)
     deps = build_deps(settings)
     fid = deps.repos.family.create("eval")
-    mid = deps.repos.member.add(fid, "evaler", Role.ELDER)
+    mid = deps.repos.member.add(fid, "evaler")
 
     names = [c.strip() for c in args.configs.split(",")] if args.configs else None
     if args.checkpoint:

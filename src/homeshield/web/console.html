@@ -23,29 +23,24 @@
 <div class="wrap" id="app">
   <h1>家中盾 · 控制台</h1>
   <div class="card" id="weekly"></div>
-  <h2>家庭成员</h2>
+  <h2>防护群成员</h2>
   <div id="family"><div class="card muted">加载中…</div></div>
   <div class="card" id="codeBox" style="display:none"></div>
-  <div class="card">
+  <div class="card" id="addBox" style="display:none">
     <div>添加家人</div>
     <div style="margin-top:6px">
       <input id="newName" placeholder="称呼,如:妈妈" maxlength="20" />
-      <select id="newRole">
-        <option value="elder">长辈</option>
-        <option value="adult">子女(管理员)</option>
-      </select>
       <button onclick="addMember()">生成邀请码</button>
     </div>
     <div class="muted">生成后把「绑定 邀请码」发给家人:请 ta 关注公众号后回复即可加入。</div>
   </div>
-  <h2>待你确认的纠正</h2>
+  <h2>待确认的纠正</h2>
   <div id="queue"></div>
   <h2>高危告警</h2>
   <div id="alerts"><div class="card muted">暂无告警,等待推送…</div></div>
 </div>
 <script>
 const token = new URLSearchParams(location.search).get("token") || "";
-const role_name = (r) => (r === "adult" ? "子女" : "长辈");
 const label_name = (l) => (l === "false_positive" ? "说是误报" : "说是真骗局");
 
 function showFatal(text) {
@@ -71,21 +66,42 @@ function loadFamily() {
   api("/api/members").then(d => {
     const box = document.getElementById("family");
     box.innerHTML = "";
+    document.getElementById("addBox").style.display = d.viewer_trusted ? "" : "none";
     for (const m of d.members) {
       const div = document.createElement("div");
       div.className = "card";
       const title = document.createElement("div");
-      title.textContent = `${m.name}(${role_name(m.role)}) · ${m.bound ? "已绑定微信" : "未绑定"}`;
+      title.textContent = `${m.name}${m.id === d.viewer_id ? "(我)" : ""} · ${m.bound ? "已绑定微信" : "未绑定"}` +
+        (m.trusted ? " · 可确认纠正" : "");
       div.append(title);
-      if (!m.bound) {
+      if (d.viewer_trusted && !m.bound) {
         const b = document.createElement("button");
         b.textContent = "生成邀请码";
         b.onclick = () => reissue(m.id);
         div.append(b);
       }
+      // 信任位按钮:不能操作自己(接口同样拒绝,防最后一个可管理者消失)
+      if (d.viewer_trusted && m.id !== d.viewer_id) {
+        if (m.trusted) {
+          const t = document.createElement("button");
+          t.textContent = "收回纠正信任";
+          t.style.background = "#57606a";
+          t.onclick = () => setTrust(m.id, false);
+          div.append(t);
+        } else {
+          const t = document.createElement("button");
+          t.textContent = "设为可确认纠正";
+          t.onclick = () => setTrust(m.id, true);
+          div.append(t);
+        }
+      }
       box.append(div);
     }
   }).catch(() => {});
+}
+
+function setTrust(memberId, trusted) {
+  post(`/api/members/${memberId}/trust`, { trusted }).then(() => loadFamily());
 }
 
 // 创建/重发邀请码共用展示:码只在此处可见,接口不回传 token
@@ -117,11 +133,10 @@ function showCode(d) {
 
 function addMember() {
   const name = document.getElementById("newName").value.trim();
-  const role = document.getElementById("newRole").value;
   if (!name) return;
-  post("/api/members", { name, role }).then(async r => {
+  post("/api/members", { name }).then(async r => {
     if (r.status === 401) { showFatal("链接已失效,请让家人重新发一条链接"); throw new Error("unauthorized"); }
-    if (r.status === 403) { showFatal("只有子女(管理员)可以管理家庭成员"); throw new Error("forbidden"); }
+    if (r.status === 403) { showFatal("只有可确认纠正的成员可以管理家庭成员"); throw new Error("forbidden"); }
     if (!r.ok) { showCodeText("创建失败:" + ((await r.json().catch(() => ({}))).detail || "请稍后再试")); return; }
     showCode(await r.json());
     document.getElementById("newName").value = "";
@@ -164,14 +179,21 @@ function loadQueue() {
       div.innerHTML = `<div>${item.by_name} ${label_name(item.label)}:</div>` +
         `<div>${item.content}</div>` +
         (item.note ? `<div class="meta">留言:${item.note}</div>` : "");
-      const ok = document.createElement("button");
-      ok.textContent = "同意";
-      ok.onclick = () => decide(item.id, "confirm");
-      const no = document.createElement("button");
-      no.textContent = "驳回";
-      no.style.background = "#57606a";
-      no.onclick = () => decide(item.id, "reject");
-      div.append(ok, no);
+      if (d.viewer_trusted) {
+        const ok = document.createElement("button");
+        ok.textContent = "同意";
+        ok.onclick = () => decide(item.id, "confirm");
+        const no = document.createElement("button");
+        no.textContent = "驳回";
+        no.style.background = "#57606a";
+        no.onclick = () => decide(item.id, "reject");
+        div.append(ok, no);
+      } else {
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = "等待信任成员确认";
+        div.append(meta);
+      }
       box.append(div);
     }
   }).catch(() => {});

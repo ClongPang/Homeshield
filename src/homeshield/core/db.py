@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS member(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     family_id INTEGER NOT NULL REFERENCES family(id),
     name TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('elder','adult')),
+    trusted INTEGER NOT NULL DEFAULT 0,   -- 纠正信任位:1=纠正即时生效+可管理成员;0=纠正需信任成员确认
     openid TEXT UNIQUE,                -- 微信零注册映射
     token TEXT UNIQUE,                 -- 个人链接凭证
     created_at INTEGER NOT NULL

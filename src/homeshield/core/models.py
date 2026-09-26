@@ -19,11 +19,6 @@ class ContentType(StrEnum):
     IMAGE = "image"
 
 
-class Role(StrEnum):
-    ELDER = "elder" # 表示长辈
-    ADULT = "adult" # 表示子女
-
-
 class Level(StrEnum):
     SAFE = "safe"
     SUSPICIOUS = "suspicious"
@@ -175,25 +170,25 @@ class JudgeOutput(BaseModel):
 
 
 class Member(BaseModel):
+    """群成员。trusted 是唯一的成员内差异:纠正即时生效 + 可管理成员;
+    它是数据质量防火墙,不是身份层级——由信任成员管理,与年龄无关。"""
+
     id: int
     family_id: int
     name: str
-    role: Role
+    trusted: bool = False
     openid: str | None = None
     token: str | None = None  # 个人链接凭证,仅部署者经 CLI 分发,不出现在家人可见接口
 
     def entry_url(self, base_url: str) -> str:
-        """个人网页入口(链接即凭证):adult→控制台,elder→兜底聊天页。
+        """个人网页入口(链接即凭证):全员控制台(告警/周报/纠正队列)。
 
         server 告警深链/成员位创建与 cli link 共用此唯一拼接处;
         未配对外地址返回空串。
         """
         if not base_url or not self.token:
             return ""
-        base = base_url.rstrip("/")
-        if self.role is Role.ADULT:
-            return f"{base}/console?token={self.token}"
-        return f"{base}/?token={self.token}"
+        return f"{base_url.rstrip('/')}/console?token={self.token}"
 
 
 class CorrectionRecord(BaseModel):

@@ -17,20 +17,20 @@ def _make_verdict(deps, family):
     return asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id)).verdict_id
 
 
-def test_elder_pending_adult_confirm(deps, family):
-    fid, elder, adult = family
+def test_untrusted_pending_trusted_confirm(deps, family):
+    fid, untrusted, trusted = family
     vid = _make_verdict(deps, family)
     svc = CorrectionService(deps.repos)
-    cid, status = svc.submit(vid, elder, CorrectionLabel.REAL, note="这是真的骗局")
+    cid, status = svc.submit(vid, untrusted, CorrectionLabel.REAL, note="这是真的骗局")
     assert status is CorrectionStatus.PENDING
     with pytest.raises(ValidationError):
-        svc.decide(cid, elder, "confirm")  # elder 不能决定
-    assert svc.decide(cid, adult, "confirm") is CorrectionStatus.CONFIRMED
+        svc.decide(cid, untrusted, "confirm")  # 未受信任不能决定
+    assert svc.decide(cid, trusted, "confirm") is CorrectionStatus.CONFIRMED
     with pytest.raises(ValidationError):
-        svc.decide(cid, adult, "reject")  # confirmed 后非法转移
+        svc.decide(cid, trusted, "reject")  # confirmed 后非法转移
 
 
-def test_adult_submit_directly_confirmed(deps, family):
+def test_trusted_submit_directly_confirmed(deps, family):
     fid, elder, adult = family
     vid = _make_verdict(deps, family)
     _, status = CorrectionService(deps.repos).submit(vid, adult, CorrectionLabel.FALSE_POSITIVE)

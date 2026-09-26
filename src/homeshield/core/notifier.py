@@ -1,7 +1,8 @@
 """告警送达:管线发布事实,本模块订阅并执行送达策略。
 
-- AlertBroker:每家庭一个订阅队列,控制台 SSE 消费;
-- AlertRouter:async handler,仅 dangerous 触发:写 alert 表、SSE 广播,模板消息后台化;
+- AlertBroker:每群一个订阅队列,控制台 SSE 消费;
+- AlertRouter:async handler,仅 dangerous 触发:全体成员落 alert 表、SSE 广播,
+  模板消息推给已绑定微信的成员(后台化);
 - 模板消息经 TemplateSender 端口发送,微信适配器由组合根注入。
 """
 import asyncio
@@ -56,8 +57,8 @@ class AlertRouter:
     async def __call__(self, event: VerdictCompleted) -> None:
         if event.verdict.level is not Level.DANGEROUS:
             return  # suspicious 只进周报
-        adults = self.repos.member.list_adults(event.message.family_id)
-        for m in adults:
+        members = self.repos.member.list_members(event.message.family_id)
+        for m in members:
             self.repos.alert.insert(event.verdict_id, m.id)
         payload = {
             "verdict_id": event.verdict_id,
@@ -66,12 +67,12 @@ class AlertRouter:
             "reply": event.reply,
         }
         self.broker.publish(event.message.family_id, payload)
-        self._spawn_wechat(adults, payload)
+        self._spawn_wechat(members, payload)
 
-    def _spawn_wechat(self, adults, payload: dict) -> None:
+    def _spawn_wechat(self, members, payload: dict) -> None:
         if self.wechat is None:
             return
-        openids = [m.openid for m in adults if m.openid]
+        openids = [m.openid for m in members if m.openid]
         if not openids:
             return
         task = asyncio.create_task(self._notify(openids, payload))

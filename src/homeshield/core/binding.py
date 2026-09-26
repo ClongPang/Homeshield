@@ -1,11 +1,11 @@
-"""绑定域:公众号多租户的入家流程。
+"""绑定域:公众号多租户的入群流程。
 
-自助开通:陌生 openid 发「开通」→ 建家庭 + 管理员(adult)成员位,openid 直落;
-邀请绑定:管理员在控制台为家人创建成员位并生成绑定码,家人回复「绑定 <码>」
-把 openid 落到对应成员位。成员位的网页 token 链接通道不受影响。
+自助开通:陌生 openid 发「开通」→ 建群 + 创建者(trusted)成员位,openid 直落;
+邀请绑定:信任成员在控制台为家人创建成员位并生成绑定码,家人回复「绑定 <码>」
+把 openid 落到对应成员位(默认不受信任,纠正需确认)。成员位的网页 token 链接通道不受影响。
 
-滥用边界由配置封顶:MAX_FAMILIES(全局家庭数)× MAX_MEMBERS(每家成员数);
-一人一家由 member.openid UNIQUE 天然保证。
+滥用边界由配置封顶:MAX_FAMILIES(全局群数)× MAX_MEMBERS(每群成员数);
+一人一群由 member.openid UNIQUE 天然保证。
 """
 from dataclasses import dataclass
 import re
@@ -14,8 +14,8 @@ from homeshield.core.errors import HomeshieldError, ValidationError
 from homeshield.core.models import Member
 from homeshield.core.repo import Repos
 
-OPEN_FAMILY_NAME = "我的家庭"
-ADMIN_NAME = "管理员"
+OPEN_FAMILY_NAME = "我的防护群"
+CREATOR_NAME = "群主"
 
 # 「绑定 <码>」命令文法:大小写不敏感,容忍空格/冒号;认领时统一归一为大写
 _BIND_RE = re.compile(r"^(?:绑定|綁定)\s*[::]?\s*([0-9A-Za-z]{4,16})$")
@@ -46,12 +46,12 @@ class BindingService:
         self.code_ttl_days = code_ttl_days
 
     def open_family(self, openid: str) -> Member:
-        """自助开通:一个 openid 只能开一次;家庭总数封顶护栏;建家+管理员单事务。"""
+        """自助开通:一个 openid 只能开一次;群总数封顶护栏;建群+创建者单事务。"""
         if self.repos.member.get_by_openid(openid) is not None:
             raise BindingError("already_bound")
         if self.repos.family.count() >= self.max_families:
             raise BindingError("limit")
-        fid = self.repos.family.create_with_admin(OPEN_FAMILY_NAME, ADMIN_NAME, openid)
+        fid = self.repos.family.create_with_creator(OPEN_FAMILY_NAME, CREATOR_NAME, openid)
         return self.repos.member.get_by_openid(openid)
 
     def issue_code(self, target: Member, created_by: int) -> dict:

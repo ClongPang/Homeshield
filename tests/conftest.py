@@ -3,8 +3,6 @@ import pytest
 
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps
-from homeshield.core.models import Role
-
 
 @pytest.fixture()
 def settings(tmp_path) -> Settings:
@@ -18,8 +16,8 @@ def deps(settings):
 
 @pytest.fixture()
 def family(deps):
-    """(family_id, elder_id, adult_id)"""
+    """(family_id, untrusted_id, trusted_id)——纠正信任位的两端各一。"""
     fid = deps.repos.family.create("测试家庭")
-    elder = deps.repos.member.add(fid, "妈妈", Role.ELDER)
-    adult = deps.repos.member.add(fid, "儿子", Role.ADULT)
-    return fid, elder, adult
+    untrusted = deps.repos.member.add(fid, "妈妈")
+    trusted = deps.repos.member.add(fid, "儿子", trusted=True)
+    return fid, untrusted, trusted
