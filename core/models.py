@@ -87,10 +87,11 @@ class Feature(BaseModel):
     """特征结构;不可变,id 在单次查询内分配。"""
 
     id: str  # F01、F02…(每次 query 内分配)
-    type: str  # FeatureType 或 LLM 补抽的新类型
+    type: str  # FeatureType / 机制 id(重构三 LLM 补抽)
     value: str
     evidence_span: str = ""
     source: str = "rule"  # rule | llm
+    confidence: int | None = None  # LLM 补抽的机制置信分(0-10);规则特征为 None
 
 
 class KbCase(BaseModel):
@@ -108,6 +109,8 @@ class JudgeInput(BaseModel):
     text: str
     features: list[Feature]
     cases: list[KbCase]
+    annotated_text: str | None = None  # 重构二:机制内联标注后的原文(None=关闭)
+    graded_semantics: bool = False  # 重构五:分级语义注入判定提示(证伪通过前默认关)
 
 
 class JudgeOutput(BaseModel):
@@ -126,18 +129,6 @@ class Member(BaseModel):
     role: Role
     openid: str | None = None
     token: str | None = None  # 个人链接凭证,仅部署者经 CLI 分发,不出现在家人可见接口
-
-
-class VerdictRecord(BaseModel):
-    id: int
-    query_id: int
-    level: Level
-    cited_ids: list[str]
-    reason: str
-    reply: str
-    latency_ms: int
-    mode: Mode
-    created_at: int
 
 
 class CorrectionRecord(BaseModel):

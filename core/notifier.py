@@ -84,7 +84,7 @@ class AlertRouter:
                 url = None
                 member = self.repos.member.get_by_openid(openid)
                 if self.base_url and member is not None and member.token:
-                    url = f"{self.base_url}/console?token={member.token}"
+                    url = f"{self.base_url}/alert/{payload['verdict_id']}?token={member.token}"
                 await self.wechat.send_template(
                     openid,
                     {"thing1": {"value": payload["summary"][:20]}, "phrase1": {"value": "高危预警"}},

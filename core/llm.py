@@ -8,10 +8,13 @@ transcribe(未配置回落 chat),embed 走 embed。
 import hashlib
 import json
 import math
+import re
 from typing import Any, Protocol
 
 from core.config import Provider, Settings
 from core.errors import DegradeError
+
+_EMBED_BATCH = 20  # 部分供应商(如 DashScope)单批上限 25,留余量
 
 
 class LLMPort(Protocol):
@@ -30,14 +33,28 @@ def _hash_vec(text: str, dim: int = 64) -> list[float]:
     return [x / norm for x in v]
 
 
+def _loads_json(text: str) -> dict:
+    """解析模型 JSON,容忍 ```json 围栏与前后杂文。"""
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", t)
+    start, end = t.find("{"), t.rfind("}")
+    if start != -1 and end != -1:
+        t = t[start : end + 1]
+    try:
+        return json.loads(t)
+    except json.JSONDecodeError:
+        return {}
+
+
 class MockLLM:
     """确定性实现:不联网,行为可断言。"""
 
     async def chat_json(self, task: str, system: str, user: str, schema: dict) -> dict[str, Any]:
         if task == "features":
             feats = [
-                {"type": t, "value": kw, "evidence_span": kw}
-                for kw, t in (("退款", "semantic"), ("保证金", "fee"), ("安全账户", "identity_claim"))
+                {"mechanic": m, "value": kw, "evidence_span": kw, "confidence": c}
+                for kw, m, c in (("退款", "bait", 5), ("保证金", "money", 9), ("安全账户", "identity", 8))
                 if kw in user
             ]
             return {"features": feats}
@@ -92,6 +109,8 @@ class OpenAICompatLLM:
             self._clients[provider.name] = AsyncOpenAI(
                 api_key=provider.api_key,
                 base_url=provider.base_url or None,
+                timeout=60.0,  # 单请求上限:供应商侧挂起时快速失败走降级,不再默认等 10 分钟
+                max_retries=1,
             )
         return self._clients[provider.name], provider.model
 
@@ -105,7 +124,7 @@ class OpenAICompatLLM:
             ],
             response_format={"type": "json_object"},
         )
-        return json.loads(resp.choices[0].message.content or "{}")
+        return _loads_json(resp.choices[0].message.content or "{}")
 
     async def chat_text(self, task: str, system: str, user: str) -> str:
         client, model = self._client(self.endpoint_for(task))
@@ -120,8 +139,12 @@ class OpenAICompatLLM:
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         client, model = self._client(self.endpoint_for("embed"))
-        resp = await client.embeddings.create(model=model, input=texts)
-        return [d.embedding for d in resp.data]
+        out: list[list[float]] = []
+        for i in range(0, len(texts), _EMBED_BATCH):  # 部分供应商单批限 25,分批兜底
+            batch = texts[i : i + _EMBED_BATCH] or texts
+            resp = await client.embeddings.create(model=model, input=batch)
+            out.extend(d.embedding for d in resp.data)
+        return out
 
     async def transcribe_image(self, image_b64: str, hint: str) -> str:
         client, model = self._client(self.endpoint_for("transcribe"))

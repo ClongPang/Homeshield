@@ -117,3 +117,112 @@ def test_409_duplicate_msg_id(client, family):
 def test_static_views(client):
     assert client.get("/").status_code == 200
     assert client.get("/console").status_code == 200
+
+
+def test_alert_detail_feedback_and_scoping(client, family):
+    elder, adult = family
+    data = client.post(
+        "/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"}
+    ).json()
+    vid = data["verdict_id"]
+
+    d = client.get(f"/api/alerts/{vid}", params={"token": adult.token}).json()
+    assert d["level"] == "dangerous" and d["reply"].startswith("【结论】")
+    assert d["my_feedback"] is None
+
+    client.post("/api/corrections", json={"token": adult.token, "verdict_id": vid, "label": "real"})
+    d2 = client.get(f"/api/alerts/{vid}", params={"token": adult.token}).json()
+    assert d2["my_feedback"]["label"] == "real"
+    assert d2["my_feedback"]["status"] == "confirmed"
+
+    # 别的家庭看不到这条告警
+    deps = client.app.state.deps
+    other_fid = deps.repos.family.create("别家")
+    other = deps.repos.member.get(deps.repos.member.add(other_fid, "外人", Role.ADULT))
+    assert client.get(f"/api/alerts/{vid}", params={"token": other.token}).status_code == 404
+
+
+def test_alert_history_listing(client, family):
+    elder, adult = family
+    client.post("/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"})
+    history = client.get("/api/alerts", params={"token": adult.token}).json()["alerts"]
+    assert len(history) == 1 and history[0]["level"] == "dangerous"
+
+
+def test_add_member_and_bind_code_flow(client, family):
+    """管理员创建成员位拿邀请码;成员列表带 bound/id;重发作废旧码由绑定域测试覆盖。"""
+    _, adult = family
+    r = client.post("/api/members", json={"token": adult.token, "name": "爸爸", "role": "elder"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["name"] == "爸爸" and data["role"] == "elder"
+    assert len(data["bind_code"]) == 8 and data["bind_expires_at"] > 0
+    assert data["entry_url"] is None  # 测试环境未配 PUBLIC_BASE_URL
+
+    members = client.get("/api/members", params={"token": adult.token}).json()["members"]
+    dad = next(m for m in members if m["name"] == "爸爸")
+    assert dad["bound"] is False and dad["id"] == data["member_id"]
+
+    r2 = client.post(f"/api/members/{data['member_id']}/bind-code", json={"token": adult.token})
+    assert r2.status_code == 200
+    assert r2.json()["bind_code"] != data["bind_code"]
+
+
+def test_add_member_elder_forbidden(client, family):
+    elder, _ = family
+    r = client.post("/api/members", json={"token": elder.token, "name": "x", "role": "elder"})
+    assert r.status_code == 403
+    assert (
+        client.post("/api/members/1/bind-code", json={"token": elder.token}).status_code == 403
+    )
+
+
+def test_add_member_rejects_bad_role_and_empty_name(client, family):
+    _, adult = family
+    assert client.post("/api/members", json={"token": adult.token, "name": "x", "role": "boss"}).status_code == 400
+    assert client.post("/api/members", json={"token": adult.token, "name": "  ", "role": "elder"}).status_code == 400
+
+
+def test_add_member_caps_at_max_members(client, family):
+    elder, adult = family
+    deps = client.app.state.deps
+    for _ in range(deps.settings.max_members - 2):
+        deps.repos.member.add(elder.family_id, "占位", Role.ELDER)
+    r = client.post("/api/members", json={"token": adult.token, "name": "再来一个", "role": "elder"})
+    assert r.status_code == 400
+
+
+def test_cross_family_correction_submit_rejected(client, family):
+    """别家成员对别家判定提交纠正:必须被拒(多租户隔离)。"""
+    elder, _ = family
+    data = client.post("/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"}).json()
+
+    deps = client.app.state.deps
+    other_fid = deps.repos.family.create("别家")
+    stranger = deps.repos.member.get(deps.repos.member.add(other_fid, "外人", Role.ADULT))
+    r = client.post(
+        "/api/corrections",
+        json={"token": stranger.token, "verdict_id": data["verdict_id"], "label": "false_positive"},
+    )
+    assert r.status_code == 400
+
+
+def test_cross_family_correction_decide_rejected(client, family):
+    """别家管理员不能裁决本家的待确认纠正。"""
+    elder, adult = family
+    data = client.post("/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"}).json()
+    c = client.post(
+        "/api/corrections",
+        json={"token": elder.token, "verdict_id": data["verdict_id"], "label": "real"},
+    ).json()
+
+    deps = client.app.state.deps
+    other_fid = deps.repos.family.create("别家")
+    stranger = deps.repos.member.get(deps.repos.member.add(other_fid, "外人", Role.ADULT))
+    r = client.post(f"/api/corrections/{c['correction_id']}/confirm", json={"token": stranger.token})
+    assert r.status_code == 400
+    # 本家管理员裁决不受影响
+    ok = client.post(
+        f"/api/corrections/{c['correction_id']}/confirm", json={"token": adult.token}
+    )
+    assert ok.json()["status"] == "confirmed"

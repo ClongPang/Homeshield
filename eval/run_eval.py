@@ -5,6 +5,7 @@
 import argparse
 import asyncio
 import dataclasses
+from pathlib import Path
 from collections import Counter
 
 from core.config import Settings
@@ -40,7 +41,11 @@ def main() -> None:
     ap = argparse.ArgumentParser("run_eval")
     ap.add_argument("--dataset", default="data/samples/samples.jsonl")
     ap.add_argument("--mode", default=None, help="mock|llm;缺省读 .env")
+    ap.add_argument("--configs", default=None,
+                    help="逗号分隔的消融名(如 C_full,D_semantics,E_semantics_inline);缺省全跑")
     ap.add_argument("--out", default="eval/report.md")
+    ap.add_argument("--checkpoint", default="eval/out/checkpoint.jsonl",
+                    help="逐样本断点文件;置空字符串关闭")
     args = ap.parse_args()
 
     settings = Settings.load()
@@ -55,14 +60,22 @@ def main() -> None:
     fid = deps.repos.family.create("eval")
     mid = deps.repos.member.add(fid, "evaler", Role.ELDER)
 
-    matrix = asyncio.run(
-        run_matrix(lambda cfg: _make_runner(deps, mid, fid, cfg), samples)
-    )
-    full_run = _make_runner(deps, mid, fid, None)
+    names = [c.strip() for c in args.configs.split(",")] if args.configs else None
+    if args.checkpoint:
+        Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
+
+    async def _evaluate():
+        matrix = await run_matrix(
+            lambda cfg: _make_runner(deps, mid, fid, cfg), samples, names,
+            checkpoint=args.checkpoint or None,
+        )
+        # 单一事件循环:AsyncOpenAI 客户端绑定创建它的循环,跨 asyncio.run 复用会炸
+        full_run = _make_runner(deps, mid, fid, None)
+        scores = await _collect_scores(full_run, samples)
+        return matrix, scores
+
+    matrix, scores = asyncio.run(_evaluate())
     y_true = [s.label.value for s in samples]
-    scores = asyncio.run(
-        _collect_scores(full_run, samples)
-    )
     report = render_report(
         matrix,
         mode=settings.mode,

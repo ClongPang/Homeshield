@@ -1,0 +1,83 @@
+"""回复生成:结论行代码所有权、家人告知后缀、截断保护、回退。"""
+import asyncio
+
+from core.models import Feature, JudgeOutput, Level
+from core.reply import LLMReply, TemplateReply, validate_reply
+
+
+class FakeLLM:
+    """只实现 chat_text 的桩,按序返回预置回复。"""
+
+    def __init__(self, replies: list[str]):
+        self.replies = replies
+        self.calls = 0
+
+    async def chat_text(self, task: str, system: str, user: str) -> str:
+        reply = self.replies[min(self.calls, len(self.replies) - 1)]
+        self.calls += 1
+        return reply
+
+
+def _verdict(level: Level) -> JudgeOutput:
+    return JudgeOutput(level=level, confidence=80, cited_ids=[], reason="")
+
+
+def _features() -> list[Feature]:
+    return [
+        Feature(id="F01", type="transfer", value="转账"),
+        Feature(id="F02", type="urgency", value="马上"),
+    ]
+
+
+def test_llm_cannot_override_conclusion():
+    """LLM 把结论写成 safe 语气,产出仍由代码按判定级别决定。"""
+    llm = FakeLLM(["【结论】看起来没什么问题\n【依据】出现转账要求\n【建议】不要理会"])
+    reply = asyncio.run(LLMReply(llm).generate(_verdict(Level.DANGEROUS), _features(), []))
+    assert reply.startswith("【结论】⚠️ 是骗子,别转钱")
+    assert "看起来没什么问题" not in reply
+    assert validate_reply(reply)
+
+
+def test_family_suffix_code_owned():
+    llm = FakeLLM(["【依据】对方自称公检法\n【建议】挂断并拨110核实"])
+    dangerous = asyncio.run(LLMReply(llm).generate(_verdict(Level.DANGEROUS), _features(), []))
+    assert dangerous.endswith("我已经把这条消息告诉了你的家人")
+    safe = asyncio.run(LLMReply(llm).generate(_verdict(Level.SAFE), _features(), []))
+    assert "告诉了你的家人" not in safe
+
+
+def test_fallback_to_template_on_garbage():
+    llm = FakeLLM(["我不知道你在说什么", "这是一条消息"])
+    reply = asyncio.run(LLMReply(llm).generate(_verdict(Level.SUSPICIOUS), _features(), []))
+    assert reply.startswith("【结论】⚠️ 这条消息有问题,多留个心眼")
+    assert "transfer:转账" in reply  # 模板兜底的依据取自特征
+    assert validate_reply(reply)
+
+
+def test_suffix_survives_truncation():
+    """依据/建议超长时截正文,家人告知后缀必须完整。"""
+    long_value = "https://very-long-scam-domain.example.com/path?token=" + "x" * 60
+    features = [Feature(id=f"F0{i}", type="url", value=long_value, evidence_span=long_value) for i in (1, 2)]
+    verdict = JudgeOutput(level=Level.DANGEROUS, confidence=90, cited_ids=["F01", "F02"], reason="")
+    reply = asyncio.run(TemplateReply().generate(verdict, features, []))
+    assert len(reply) <= 150
+    assert reply.endswith("我已经把这条消息告诉了你的家人")
+    assert validate_reply(reply)
+
+
+def test_template_reply_safe_no_suffix():
+    reply = asyncio.run(TemplateReply().generate(_verdict(Level.SAFE), _features(), []))
+    assert reply.startswith("【结论】没发现已知骗术的特征")
+    assert "告诉了你的家人" not in reply
+    assert validate_reply(reply)
+
+
+def test_safe_advice_code_owned():
+    """safe 结论只说"未发现"不说"安全";兜底建议代码所有,LLM 不得代写。"""
+    llm = FakeLLM(["【依据】没有风险\n【建议】随便花没关系"])
+    reply = asyncio.run(LLMReply(llm).generate(_verdict(Level.SAFE), _features(), []))
+    assert reply.startswith("【结论】没发现已知骗术的特征")
+    assert "涉及转账、验证码" in reply
+    assert "随便花" not in reply
+    assert "看起来没什么问题" not in reply
+    assert validate_reply(reply)

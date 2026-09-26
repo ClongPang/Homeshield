@@ -1,6 +1,4 @@
 """归一化与幂等。"""
-import asyncio
-
 import pytest
 
 from core.intake import ingest

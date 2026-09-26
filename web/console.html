@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- 子女控制台:链接即凭证(?token=),周报 + 成员 + 告警(历史拉取 + SSE 增量) + 待确认纠正队列 -->
+<!-- 子女控制台:链接即凭证(?token=),周报 + 成员管理(邀请码) + 告警(历史拉取 + SSE 增量) + 待确认纠正队列 -->
 <html lang="zh">
 <head>
 <meta charset="utf-8" />
@@ -15,13 +15,29 @@
   button { padding: 6px 12px; border: 0; border-radius: 8px; background: #2b6cb0; color: #fff; margin-right: 8px; margin-top: 8px; }
   .muted { color: #9aa0a6; font-size: 13px; }
   .meta { color: #9aa0a6; font-size: 13px; }
+  input, select { background: #10141a; color: #e8eaed; border: 1px solid #30363d; border-radius: 8px; padding: 6px 10px; margin-right: 8px; }
+  code { background: #10141a; padding: 2px 8px; border-radius: 6px; letter-spacing: 2px; font-size: 18px; }
 </style>
 </head>
 <body>
 <div class="wrap" id="app">
   <h1>家中盾 · 控制台</h1>
-  <div class="card" id="family">加载中…</div>
   <div class="card" id="weekly"></div>
+  <h2>家庭成员</h2>
+  <div id="family"><div class="card muted">加载中…</div></div>
+  <div class="card" id="codeBox" style="display:none"></div>
+  <div class="card">
+    <div>添加家人</div>
+    <div style="margin-top:6px">
+      <input id="newName" placeholder="称呼,如:妈妈" maxlength="20" />
+      <select id="newRole">
+        <option value="elder">长辈</option>
+        <option value="adult">子女(管理员)</option>
+      </select>
+      <button onclick="addMember()">生成邀请码</button>
+    </div>
+    <div class="muted">生成后把「绑定 邀请码」发给家人:请 ta 关注公众号后回复即可加入。</div>
+  </div>
   <h2>待你确认的纠正</h2>
   <div id="queue"></div>
   <h2>高危告警</h2>
@@ -53,9 +69,78 @@ const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-T
 
 function loadFamily() {
   api("/api/members").then(d => {
-    document.getElementById("family").textContent =
-      "家庭成员:" + d.members.map(m => `${m.name}(${role_name(m.role)})`).join("、");
+    const box = document.getElementById("family");
+    box.innerHTML = "";
+    for (const m of d.members) {
+      const div = document.createElement("div");
+      div.className = "card";
+      const title = document.createElement("div");
+      title.textContent = `${m.name}(${role_name(m.role)}) · ${m.bound ? "已绑定微信" : "未绑定"}`;
+      div.append(title);
+      if (!m.bound) {
+        const b = document.createElement("button");
+        b.textContent = "生成邀请码";
+        b.onclick = () => reissue(m.id);
+        div.append(b);
+      }
+      box.append(div);
+    }
   }).catch(() => {});
+}
+
+// 创建/重发邀请码共用展示:码只在此处可见,接口不回传 token
+function showCode(d) {
+  const box = document.getElementById("codeBox");
+  box.style.display = "";
+  box.innerHTML = "";
+  const line = document.createElement("div");
+  const code = document.createElement("code");
+  code.textContent = d.bind_code;
+  line.append("邀请码:", code, ` (有效期至 ${new Date(d.bind_expires_at * 1000).toLocaleString()})`);
+  const tip = document.createElement("div");
+  tip.className = "muted";
+  tip.textContent = `让 ta 关注公众号后回复:绑定 ${d.bind_code}`;
+  const cp = document.createElement("button");
+  cp.textContent = "复制绑定口令";
+  cp.onclick = () => {
+    if (navigator.clipboard) navigator.clipboard.writeText(`绑定 ${d.bind_code}`);
+    cp.replaceWith("已复制 ✓");
+  };
+  box.append(line, tip, cp);
+  if (d.entry_url) {
+    const link = document.createElement("div");
+    link.className = "muted";
+    link.textContent = `或把网页链接直接发给 ta:${d.entry_url}`;
+    box.append(link);
+  }
+}
+
+function addMember() {
+  const name = document.getElementById("newName").value.trim();
+  const role = document.getElementById("newRole").value;
+  if (!name) return;
+  post("/api/members", { name, role }).then(async r => {
+    if (r.status === 401) { showFatal("链接已失效,请让家人重新发一条链接"); throw new Error("unauthorized"); }
+    if (r.status === 403) { showFatal("只有子女(管理员)可以管理家庭成员"); throw new Error("forbidden"); }
+    if (!r.ok) { showCodeText("创建失败:" + ((await r.json().catch(() => ({}))).detail || "请稍后再试")); return; }
+    showCode(await r.json());
+    document.getElementById("newName").value = "";
+    loadFamily();
+  }).catch(() => {});
+}
+
+function reissue(memberId) {
+  post(`/api/members/${memberId}/bind-code`, {}).then(async r => {
+    if (r.status === 401) { showFatal("链接已失效,请让家人重新发一条链接"); throw new Error("unauthorized"); }
+    if (!r.ok) { showCodeText("生成失败:" + ((await r.json().catch(() => ({}))).detail || "请稍后再试")); return; }
+    showCode(await r.json());
+  }).catch(() => {});
+}
+
+function showCodeText(text) {
+  const box = document.getElementById("codeBox");
+  box.style.display = "";
+  box.textContent = text;
 }
 
 function loadWeekly() {

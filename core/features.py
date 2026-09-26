@@ -1,11 +1,14 @@
-"""特征抽取:规则引擎抽硬信号 + LLM 补抽语义特征(source=llm)。
+"""特征抽取:规则引擎抽硬信号 + LLM 按机制体系补抽(source=llm)。
 
 规则下限:isolation 命中至少 suspicious;isolation 与 transfer 共现为 dangerous。
+重构三:LLM 补抽按机制封闭集合出证据与置信分(type=机制 id),
+与离线挖掘(kbbuild fr-mine,待建)共用 MECHANIC_EXTRACTION_PROMPT 保证同源。
 """
 import re
 
 from pydantic import BaseModel
 
+from core.knowledge.mechanics import REGISTRY
 from core.llm import LLMPort
 from core.models import Feature, FeatureType, Level
 
@@ -32,6 +35,7 @@ class FeatureSpec(BaseModel):
     value: str
     evidence_span: str = ""
     source: str = "rule"
+    confidence: int = 5  # 机制置信分(0-10);规则特征默认 5
 
 
 def _word_hits(text: str, words: tuple[str, ...], ftype: str) -> list[FeatureSpec]:
@@ -77,13 +81,35 @@ def assign_ids(specs: list[FeatureSpec]) -> list[Feature]:
             value=s.value,
             evidence_span=s.evidence_span,
             source=s.source,
+            confidence=s.confidence,
         )
         for i, s in enumerate(specs)
     ]
 
 
+MECHANIC_EXTRACTION_PROMPT = (
+    "你是家庭反诈判定引擎的特征抽取器。从消息中按以下机制抽取欺诈证据:\n"
+    "- sensitive 敏感索求:索要验证码/密码/人脸/银行卡号\n"
+    "- money 资金动作:要求转账/垫付/先交费/刷流水\n"
+    "- control 控制权索取:屏幕共享/远程控制\n"
+    "- identity 身份冒充:自称公检法/客服/领导/亲友\n"
+    "- bait 利益诱饵:高收益/中奖/低价/返利\n"
+    "- fear 恐惧威胁:涉案/冻结/逾期后果\n"
+    "- emotion 情感操纵:卖惨/恋情/亲情施压\n"
+    "- urgency 紧迫施压:限时/马上/最后期限\n"
+    "- isolation 隔离封口:别告诉家人/保密\n"
+    "- antiverify 阻断核实:官方查不到/别报警\n"
+    "- escape 渠道逃逸:加微信/下载App/脱离平台/点链接\n"
+    "每条证据输出 {mechanic, value, evidence_span, confidence(0-10,越高越确定)};"
+    "evidence_span 必须是消息原文的连续片段。没有欺诈证据返回空数组。只输出 JSON。"
+)
+
+
 async def supplement_llm(llm: LLMPort, text: str) -> list[FeatureSpec]:
-    """LLM 补抽语义特征,失败时返回空列表。"""
+    """LLM 按机制封闭集合补抽(重构三):type=机制 id,附 confidence。
+
+    失败/机制外/空值一律丢弃,返回空列表由管线降级为纯规则。
+    """
     schema = {
         "type": "object",
         "properties": {
@@ -92,33 +118,47 @@ async def supplement_llm(llm: LLMPort, text: str) -> list[FeatureSpec]:
                 "items": {
                     "type": "object",
                     "properties": {
-                        "type": {"type": "string"},
+                        "mechanic": {"type": "string"},
                         "value": {"type": "string"},
                         "evidence_span": {"type": "string"},
+                        "confidence": {"type": "integer"},
                     },
                 },
             }
-        },
+        }
     }
     try:
         data = await llm.chat_json(
             "features",
-            "从用户消息中抽取诈骗语义特征(身份冒充、诱导隔离、情绪操纵等)。"
-            "没有则返回空数组。只输出 JSON。",
+            MECHANIC_EXTRACTION_PROMPT,
             text[:2000],
             schema,
         )
     except Exception:
         return []
+    # 形态归一:供应商偶发返回顶层 list 而非 {"features": [...]}
+    feats = data if isinstance(data, list) else data.get("features", [])
+    if not isinstance(feats, list):
+        feats = []
     out: list[FeatureSpec] = []
-    for f in data.get("features", []):
-        if isinstance(f, dict) and f.get("value"):
-            out.append(
-                FeatureSpec(
-                    type=str(f.get("type", FeatureType.SEMANTIC.value))[:30],
-                    value=str(f["value"])[:80],
-                    evidence_span=str(f.get("evidence_span", ""))[:80],
-                    source="llm",
-                )
+    for f in feats:
+        if not isinstance(f, dict):
+            continue
+        mid = str(f.get("mechanic", "")).strip()
+        value = str(f.get("value", "")).strip()
+        if mid not in REGISTRY or not value:
+            continue  # 机制封闭集合:机制外与空值一律丢弃
+        try:
+            conf = max(0, min(10, int(f.get("confidence", 5))))
+        except (TypeError, ValueError):
+            conf = 5
+        out.append(
+            FeatureSpec(
+                type=mid,
+                value=value[:80],
+                evidence_span=str(f.get("evidence_span", ""))[:80],
+                source="llm",
+                confidence=conf,
             )
+        )
     return out

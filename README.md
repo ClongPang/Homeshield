@@ -9,11 +9,17 @@
 uv sync                       # 创建虚拟环境、锁依赖(uv.lock)
 uv run pytest                 # 全部测试(MODE=mock,无需 API key,FR-10)
 uv run python cli.py init-db  # 建库
+uv run uvicorn server:app --reload          # MODE=mock 下即可完整演示
+uv run python -m eval.run_eval              # 生成 eval/report.md(FR-9)
+```
+
+家人入家走公众号(见下文「家人入口」);本地无微信快速演示可沿用 CLI:
+
+```bash
 uv run python cli.py add-family --name 我的家庭
 uv run python cli.py add-member --family-id 1 --name 妈妈 --role elder
 uv run python cli.py add-member --family-id 1 --name 儿子 --role adult
-uv run uvicorn server:app --reload          # MODE=mock 下即可完整演示
-uv run python -m eval.run_eval              # 生成 eval/report.md(FR-9)
+uv run python cli.py link --member-id 2 --base-url http://localhost:8000
 ```
 
 配置:复制 `.env.example` 为 `.env`,`MODE=llm` 时填 OpenAI 兼容接口与微信参数。
@@ -23,7 +29,7 @@ uv run python -m eval.run_eval              # 生成 eval/report.md(FR-9)
 ```
 core/            领域层(纯逻辑,依赖规则见 tests/test_architecture.py)
   models.py config.py errors.py events.py
-  intake.py features.py retrieval.py judge.py reply.py notifier.py feedback.py pipeline.py
+  intake.py features.py retrieval.py judge.py reply.py notifier.py feedback.py binding.py pipeline.py
   db.py repo.py llm.py deps.py          ← 适配器/组合根
   knowledge/  taxonomy.py cases.json    ← 骗术分类学(12类)+ 案例种子(D1 扩到每类≥3)
   channels/   wechat.py                 ← 微信防腐层
@@ -53,12 +59,12 @@ server.py cli.py pyproject.toml .env.example
 ## 关键工作区决策(规格未明说,骨架先行选定,欢迎推翻)
 
 1. **schema 三处最小扩展**:`member.openid`(零注册映射)、`member.token`(个人链接凭证)、`query.msg_id`(幂等落库);时间戳统一 INTEGER unix 秒。
-2. **微信陌生 openid 自动绑为 elder**:单家庭自用的最简引导;多家庭/正式上线前改为 CLI 邀请绑定。
+2. **多租户:公众号自助开通 + 绑定码入家**:陌生 openid 回复`开通`即建家庭并成为管理员(adult),家人由管理员在控制台生成 8 位一次性绑定码(默认 7 天),回复`绑定 <码>`入家;未绑定消息只引导不判定。护栏 `MAX_FAMILIES`×`MAX_MEMBERS`;旧的"自动绑 elder"单家庭捷径已删除(历史 family 1 成员不受影响)。
 3. **`fpr_strict` 指标**:在规格 FPR(dangerous 级)之外补充用户感知口径(suspicious 亦计入),用于工作点选择;报告两者都出。
 4. **降级语义**:转写失败/引用校验耗尽 → 不落 verdict、不触发告警,回复走人工兜底文案(FR-2/FR-4 的"需人工判断")。
 5. **评测隔离**:`run_eval` 用 `:memory:` 库,不污染主库。
 6. **超时用惰性触发,不建定时器**:`CorrectionService.decide()` 前先清算过期 pending——规则在唯一需要它的现场自执行(经评审否决了"server 内每日清扫"的过度设计);真实使用量起来后再评估是否升级为定时任务。
-7. **触点模型(双方零技术背景)**:家人凭证 = 不可枚举 token 链接,由部署者发到家庭群;回复文案不含成员名(非 safe 结论固定提示"家人已知悉");console 是子女唯一管理面(待确认队列/周报/成员);CLI 定位为开发者工具,不承载家人体验。
+7. **触点模型(双方零技术背景)**:长辈只在微信里;子女是"被通知的人 + 一次点击的反馈者"——高危时模板消息送达并直达详情落地页(`/alert/<id>`,一键反馈),线下核实发生在系统之外;console 是兜底聚合页(告警历史/队列/周报),CLI 定位为开发者工具(模型详见《产品定位》§1.2)。
 8. **异常即人话回复**:管线的意外故障在 VerificationService 收口为兜底文案(LOOK_FAILED),长辈与子女永远得到一句能懂的回应,而不是 500 或沉默;微信回执与全部提示文案集中在 core/messages.py。
 9. **纠正数据以库为源**:confirmed 纠正留存于库即真实数据源,不维护并行的导出文件;需要回归验证时从库内读取,避免"导出文件过期、与库不一致"。
 10. **供应商即配置,任务经路由分发**:任意 `<NAME>_API_KEY / BASE_URL / MODEL` 在 .env 声明一个供应商;判定/补抽/回复走 `CHAT_PROVIDER`,图片转写走 `TRANSCRIBE_PROVIDER`,向量检索走 `EMBED_PROVIDER`——换供应商只改 .env,不加代码;路由键就是贯穿管线的 task 参数。
@@ -91,9 +97,18 @@ mock、种子样例、合成数据只有两个合法用途:**CI 管道回归**�
 - Linux:`cp deploy/systemd/homeshield.service /etc/systemd/system/ && systemctl enable --now homeshield`
 - macOS:`cp deploy/launchd/com.homeshield.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.homeshield.plist`
 
-对外可达:VPS 直接绑定 `0.0.0.0`,家用宽带用内网穿透(frp / Tailscale Funnel)。家人入口:`uv run python cli.py link --member-id <id> --base-url https://对外地址`,把链接发到家庭群。
+对外可达:VPS 直接绑定 `0.0.0.0`,家用宽带用内网穿透(frp / Tailscale Funnel)。多租户部署必须配 `PUBLIC_BASE_URL`(开通/绑定成功后经客服消息把控制台/网页入口发给家人)。
+
+家人入口(公众号,零注册):
+
+1. 新家庭:家人回复`开通`→ 自动建家庭,ta 成为管理员,收到控制台链接;
+2. 添加家人:管理员在控制台「添加家人」生成 8 位邀请码(或对未绑定成员重发),把`绑定 邀请码`发给对方;
+3. 家人:关注公众号回复`绑定 邀请码`即入家,直接转发可疑消息即可使用;
+4. 未绑定用户发其他消息只收到引导文案,不判定、不落库。
+
+护栏:`MAX_FAMILIES`(全局家庭数,默认 100)、`MAX_MEMBERS`(每家成员数,默认 10)、`BIND_CODE_TTL_DAYS`(邀请码有效期,默认 7 天)。CLI 的 `add-family/add-member/link` 保留为运维调试工具。
 
 ## 安全状态
 
-- 已完成:家人 API 以不可枚举 token 鉴权(链接即凭证,由部署者分发,接口不回传 token);`/wechat/callback` 平台签名校验。
-- 待办:前端渲染统一转义(防 XSS);生产微信加密模式与 IP 白名单。
+- 已完成:家人 API 以不可枚举 token 鉴权(链接即凭证,接口不回传 token);`/wechat/callback` 平台签名校验;多租户隔离——告警跨家庭 404,纠正提交/裁决跨家庭 400,成员管理仅 adult;绑定码一次性原子认领(防并发双花),过期/重发即失效。
+- 待办:前端渲染统一转义(防 XSS);生产微信加密模式与 IP 白名单;按家庭的 LLM 用量配额(当前滥用边界 = MAX_FAMILIES × MAX_MEMBERS × 查询频次)。

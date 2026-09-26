@@ -5,6 +5,7 @@
     uv run python kbcli.py import --lang zh                # data/raw/fraud-r1/*.json → 离线库
     uv run python kbcli.py stats                           # 库存与分类学映射覆盖率
     uv run python kbcli.py export-eval --per-class 4       # 导出评测集 + 退化集(JSONL)
+    uv run python kbcli.py mechanics-report                # 机制卡种子词语料支撑度(评审用)
 """
 import argparse
 import json
@@ -88,6 +89,33 @@ def _cmd_export_eval(args) -> None:
     print("提醒:导出即候选,须人工过筛后方可并入冷启动评测集(§6.1)")
 
 
+def _cmd_mechanics_report(args) -> None:
+    """机制卡证据报告:每个种子词在中文诈骗语料中的支撑度,供卡片评审参考。"""
+    from core.knowledge.mechanics import MECHANIC_LIST
+
+    conn = connect(args.db)
+    total = conn.execute(
+        "SELECT COUNT(*) FROM fr_case WHERE lang='zh' AND level=0"
+    ).fetchone()[0]
+    if total == 0:
+        raise SystemExit("语料为空,先执行 import")
+    for mech in MECHANIC_LIST:
+        print(f"\n[{mech.id}] {mech.name}({mech.function.value})")
+        for kw in mech.markers:
+            rows = conn.execute(
+                "SELECT fr_id FROM fr_case WHERE lang='zh' AND level=0 AND instr(text, ?) > 0"
+                " ORDER BY fr_id LIMIT 3",
+                (kw,),
+            ).fetchall()
+            n = conn.execute(
+                "SELECT COUNT(*) FROM fr_case WHERE lang='zh' AND level=0 AND instr(text, ?)",
+                (kw,),
+            ).fetchone()[0]
+            examples = ",".join(f"#{r['fr_id']}" for r in rows) or "-"
+            flag = "  ⚠语料零支撑" if n == 0 else ""
+            print(f"  {kw:<8} {n:>4}/{total}{flag}  例:{examples}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser("kbbuild", description="离线素材库构建工具")
     ap.add_argument("--db", default=OFFLINE_DB_PATH, help="离线库路径")
@@ -104,10 +132,12 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out-base", default="data/samples/fraud_r1_base.jsonl")
     p.add_argument("--out-levelup", default="data/samples/fraud_r1_levelup.jsonl")
+    sub.add_parser("mechanics-report", help="机制卡种子词的语料支撑度报告(卡片评审用)")
 
     args = ap.parse_args()
     {"init-db": _cmd_init_db, "import": _cmd_import,
-     "stats": _cmd_stats, "export-eval": _cmd_export_eval}[args.cmd](args)
+     "stats": _cmd_stats, "export-eval": _cmd_export_eval,
+     "mechanics-report": _cmd_mechanics_report}[args.cmd](args)
 
 
 if __name__ == "__main__":

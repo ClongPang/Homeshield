@@ -7,7 +7,7 @@ import secrets
 import sqlite3
 from dataclasses import dataclass
 
-from core.errors import DuplicateMessage
+from core.errors import DuplicateMessage, ValidationError
 from core.models import (
     CorrectionLabel,
     CorrectionRecord,
@@ -31,11 +31,32 @@ class FamilyRepo:
             )
         return int(cur.lastrowid)
 
+    def create_with_admin(self, name: str, admin_name: str, openid: str) -> int:
+        """开家 + 管理员成员位同一事务:中途失败不留孤儿家庭(占 MAX_FAMILIES 名额)。"""
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO family(name, created_at) VALUES(?,?)", (name, utcnow())
+            )
+            fid = int(cur.lastrowid)
+            self.conn.execute(
+                "INSERT INTO member(family_id,name,role,openid,token,created_at) VALUES(?,?,?,?,?,?)",
+                (fid, admin_name, Role.ADULT.value, openid, _new_member_token(), utcnow()),
+            )
+        return fid
+
     def get(self, family_id: int) -> dict | None:
         row = self.conn.execute(
             "SELECT * FROM family WHERE id=?", (family_id,)
         ).fetchone()
         return dict(row) if row else None
+
+    def count(self) -> int:
+        row = self.conn.execute("SELECT COUNT(*) c FROM family").fetchone()
+        return int(row["c"])
+
+
+def _new_member_token() -> str:
+    return secrets.token_urlsafe(16)  # 个人链接凭证,创建即生成
 
 
 class MemberRepo:
@@ -45,7 +66,7 @@ class MemberRepo:
     def add(
         self, family_id: int, name: str, role: Role, openid: str | None = None
     ) -> int:
-        token = secrets.token_urlsafe(16)  # 个人链接凭证,创建即生成
+        token = _new_member_token()
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO member(family_id,name,role,openid,token,created_at) VALUES(?,?,?,?,?,?)",
@@ -80,6 +101,16 @@ class MemberRepo:
             "SELECT * FROM member WHERE token=?", (token,)
         ).fetchone()
         return self._row_to_member(row) if row else None
+
+    def set_openid(self, member_id: int, openid: str) -> None:
+        """绑定码流程:把 openid 落到成员位;openid 全局唯一,冲突即换绑他处。"""
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE member SET openid=? WHERE id=?", (openid, member_id)
+                )
+        except sqlite3.IntegrityError as e:
+            raise ValidationError(f"openid already bound: {openid}") from e
 
     def list_members(self, family_id: int) -> list[Member]:
         rows = self.conn.execute(
@@ -176,6 +207,15 @@ class VerdictRepo:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_with_context(self, verdict_id: int) -> dict | None:
+        """判定详情(含原消息与所属家庭),供告警落地页。"""
+        row = self.conn.execute(
+            "SELECT v.id, v.level, v.reply, v.created_at, q.content, q.family_id"
+            " FROM verdict v JOIN query q ON q.id=v.query_id WHERE v.id=?",
+            (verdict_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
     def count_dangerous(self, family_id: int, since: int) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) c FROM verdict v JOIN query q ON q.id=v.query_id"
@@ -250,6 +290,15 @@ class CorrectionRepo:
             decided_by=row["decided_by"],
         )
 
+    def get_by_verdict_and_member(self, verdict_id: int, member_id: int) -> CorrectionRecord | None:
+        """本人对某条判定的反馈(落地页据此显示已反馈状态)。"""
+        row = self.conn.execute(
+            "SELECT * FROM correction WHERE verdict_id=? AND by_member_id=?"
+            " ORDER BY id DESC LIMIT 1",
+            (verdict_id, member_id),
+        ).fetchone()
+        return self._to_record(row) if row else None
+
     def decide(
         self, correction_id: int, status: CorrectionStatus, decided_by: int
     ) -> None:
@@ -258,6 +307,17 @@ class CorrectionRepo:
                 "UPDATE correction SET status=?, decided_by=?, decided_at=? WHERE id=?",
                 (status.value, decided_by, utcnow(), correction_id),
             )
+
+    def get_with_family(self, correction_id: int) -> dict | None:
+        """纠正记录所属家庭(经 verdict→query 归属),供裁决前的越权校验。"""
+        row = self.conn.execute(
+            "SELECT c.*, q.family_id FROM correction c"
+            " JOIN verdict v ON v.id=c.verdict_id"
+            " JOIN query q ON q.id=v.query_id"
+            " WHERE c.id=?",
+            (correction_id,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def list_pending(self) -> list[CorrectionRecord]:
         rows = self.conn.execute(
@@ -306,6 +366,69 @@ class CorrectionRepo:
         return [dict(r) for r in rows]
 
 
+CODE_ALPHABET = "2346789ABCDEFGHJKMNPQRSTUVWXYZ"  # 去除 0O1I5S,公众号手输不歧义
+
+
+class BindCodeRepo:
+    """绑定码:成员位的一次性领取凭证,过期/已用即失效。"""
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def create(self, member_id: int, created_by: int | None, ttl_days: int) -> dict:
+        now = utcnow()
+        code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO bind_code(code,member_id,created_by,created_at,expires_at)"
+                " VALUES(?,?,?,?,?)",
+                (code, member_id, created_by, now, now + ttl_days * 86400),
+            )
+        return {"code": code, "member_id": member_id, "expires_at": now + ttl_days * 86400}
+
+    def claim(self, code: str) -> dict | None:
+        """原子认领:未用且未过期才置 used_at,靠 rowcount 防并发双花。"""
+        now = utcnow()
+        with self.conn:
+            cur = self.conn.execute(
+                "UPDATE bind_code SET used_at=? WHERE UPPER(code)=UPPER(?)"
+                " AND used_at IS NULL AND expires_at>?",
+                (now, code, now),
+            )
+        if cur.rowcount != 1:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM bind_code WHERE UPPER(code)=UPPER(?)", (code,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def invalidate_for_member(self, member_id: int) -> None:
+        """重发即作废:该成员所有未用码立即失效,始终只有一个有效码。"""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE bind_code SET used_at=? WHERE member_id=? AND used_at IS NULL",
+                (utcnow(), member_id),
+            )
+
+    def peek(self, code: str) -> dict | None:
+        """只读查看未用未过期的码,供绑定前给出精确错误(不消耗)。"""
+        row = self.conn.execute(
+            "SELECT * FROM bind_code WHERE UPPER(code)=UPPER(?)"
+            " AND used_at IS NULL AND expires_at>?",
+            (code, utcnow()),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def latest_active(self, member_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT code, expires_at FROM bind_code"
+            " WHERE member_id=? AND used_at IS NULL AND expires_at>?"
+            " ORDER BY id DESC LIMIT 1",
+            (member_id, utcnow()),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 @dataclass
 class Repos:
     family: FamilyRepo
@@ -314,6 +437,7 @@ class Repos:
     verdict: VerdictRepo
     alert: AlertRepo
     correction: CorrectionRepo
+    bind_code: BindCodeRepo
 
 
 def make_repos(conn: sqlite3.Connection) -> Repos:
@@ -324,4 +448,5 @@ def make_repos(conn: sqlite3.Connection) -> Repos:
         verdict=VerdictRepo(conn),
         alert=AlertRepo(conn),
         correction=CorrectionRepo(conn),
+        bind_code=BindCodeRepo(conn),
     )

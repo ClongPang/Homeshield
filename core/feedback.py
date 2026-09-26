@@ -34,8 +34,11 @@ class CorrectionService:
         member = self.repos.member.get(by_member_id)
         if member is None:
             raise ValidationError("member not found")
-        if self.repos.verdict.get(verdict_id) is None:
+        verdict = self.repos.verdict.get_with_context(verdict_id)
+        if verdict is None:
             raise ValidationError("verdict not found")
+        if verdict["family_id"] != member.family_id:
+            raise ValidationError("verdict not in your family")
         # adult 直接生效;elder 进入 pending 等确认
         status = (
             CorrectionStatus.CONFIRMED
@@ -49,6 +52,11 @@ class CorrectionService:
         decider = self.repos.member.get(decided_by)
         if decider is None or decider.role is not Role.ADULT:
             raise ValidationError("only adult can decide")
+        owned = self.repos.correction.get_with_family(correction_id)
+        if owned is None:
+            raise ValidationError("correction not found")
+        if owned["family_id"] != decider.family_id:
+            raise ValidationError("correction not in your family")
         rec = self.repos.correction.get(correction_id)
         if rec is None:
             raise ValidationError("correction not found")

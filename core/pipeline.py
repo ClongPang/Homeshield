@@ -3,7 +3,7 @@
 run() 只做编排,四个阶段各司其职:
     _normalize_text  图片转写,失败降级"请粘贴文字"
     _extract         规则特征 + LLM 补抽与检索并行,补抽结果只喂 judge
-    _judge           分级判定 + 引用校验重试,耗尽降级"需人工判断"
+    _judge           分级判定 + 引用校验/safe 置信门槛重试,耗尽降级"需人工判断"
     _deliver         规则下限、回复生成、落库、事件发布
 
 阶段开关收敛在 PipelineConfig:产品默认与消融 C 相同,
@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
+from core.annotate import annotate_text
 from core.errors import DegradeError
 from core.events import EventBus, VerdictCompleted
 from core.features import assign_ids, extract_rules, rule_floor, supplement_llm
@@ -40,19 +41,41 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """消融开关:A 全关,B 仅检索,C 全开。"""
+    """消融开关:A 全关,B 仅检索,C 全开,D=C+分级语义,E=D+机制内联标注。
+
+    product_default = E(2026-09-26 证伪翻转):双侧集 55 条上 E 对 C
+    Recall 持平(0.758)、FPR 0.045→0、FPR(strict) 持平,判据通过。
+    消融 C 显式固定为旧默认,保持基线可比。见《判定模型_设计教训》§4。
+    """
 
     llm_features: bool = True
     retrieval: bool = True
     constrain_citations: bool = True
+    graded_semantics: bool = True  # 重构五(证伪通过)
+    inline_annotation: bool = True  # 重构二(证伪通过)
 
     @classmethod
     def ablation_a(cls) -> "PipelineConfig":
-        return cls(False, False, False)
+        return cls(False, False, False, False, False)
 
     @classmethod
     def ablation_b(cls) -> "PipelineConfig":
-        return cls(False, True, False)
+        return cls(False, True, False, False, False)
+
+    @classmethod
+    def ablation_c(cls) -> "PipelineConfig":
+        """旧默认(无分级语义/无内联标注),消融基线保持可比。"""
+        return cls(True, True, True, False, False)
+
+    @classmethod
+    def ablation_d(cls) -> "PipelineConfig":
+        """C + 分级语义('安全提醒≠识别')。"""
+        return cls(True, True, True, True, False)
+
+    @classmethod
+    def ablation_e(cls) -> "PipelineConfig":
+        """D + 机制内联标注(= 当前 product_default)。"""
+        return cls(True, True, True, True, True)
 
     @classmethod
     def product_default(cls) -> "PipelineConfig":
@@ -87,6 +110,7 @@ class Pipeline:
     reply_gen: ReplyGenerator
     bus: EventBus
     judge_retries: int = 2
+    safe_confidence_floor: int = 0  # safe 置信门槛(<=0 关);mock 置信分合成,装配层按模式传入
     config: PipelineConfig = field(default_factory=PipelineConfig.product_default)
 
     async def run(self, message: Message, query_id: int) -> PipelineResult:
@@ -114,7 +138,8 @@ class Pipeline:
     # ---- 阶段 2:特征抽取 + 检索 ----------------------------------------
     async def _extract(self, text: str) -> Extraction:
         rule_specs = extract_rules(text)
-        retrieval_query = " ".join(s.value for s in rule_specs) or text[:80]
+        # 检索 query:特征值 + 原文片段——纯特征值在弱特征消息(如仅卡号)下失效
+        retrieval_query = (" ".join(s.value for s in rule_specs) + " " + text[:80]).strip()
         sup_task = (
             asyncio.ensure_future(supplement_llm(self.llm, text))
             if self.config.llm_features
@@ -145,11 +170,24 @@ class Pipeline:
 
     # ---- 阶段 3:判定 ----------------------------------------------------
     async def _judge(self, text: str, extraction: Extraction) -> JudgeOutput:
+        annotated = (
+            annotate_text(text, extraction.features)
+            if self.config.inline_annotation
+            else None
+        )
+        inp = JudgeInput(
+            text=text[:2000],
+            features=extraction.features,
+            cases=extraction.cases,
+            annotated_text=annotated,
+            graded_semantics=self.config.graded_semantics,
+        )
         return await judge_with_validation(
-            JudgeInput(text=text[:2000], features=extraction.features, cases=extraction.cases),
+            inp,
             self.judge,
             constrained=self.config.constrain_citations,
             retries=self.judge_retries,
+            safe_confidence_floor=self.safe_confidence_floor,
         )
 
     # ---- 阶段 4:交付 ----------------------------------------------------

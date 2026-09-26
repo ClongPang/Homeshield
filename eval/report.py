@@ -1,6 +1,5 @@
 """评测报告渲染。"""
 from core.models import utcnow
-from eval.metrics import threshold_sweep
 
 
 def render_report(

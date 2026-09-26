@@ -9,12 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.config import Settings
+from core.binding import BindingService
 from core.channels.wechat import WeChatChannel
 from core.db import connect, init_schema
 from core.events import EventBus
 from core.judge import Judge, LLMJudge, MockJudge
 from core.llm import LLMPort, make_llm
-from core.models import KbCase, Mode
+from core.models import KbCase
 from core.notifier import AlertBroker, AlertRouter, wire_alerts
 from core.pipeline import Pipeline, PipelineConfig
 from core.reply import LLMReply, ReplyGenerator, TemplateReply
@@ -45,6 +46,7 @@ class Deps:
     reply: ReplyGenerator
     pipeline: Pipeline
     verification: VerificationService
+    binding: BindingService
 
 
 def build_deps(settings: Settings) -> Deps:
@@ -77,8 +79,16 @@ def build_deps(settings: Settings) -> Deps:
         reply_gen=reply,
         bus=bus,
         judge_retries=settings.judge_retries,
+        # mock 的置信分是合成值,不参与 safe 门槛;门槛针对 LLM 校准不准
+        safe_confidence_floor=settings.safe_confidence_floor if settings.use_llm else 0,
     )
     verification = VerificationService(repos, pipeline)
+    binding = BindingService(
+        repos,
+        max_families=settings.max_families,
+        max_members=settings.max_members,
+        code_ttl_days=settings.bind_code_ttl_days,
+    )
     return Deps(
         settings=settings,
         conn=conn,
@@ -93,6 +103,7 @@ def build_deps(settings: Settings) -> Deps:
         reply=reply,
         pipeline=pipeline,
         verification=verification,
+        binding=binding,
     )
 
 
@@ -105,5 +116,6 @@ def make_pipeline(deps: Deps, config: PipelineConfig | None = None) -> Pipeline:
         reply_gen=deps.reply,
         bus=deps.bus,
         judge_retries=deps.settings.judge_retries,
+        safe_confidence_floor=deps.settings.safe_confidence_floor if deps.settings.use_llm else 0,
         config=config or PipelineConfig.product_default(),
     )

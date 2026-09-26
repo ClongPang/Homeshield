@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS correction(
     created_at INTEGER NOT NULL,
     decided_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS bind_code(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,         -- 8 位无歧义大写字母数字(公众号回复"绑定 <码>")
+    member_id INTEGER NOT NULL REFERENCES member(id),
+    created_by INTEGER REFERENCES member(id),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER                    -- 一次性:领取即写时间戳
+);
 """
 
 

@@ -3,7 +3,7 @@
 {"id": "S003", "text": "妈,是我,我换手机号了,我在医院急用钱,先转5000到这个卡号6222020200112233445,别告诉别人。", "label": "scam", "scam_type": "impersonate_relative", "source": "adapted:冒充亲友类案(通用话术)", "notes": ""}
 {"id": "S004", "text": "您的包裹在运输中丢失,我们将双倍理赔,请点击链接 t.cn/AbCd123 填写银行卡号和验证码完成领取。", "label": "scam", "scam_type": "express_insurance", "source": "adapted:快递理赔类案(通用话术)", "notes": ""}
 {"id": "S005", "text": "我是王总,明天早上帮我垫付一下给合作方的礼金3888元,先转到我私人账户,下午报销给你。", "label": "scam", "scam_type": "impersonate_boss", "source": "adapted:冒充领导类案(通用话术)", "notes": ""}
-{"id": "S006", "text": "您有一笔职业补贴待领取,资格即将过期,请立即登录 xyz-vip-site.cn 填写个人信息领取,逾期作废。", "label": "scam", "scam_type": "fake_fee", "source": "adapted:补贴申领类案(通用话术)", "notes": ""}
+{"id": "S006", "text": "您有一笔职业补贴待领取,资格即将过期,请立即登录 xyz-vip-site.cn 填写个人信息领取,逾期作废。", "label": "scam", "scam_type": "social_insurance", "source": "adapted:补贴申领类案(通用话术)", "notes": "复标注:补贴领取类归医保社保(2026-09-26)"}
 {"id": "E001", "text": "【XX快递】您的快递已到菜鸟驿站,凭取件码8867领取,今日18点前。", "label": "edge", "source": "adapted:真实快递通知格式", "notes": "边缘:催取件但不涉钱"}
 {"id": "E002", "text": "宝妈兼职群,每天动动手指点赞,佣金日结,有意加群主微信详聊。", "label": "edge", "source": "adapted:真实兼职群消息改写", "notes": "边缘:真兼职群也常这么写,不直接收费"}
 {"id": "E003", "text": "王先生您好,您上月购物的积分即将清零,可在APP会员中心兑换礼品,回T退订。", "label": "edge", "source": "adapted:真实营销短信格式", "notes": "边缘:营销但无链接无转账"}
