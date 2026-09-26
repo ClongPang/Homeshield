@@ -28,7 +28,8 @@ uv run homeshield-cli link --member-id 2 --base-url http://localhost:8000
 
 ```
 src/homeshield/   唯一 Python 包(uv 安装,editable;标准 src 布局)
-  server.py       FastAPI 组合根(uvicorn homeshield.server:app)
+  server.py       FastAPI 装配根:依赖注入 + 路由挂载 + 静态页(uvicorn homeshield.server:app)
+  api/            HTTP 路由层:schemas.py 请求模型 · family.py 家人 API · wechat.py 公众号回调
   cli.py          运维/演示 CLI(= homeshield-cli)
   web/            长辈聊天页 index.html / 子女控制台 console.html / 告警落地页 alert.html
   core/           领域层(纯逻辑,依赖规则见 tests/test_architecture.py)

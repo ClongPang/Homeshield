@@ -130,6 +130,19 @@ class Member(BaseModel):
     openid: str | None = None
     token: str | None = None  # 个人链接凭证,仅部署者经 CLI 分发,不出现在家人可见接口
 
+    def entry_url(self, base_url: str) -> str:
+        """个人网页入口(链接即凭证):adult→控制台,elder→兜底聊天页。
+
+        server 告警深链/成员位创建与 cli link 共用此唯一拼接处;
+        未配对外地址返回空串。
+        """
+        if not base_url or not self.token:
+            return ""
+        base = base_url.rstrip("/")
+        if self.role is Role.ADULT:
+            return f"{base}/console?token={self.token}"
+        return f"{base}/?token={self.token}"
+
 
 class CorrectionRecord(BaseModel):
     id: int

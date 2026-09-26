@@ -11,7 +11,8 @@ from homeshield.core.deps import build_deps, make_pipeline
 from homeshield.core.events import VerdictCompleted
 from homeshield.core.intake import ingest
 from homeshield.core.models import Role
-from homeshield.server import _welcome_wechat, create_app
+from homeshield.api.wechat import _welcome_wechat
+from homeshield.server import create_app
 
 
 class FakeChannel:

@@ -8,6 +8,7 @@
 一人一家由 member.openid UNIQUE 天然保证。
 """
 from dataclasses import dataclass
+import re
 
 from homeshield.core.errors import HomeshieldError, ValidationError
 from homeshield.core.models import Member
@@ -15,6 +16,15 @@ from homeshield.core.repo import Repos
 
 OPEN_FAMILY_NAME = "我的家庭"
 ADMIN_NAME = "管理员"
+
+# 「绑定 <码>」命令文法:大小写不敏感,容忍空格/冒号;认领时统一归一为大写
+_BIND_RE = re.compile(r"^(?:绑定|綁定)\s*[::]?\s*([0-9A-Za-z]{4,16})$")
+
+
+def parse_bind_command(text: str) -> str | None:
+    """「绑定 <码>」→ 码;其余文本返回 None。文法与 BindingService 同屋。"""
+    m = _BIND_RE.match(text.strip())
+    return m.group(1).upper() if m else None
 
 
 @dataclass

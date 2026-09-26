@@ -4,10 +4,10 @@
 超时清算在纠正决定时自动进行;expire-corrections 提供手动入口。
 
 用法:
-    uv run python cli.py init-db
-    uv run python cli.py add-family --name 我的家庭
-    uv run python cli.py add-member --family-id 1 --name 妈妈 --role elder
-    uv run uvicorn server:app --reload
+    uv run homeshield-cli init-db
+    uv run homeshield-cli add-family --name 我的家庭
+    uv run homeshield-cli add-member --family-id 1 --name 妈妈 --role elder
+    uv run uvicorn homeshield.server:app --reload
 """
 import argparse
 
@@ -56,11 +56,8 @@ def main() -> None:
         member = deps.repos.member.get(args.member_id)
         if member is None:
             raise SystemExit("member not found")
-        # 链接即凭证:adult 进控制台,elder 进兜底聊天页
-        if member.role is Role.ADULT:
-            print(f"{args.base_url}/console?token={member.token}")
-        else:
-            print(f"{args.base_url}/?token={member.token}")
+        # 链接即凭证:拼接逻辑唯一收敛在 Member.entry_url(adult→控制台,elder→兜底页)
+        print(member.entry_url(args.base_url))
     elif args.cmd == "expire-corrections":
         print("expired", CorrectionService(deps.repos).expire_pending()) # 凡是长辈提交、还没被子女确认、且已经放了超过 7 天的纠正，一律自动变为 rejected
 
