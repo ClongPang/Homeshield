@@ -40,6 +40,9 @@ class Settings:
     db_path: str = "homeshield.db"
     judge_retries: int = 2  # 引用校验失败重试上限
     safe_confidence_floor: int = 60  # safe 判定最低置信(llm 模式生效);低于则降级"拿不准"
+    incident_idle_seconds: int = 21600
+    supply_window_seconds: int = 604800
+    supply_max_items: int = 10
 
     @classmethod
     def load(cls, env_file: str | None = None) -> "Settings":
@@ -76,6 +79,9 @@ class Settings:
             bind_code_ttl_days=int(os.getenv("BIND_CODE_TTL_DAYS", "7")),
             db_path=os.getenv("DB_PATH", "homeshield.db"),
             safe_confidence_floor=int(os.getenv("SAFE_CONFIDENCE_FLOOR", "60")),
+            incident_idle_seconds=int(os.getenv("INCIDENT_IDLE_SECONDS", "21600")),
+            supply_window_seconds=int(os.getenv("SUPPLY_WINDOW_SECONDS", "604800")),
+            supply_max_items=int(os.getenv("SUPPLY_MAX_ITEMS", "10")),
         )
 
     def provider(self, name: str) -> Provider | None:

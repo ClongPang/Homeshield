@@ -51,3 +51,5 @@ OPEN_NO_URL = (
     "开通成功！你是「{group}」的群主。\n"
     "但系统暂时无法生成控制台链接，请联系服务提供方。"
 )
+SESSION_RESET_REPLY = "好，有新问题直接发我。"
+ACK_QUERY_REPLY = "收到～有新的可疑消息随时发我。"

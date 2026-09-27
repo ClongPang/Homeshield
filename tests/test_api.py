@@ -38,6 +38,7 @@ def test_query_alert_feedback_and_weekly(client, group):
     group_id, mom, trusted = group
     result = client.post("/api/query", json={"token": mom.token, "content": "别告诉家人,立即转账"}).json()
     assert result["level"] == "dangerous"
+    assert result["kind"] == "query"
     assert result["reply"].startswith("【结论】") and "已为防护群发出高危提醒" in result["reply"]
 
     history = client.get("/api/alerts", params={"token": trusted.token}).json()
@@ -52,6 +53,17 @@ def test_query_alert_feedback_and_weekly(client, group):
     weekly = client.get("/api/weekly", params={"token": trusted.token}).json()
     assert weekly["group_id"] == group_id
     assert weekly["queries"] == weekly["dangerous"] == weekly["corrections"] == weekly["false_positives"] == 1
+
+
+def test_ack_then_query_and_web_reset_is_query(client, group):
+    _, mom, _ = group
+    ack = client.post("/api/query", json={"token": mom.token, "content": "谢谢"}).json()
+    assert ack["kind"] == "ack" and ack["verdict_id"] is None and ack["level"] is None
+    assert ack["cited_ids"] == [] and ack["latency_ms"] == 0
+    query = client.post("/api/query", json={"token": mom.token, "content": "请转账"}).json()
+    assert query["kind"] == "query" and query["verdict_id"] is not None
+    reset = client.post("/api/query", json={"token": mom.token, "content": "新的"}).json()
+    assert reset["kind"] == "query" and reset["verdict_id"] is not None
 
 
 def test_invalid_token_is_401(client):

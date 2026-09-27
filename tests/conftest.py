@@ -1,5 +1,9 @@
 """测试夹具:mock 模式全链路可跑,临时库隔离。包化后无需 sys.path hack。"""
+import os
 import pytest
+
+# server 模块导入时会构造默认 app;禁止它碰工作目录里可能存在的旧版开发库。
+os.environ["DB_PATH"] = ":memory:"
 
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps

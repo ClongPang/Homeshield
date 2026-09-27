@@ -10,21 +10,27 @@ run() 只做编排,四个阶段各司其职:
 A/B 是开关组合,评测与产品共用同一条代码路径。
 """
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
-from homeshield.core.annotate import FEATURE_MECHANIC, annotate_text
+from homeshield.core.annotate import annotate_text
 from homeshield.core.errors import DegradeError
 from homeshield.core.events import EventBus, VerdictCompleted
 from homeshield.core.features import (
     assign_feature_ids,
     detect_escalation_feature,
     extract_rule_features,
+    extract_supply_features,
     get_rule_risk_floor,
+    is_ask_feature,
+    is_trust_feature,
     supplement_features_with_llm,
+    FeatureSpec,
+    extract_strong_values,
 )
 from homeshield.core.judge import Judge, judge_with_validation
 from homeshield.core.llm import LLMPort
@@ -45,10 +51,11 @@ from homeshield.core.repo import Repos
 from homeshield.core.retrieval import Retriever
 
 logger = logging.getLogger(__name__)
+_NON_MONEY_TRANSFER_VALUES = {"给我验证码"}  # 旧规则将其标为 transfer;跨条资金下限不得借此触发
 
 # 判定行为语义版本:凡影响判定输出的变更(词表/提示词/分级语义/检索/模型默认)
 # 必须递增;断点续跑与评测缓存据此失效,防止用旧引擎的分数冒充新引擎。
-PIPELINE_VERSION = "1.1.0"  # 重构四:会话一等公民(升级特征/逐轮标注)
+PIPELINE_VERSION = "1.2.0"
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,7 @@ class PipelineConfig:
     constrain_citations: bool = True
     graded_semantics: bool = True  # 重构五(证伪通过)
     inline_annotation: bool = True  # 重构二(证伪通过)
+    supply_features: bool = False
 
     @classmethod
     def ablation_a(cls) -> "PipelineConfig":
@@ -102,6 +110,18 @@ class Extraction:
     cases: list[KbCase]
     rule_floor: Level
     conversation: Conversation
+    rule_specs: list[FeatureSpec] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SupplyItem:
+    query_id: int
+    created_at: int
+    text: str
+    specs: list[FeatureSpec]
+    source: str
+    matched_values: list[str]
+    age_seconds: int
 
 
 class PipelineResult(BaseModel):
@@ -150,18 +170,27 @@ class Pipeline:
     judge_retries: int = 2
     safe_confidence_floor: int = 0  # safe 置信门槛(<=0 关);mock 置信分合成,装配层按模式传入
     config: PipelineConfig = field(default_factory=PipelineConfig.product_default)
+    incident_idle_seconds: int = 21600
+    supply_window_seconds: int = 604800
+    supply_max_items: int = 10
 
     async def run(self, message: Message, query_id: int) -> PipelineResult:
         t0 = time.monotonic()
         try:
             text = await self._extract_message_text(message)
+            if message.content_type.value == "image":
+                try:
+                    self.repos.query.update_transcript(query_id, text)
+                except Exception:
+                    logger.warning("image transcript persistence failed", exc_info=True)
             conversation = _to_conversation(text, message.content_type.value)
             extraction = await self._extract_features_and_cases(conversation)
+            supplied = self._supply(message, query_id, text) if self.config.supply_features else []
             verdict = await self._judge_conversation(conversation, extraction)
         except DegradeError as de:
             return self._build_degraded_result(query_id, de.user_message, t0)
         return await self._persist_verdict_and_publish_event(
-            message, query_id, conversation.render(), extraction, verdict, t0
+            message, query_id, conversation.render(), extraction, verdict, t0, supplied
         )
 
     # ---- 阶段 1:归一化 ------------------------------------------------
@@ -179,7 +208,7 @@ class Pipeline:
     # ---- 阶段 2:特征抽取 + 检索 ----------------------------------------
     async def _extract_features_and_cases(self, conversation: Conversation) -> Extraction:
         rendered = conversation.render()
-        rule_specs: list[Feature] = []
+        rule_specs: list[FeatureSpec] = []
         for idx, turn in enumerate(conversation.turns, 1):
             for spec in extract_rule_features(turn.text):
                 spec.turn = idx  # 逐轮归属:升级检测与证据定位依赖轮次
@@ -216,7 +245,81 @@ class Pipeline:
             cases=cases,
             rule_floor=get_rule_risk_floor(rule_specs),
             conversation=conversation,
+            rule_specs=rule_specs,
         )
+
+    def _supply(self, message: Message, query_id: int, current_text: str) -> list[SupplyItem]:
+        try:
+            rows = self.repos.query.supply_context(
+                query_id, message.user_id, self.supply_window_seconds
+            )
+            current_values = extract_strong_values(current_text)
+            selected: list[tuple[dict, str, str, list[str]]] = []
+            for row in reversed(rows):
+                prior_text = (row["transcript"] or "") if row["content_type"] == "image" else row["content"]
+                same_incident = (row["incident_id"] is not None and
+                                 row["incident_id"] == row["current_incident_id"])
+                matched = (sorted(current_values & extract_strong_values(prior_text))
+                           if not same_incident else [])
+                if not same_incident and not matched:
+                    continue
+                selected.append((row, prior_text, "same_incident" if same_incident else "feature_match", matched))
+            selected = selected[-self.supply_max_items:] if self.supply_max_items > 0 else []
+            return [SupplyItem(
+                    query_id=int(row["id"]), created_at=int(row["created_at"]),
+                    text=prior_text, specs=extract_supply_features(prior_text),
+                    source=source, matched_values=matched,
+                    age_seconds=max(0, int(row["current_created_at"]) - int(row["created_at"])),
+                ) for row, prior_text, source, matched in selected]
+        except Exception:
+            logger.warning("supply failed, judge current message only", exc_info=True)
+            return []
+
+    @staticmethod
+    def _age_label(seconds: int) -> str:
+        if seconds < 3600:
+            return f"{max(1, seconds // 60)}分钟"
+        if seconds < 86400:
+            return f"{seconds // 3600}小时"
+        return f"{seconds // 86400}天"
+
+    def _cross_message_features(
+        self, supplied: list[SupplyItem], extraction: Extraction,
+    ) -> tuple[list[FeatureSpec], Level]:
+        if not supplied:
+            return [], Level.SAFE
+        prior_specs = [spec.model_copy(update={"turn": i})
+                       for i, item in enumerate(supplied, 1) for spec in item.specs]
+        current_specs = [spec.model_copy(update={"turn": len(supplied) + (spec.turn or 1)})
+                         for spec in extraction.rule_specs]
+        trust = [
+            (item, spec) for item in supplied for spec in item.specs
+            if is_trust_feature(spec)
+        ]
+        ask = [spec for spec in extraction.rule_specs if is_ask_feature(spec)]
+        result: list[FeatureSpec] = []
+        floor = Level.SAFE
+        # 只用前情铺垫与本条索取判定 S1。前情若还含更早的索取，
+        # detect_escalation_feature 的最早索取轮次不能遮蔽本条的升级。
+        escalation_specs = ([s for s in prior_specs if is_trust_feature(s)] +
+                            [s for s in current_specs if is_ask_feature(s)])
+        if trust and ask and detect_escalation_feature(escalation_specs):
+            result.append(FeatureSpec(
+                type="escalation", source="rule", confidence=8, origin="prior",
+                value=f"约{self._age_label(trust[0][0].age_seconds)}前的消息已建立铺垫(身份/利益/恐吓/情感),本条出现索取(跨消息渐进话术)",
+                evidence_span="",
+            ))
+            floor = Level.SUSPICIOUS
+        if (extraction.rule_floor is not Level.DANGEROUS
+                and any(spec.type == "isolation" for spec in prior_specs)
+                and any(spec.type == "transfer" and spec.value not in _NON_MONEY_TRANSFER_VALUES
+                        for spec in extraction.rule_specs)):
+            result.append(FeatureSpec(
+                type="isolation", source="rule", confidence=5, origin="prior",
+                value="前情有保密要求", evidence_span="",
+            ))
+            floor = Level.DANGEROUS
+        return result[:2], floor
 
     # ---- 阶段 3:判定 ----------------------------------------------------
     async def _judge_conversation(self, conversation: Conversation, extraction: Extraction) -> JudgeOutput:
@@ -251,26 +354,76 @@ class Pipeline:
         extraction: Extraction,
         verdict: JudgeOutput,
         t0: float,
+        supplied: list[SupplyItem] | None = None,
     ) -> PipelineResult:
-        final_level = max_level(extraction.rule_floor, verdict.level)
+        supplied = supplied or []
+        synthetic = []
+        cross_floor = Level.SAFE
+        if supplied:
+            try:
+                synthetic_specs, cross_floor = self._cross_message_features(supplied, extraction)
+                for spec in synthetic_specs:
+                    feature = assign_feature_ids([spec])[0].model_copy(
+                        update={"id": f"F{len(extraction.features) + len(synthetic) + 1:02d}"}
+                    )
+                    synthetic.append(feature)
+            except Exception:
+                logger.warning("supply synthesis failed, judge current message only", exc_info=True)
+                supplied = []
+                synthetic = []
+                cross_floor = Level.SAFE
+        baseline_level = max_level(extraction.rule_floor, verdict.level)
+        final_level = max_level(baseline_level, cross_floor)
+        cross_raised = final_level is not baseline_level
         cited = list(verdict.cited_ids)
-        if final_level is not verdict.level:
+        reason = verdict.reason
+        if baseline_level is not verdict.level:
             for f in extraction.features:  # 下限抬升→强制引用驱动特征,保证依据可解释
                 if f.type in ("isolation", "transfer") and f.id not in cited:
                     cited.append(f.id)
-        verdict = verdict.model_copy(update={"level": final_level, "cited_ids": cited})
+        basis_override = None
+        if cross_raised:
+            driver = next((f for f in synthetic if f.type == "isolation"), None)
+            current_type = "transfer" if driver else None
+            if driver is None:
+                driver = next((f for f in synthetic if f.type == "escalation"), None)
+                current_type = next((s.type for s in extraction.rule_specs if is_ask_feature(s)), None)
+            current = next((f for f in extraction.features if f.type == current_type
+                            and (current_type != "transfer" or f.value not in _NON_MONEY_TRANSFER_VALUES)), None)
+            for f in (driver, current):
+                if f is not None and f.id not in cited:
+                    cited.append(f.id)
+            reason = f"跨消息依据：{driver.id if driver else ''}、{current.id if current else ''}"
+            basis_override = ("前情有保密要求，本条又要求转账（跨消息）" if cross_floor is Level.DANGEROUS
+                              else "前情已有铺垫，本条出现索取（跨消息）")
+        verdict = verdict.model_copy(update={"level": final_level, "cited_ids": cited, "reason": reason})
 
-        reply = await self.reply_gen.generate(verdict, extraction.features, extraction.cases)
+        if basis_override:
+            reply = await self.reply_gen.generate(
+                verdict, extraction.features, extraction.cases, basis_override=basis_override
+            )
+        else:
+            reply = await self.reply_gen.generate(verdict, extraction.features, extraction.cases)
         latency_ms = int((time.monotonic() - t0) * 1000)
+        snapshot = None
+        if supplied:
+            snapshot = json.dumps({
+                "v": 1,
+                "prior": [{"query_id": item.query_id, "age_seconds": item.age_seconds,
+                           "excerpt": item.text[:200], "source": item.source,
+                           "matched_values": item.matched_values} for item in supplied],
+                "synthetic_ids": [f.id for f in synthetic], "floor_level": cross_floor.value,
+            }, ensure_ascii=False)
         verdict_id = self.repos.verdict.insert(
             query_id,
             verdict.level,
             cited,
-            [f.model_dump() for f in extraction.features],
+            [f.model_dump() for f in extraction.features + synthetic],
             verdict.reason,
             reply,
             latency_ms,
             self.judge.mode if isinstance(self.judge.mode, Mode) else Mode(self.judge.mode),
+            context_snapshot=snapshot,
         )
         await self.bus.publish(
             event := VerdictCompleted(
@@ -285,7 +438,7 @@ class Pipeline:
             verdict=verdict,
             reply=user_reply,
             latency_ms=latency_ms,
-            rule_floor_level=extraction.rule_floor,
+            rule_floor_level=max_level(extraction.rule_floor, cross_floor),
         )
 
     def _build_degraded_result(self, query_id: int, reply: str, t0: float, floor: Level = Level.SAFE) -> PipelineResult:

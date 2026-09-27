@@ -14,6 +14,8 @@ from homeshield.core.models import Feature, FeatureType, Level
 
 ISOLATION_WORDS = (
     "别告诉家人", "别告诉子女", "不要告诉家人", "保密", "这是我们俩的事", "影响他工作", "偷偷",
+    "不要告诉任何人", "不许告诉任何人", "不能告诉任何人", "这是机密", "案件保密",
+    "绝对保密", "不能声张", "别声张",
 )
 TRANSFER_WORDS = ("转账", "打款", "汇款", "转入", "先付", "垫付", "给我验证码")
 URGENCY_WORDS = ("立即", "马上", "立刻", "尽快", "最后一天", "限时", "逾期", "紧急")
@@ -27,6 +29,27 @@ URL_RE = re.compile(r"https?://\S+|(?:[\w-]+\.)+(?:com|cn|net|top|xyz|vip|site|o
 PHONE_RE = re.compile(r"1[3-9]\d{9}")
 CARD_RE = re.compile(r"\b\d{16,19}\b")
 
+# 跨案关联必须比较完整值。判定用 Feature.value 为展示截到 40 字,
+# 不能用于关联:长 URL 共同前缀和卡号内嵌 11 位数字都会造成误连。
+_STRONG_URL_RE = re.compile(URL_RE.pattern, re.IGNORECASE)
+_STRONG_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+_STRONG_CARD_RE = re.compile(r"(?<!\d)\d{16,19}(?!\d)")
+
+
+def extract_strong_values(text: str) -> set[str]:
+    values = set()
+    for pattern, is_url in ((_STRONG_URL_RE, True), (_STRONG_PHONE_RE, False),
+                            (_STRONG_CARD_RE, False)):
+        for match in pattern.finditer(text):
+            value = match.group(0)
+            if is_url:
+                value = re.split(r"[，。！？；、（）【】《》\"'<>]", value, maxsplit=1)[0]
+                value = value.rstrip(".,;:!?)]}/")
+            value = re.sub(r"\s+", "", value).lower()
+            if value:
+                values.add(value)
+    return values
+
 
 class FeatureSpec(BaseModel):
     """未分配 ID 的特征草稿。"""
@@ -37,6 +60,7 @@ class FeatureSpec(BaseModel):
     source: str = "rule"
     confidence: int = 5  # 机制置信分(0-10);规则特征默认 5
     turn: int = 0  # 所在会话轮次(1 起);0=单轮/全局
+    origin: str = "self"
 
 
 def _match_feature_keywords(text: str, words: tuple[str, ...], ftype: str) -> list[FeatureSpec]:
@@ -64,6 +88,14 @@ def extract_rule_features(text: str) -> list[FeatureSpec]:
     return specs
 
 
+def extract_supply_features(text: str) -> list[FeatureSpec]:
+    """前情专用:补齐 S1 的铺垫机制,不改变本条特征或旧基线。"""
+    specs = extract_rule_features(text)
+    for mechanic in ("bait", "fear", "emotion"):
+        specs += _match_feature_keywords(text, REGISTRY[mechanic].markers, mechanic)
+    return specs
+
+
 def get_rule_risk_floor(specs: list[FeatureSpec]) -> Level:
     """规则结果为下限。"""
     types = {s.type for s in specs}
@@ -78,19 +110,30 @@ _ASK_MECHANICS = ("money", "sensitive", "control")
 _TRUST_MECHANICS = ("identity", "bait", "fear", "emotion")
 
 
+def _mechanic(ftype: str) -> str | None:
+    from homeshield.core.annotate import FEATURE_MECHANIC
+    return FEATURE_MECHANIC.get(ftype) or (ftype if ftype in REGISTRY else None)
+
+
+def is_ask_feature(spec: FeatureSpec) -> bool:
+    return _mechanic(spec.type) in _ASK_MECHANICS
+
+
+def is_trust_feature(spec: FeatureSpec) -> bool:
+    return _mechanic(spec.type) in _TRUST_MECHANICS
+
+
 def detect_escalation_feature(specs: list[FeatureSpec]) -> FeatureSpec | None:
     """跨轮升级信号(重构四):前轮建立信任、后轮出现索取——多轮欺诈的典型结构。
 
     仅多轮会话计算(存在 ≥2 个不同轮次);单轮返回 None。
     机制归属经 annotate.FEATURE_MECHANIC(特征类型→机制)。
     """
-    from homeshield.core.annotate import FEATURE_MECHANIC
-
     turns = {s.turn for s in specs if s.turn}
     if len(turns) < 2:
         return None
-    ask = [s.turn for s in specs if s.turn and FEATURE_MECHANIC.get(s.type) in _ASK_MECHANICS]
-    trust = [s.turn for s in specs if s.turn and FEATURE_MECHANIC.get(s.type) in _TRUST_MECHANICS]
+    ask = [s.turn for s in specs if s.turn and is_ask_feature(s)]
+    trust = [s.turn for s in specs if s.turn and is_trust_feature(s)]
     if not ask or not trust:
         return None
     t_ask, t_trust = min(ask), min(trust)
@@ -113,6 +156,7 @@ def assign_feature_ids(specs: list[FeatureSpec]) -> list[Feature]:
             source=s.source,
             confidence=s.confidence,
             turn=s.turn or None,
+            origin=s.origin,
         )
         for i, s in enumerate(specs)
     ]

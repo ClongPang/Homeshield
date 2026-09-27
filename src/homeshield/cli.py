@@ -11,12 +11,16 @@
     uv run uvicorn homeshield.server:app --reload
 """
 import argparse
+import json
 import secrets
 
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps
 from homeshield.core.feedback import CorrectionService
 from homeshield.core.logsetup import setup_logging
+from homeshield.core.models import ContentType, Message
+from homeshield.core.pipeline import PipelineConfig
+from homeshield.core.deps import make_pipeline
 
 
 def main() -> None:
@@ -47,6 +51,10 @@ def main() -> None:
     d.add_argument("--group-id", type=int, required=True)
 
     sub.add_parser("expire-corrections", help="手动清算超时 pending")
+    inc = sub.add_parser("incident", help="查看用户案件及查询数")
+    inc.add_argument("--user-id", type=int, required=True)
+    preview = sub.add_parser("supply-preview", help="只读预览查询的供给与合成特征")
+    preview.add_argument("--query-id", type=int, required=True)
 
     args = parser.parse_args()
     deps = build_deps(Settings.load())
@@ -83,6 +91,30 @@ def main() -> None:
     elif args.cmd == "disband":
         deps.groups.disband_group_by_operator(args.group_id)
         print(f"group_id={args.group_id} disbanded")
+    elif args.cmd == "incident":
+        print(json.dumps(deps.repos.incident.list_for_user(args.user_id), ensure_ascii=False, indent=2))
+    elif args.cmd == "supply-preview":
+        row = deps.repos.query.get(args.query_id)
+        if row is None:
+            raise SystemExit("query not found")
+        if row["kind"] != "query":
+            raise SystemExit("ack has no supply")
+        message = Message(user_id=row["user_id"], group_ids=[], membership_ids=[],
+                          content_type=ContentType(row["content_type"]), content=row["content"])
+        text = row["transcript"] or "" if row["content_type"] == "image" else row["content"]
+        pipeline = make_pipeline(deps, PipelineConfig(supply_features=True))
+        items = pipeline._supply(message, args.query_id, text)
+        from homeshield.core.features import extract_rule_features, get_rule_risk_floor
+        from homeshield.core.pipeline import Extraction, _to_conversation
+        conversation = _to_conversation(text, row["content_type"])
+        current = extract_rule_features(text)
+        synthesis, floor = pipeline._cross_message_features(
+            items, Extraction([], [], get_rule_risk_floor(current), conversation, current)
+        )
+        print(json.dumps({"prior": [{"query_id": i.query_id, "source": i.source,
+                                     "matched_values": i.matched_values} for i in items],
+                          "synthetic": [s.model_dump() for s in synthesis],
+                          "cross_floor": floor.value}, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

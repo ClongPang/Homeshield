@@ -137,6 +137,7 @@ class Feature(BaseModel):
     source: str = "rule"  # rule | llm
     confidence: int | None = None  # LLM 补抽的机制置信分(0-10);规则特征为 None
     turn: int | None = None  # 重构四:特征所在会话轮次(1 起);单轮/全局特征为 None
+    origin: str = Field(default="self", exclude_if=lambda value: value == "self")
 
 
 class KbCase(BaseModel):

@@ -16,6 +16,7 @@ from homeshield.core.deps import Deps
 from homeshield.core.errors import DuplicateMessage
 from homeshield.core.models import Member
 from homeshield.core.verification import VerificationService
+from homeshield.core.triage import classify
 
 logger = logging.getLogger(__name__)
 
@@ -66,11 +67,32 @@ def build_wechat_router(deps: Deps, verification: VerificationService) -> APIRou
         if not memberships:
             return PlainTextResponse(ch.passive_text_reply(data, messages.BIND_GUIDE_OUTSIDE_GROUP))
 
+        if kind == "text":
+            triage = classify(data.get("Content", ""))
+            if triage == "reset":
+                deps.repos.incident.close_open_incident(user.id, msg_id=data.get("MsgId") or None)
+                return PlainTextResponse(ch.passive_text_reply(data, messages.SESSION_RESET_REPLY))
+            if triage == "ack":
+                background.add_task(_record_ack, verification, data, user, memberships)
+                return PlainTextResponse(ch.passive_text_reply(data, messages.ACK_QUERY_REPLY))
+
         # text / image:5s 窗口内先回可见回执,正式判定经客服接口异步送达
-        background.add_task(_handle_wechat_message, deps, verification, ch, data, user, memberships)
+        session_epoch = deps.repos.incident.current_epoch(user.id)
+        background.add_task(_handle_wechat_message, deps, verification, ch, data, user, memberships,
+                            session_epoch)
         return PlainTextResponse(ch.passive_text_reply(data, messages.RECEIVED_ACK))
 
     return router
+
+
+async def _record_ack(verification: VerificationService, data: dict, user, memberships: list[Member]) -> None:
+    try:
+        await verification.verify(
+            user=user, memberships=memberships, content=data.get("Content", ""),
+            content_type="text", channel="wechat", msg_id=data.get("MsgId") or None,
+        )
+    except Exception:
+        logger.warning("wechat ack persistence failed", exc_info=True)
 
 
 def _handle_membership_command(deps: Deps, user, openid: str, kind: str, text: str) -> str | None:
@@ -174,7 +196,8 @@ async def _welcome_wechat(deps: Deps, ch, data: dict) -> None:
 
 
 async def _handle_wechat_message(
-    deps: Deps, verification: VerificationService, ch, data: dict, user, memberships: list[Member]
+    deps: Deps, verification: VerificationService, ch, data: dict, user, memberships: list[Member],
+    session_epoch: int | None = None,
 ) -> None:
     """消息判定链路:幂等 ingest → 管线 → 客服接口异步回消息。成员已由回调入口解析。"""
     openid = data.get("FromUserName", "")
@@ -203,6 +226,7 @@ async def _handle_wechat_message(
             content_type=ctype,
             channel="wechat",
             msg_id=data.get("MsgId") or None,
+            session_epoch=session_epoch,
         )
     except DuplicateMessage:
         return

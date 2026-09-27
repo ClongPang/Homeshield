@@ -106,6 +106,7 @@ class ReplyGenerator(Protocol):
         verdict: JudgeOutput,
         features: list[Feature],
         cases: list[KbCase],
+        basis_override: str | None = None,
     ) -> str: ...
 
 
@@ -117,9 +118,11 @@ class TemplateReply:
         verdict: JudgeOutput,
         features: list[Feature],
         cases: list[KbCase],
+        basis_override: str | None = None,
     ) -> str:
         advice = (cases[0].advice if cases else "先别转钱，和家人商量一下")[:60]
-        return _assemble_reply(verdict.level, _build_evidence_summary(features, verdict.cited_ids), advice)
+        basis = basis_override or _build_evidence_summary(features, verdict.cited_ids)
+        return _assemble_reply(verdict.level, basis, advice)
 
 
 class LLMReply:
@@ -131,6 +134,7 @@ class LLMReply:
         verdict: JudgeOutput,
         features: list[Feature],
         cases: list[KbCase],
+        basis_override: str | None = None,
     ) -> str:
         system = (
             "家庭反诈助手:用长辈能懂的大白话,只输出两段——【依据】…【建议】…,"
@@ -148,8 +152,8 @@ class LLMReply:
         for _ in range(2):
             parsed = _parse_reply_sections(await self.llm.chat_text("reply", system, user))
             if parsed:
-                return _assemble_reply(verdict.level, *parsed)
-        return await fallback.generate(verdict, features, cases)
+                return _assemble_reply(verdict.level, basis_override or parsed[0], parsed[1])
+        return await fallback.generate(verdict, features, cases, basis_override=basis_override)
 
 
 def _parse_reply_sections(text: str) -> tuple[str, str] | None:

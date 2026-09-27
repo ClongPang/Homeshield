@@ -150,6 +150,90 @@ def export_conversations(
             "unmapped_gap": unmapped}
 
 
+def export_cross_message(
+    conn: sqlite3.Connection,
+    out: str | Path,
+    *,
+    benign_path: str | Path = "data/samples/two_sided_v0.jsonl",
+    lang: str = "zh",
+    seed: int = 42,
+) -> dict[str, int]:
+    """导出分层跨消息弧;人工撰写的恐吓/误并补例标记待复核。"""
+    pool, _ = _build_mapped_case_pool(conn, lang)
+    picked = _sample_cases_by_scam_type(pool, 4, seed)
+    arcs: list[dict] = []
+
+    def add(arc_id: str, stratum: str, texts: list[str], delays: list[int],
+            label: str, source: str, scam_type: str | None = None) -> None:
+        row = {"arc_id": arc_id, "stratum": stratum,
+               "messages": [{"text": t, "delay_seconds": d} for t, d in zip(texts, delays)],
+               "final_label": label, "scam_type": scam_type, "source": source}
+        arcs.append(row)
+
+    for p in picked:
+        levels = conn.execute(
+            "SELECT text FROM fr_case WHERE fr_id=? AND lang=? AND level<=3 ORDER BY level",
+            (p["fr_id"], lang),
+        ).fetchall()
+        turns = [r["text"].strip() for r in levels]
+        if len(turns) >= 3:
+            add(f"conv#{p['fr_id']:04d}", "trust_same_incident", turns,
+                [0] + [3600] * (len(turns) - 1), "scam",
+                "adapted:fraud-r1:unreviewed", p["scam_type"])
+
+    for index, p in enumerate(picked[:12], 1):
+        account = f"622202020202{index:04d}"
+        add(f"linked#{index:02d}", "trust_linked",
+            [p["text"] + f"\n账号 {account}", f"请转账到账号 {account}"],
+            [0, 86400 + index * 3600], "scam", "adapted:fraud-r1:unreviewed", p["scam_type"])
+        add(f"unlinked#{index:02d}", "trust_unlinked",
+            [p["text"], "他又让我转账了"], [0, 86400 + index * 3600],
+            "scam", "adapted:fraud-r1:unreviewed", p["scam_type"])
+
+    fear_priors = [
+        "自称公安局的人说这是机密，不能告诉任何人", "他说是检察院调查，案件保密",
+        "对方说法院正在查我，不许告诉任何人", "有人冒充客服，说退款流程绝对保密",
+        "对方说安全账户核查期间别声张", "他说银行账户涉案，不要告诉任何人",
+        "自称公安局的人说不能声张", "对方说要配合清查，这是机密",
+        "客服说退款涉及内部审核，案件保密", "有人说是法院通知，绝对保密",
+        "对方称检察院在查，不能告诉任何人", "自称公安局的人让我别声张",
+    ]
+    for index, prior in enumerate(fear_priors, 1):
+        add(f"fear#{index:02d}", "fear", [prior, "对方接着要求我转账"],
+            [0, index * 300], "scam", "author_draft:unreviewed", "impersonate_police")
+    for index in range(8):
+        add(f"overwindow#{index:02d}", "overwindow",
+            [fear_priors[index], "对方接着要求我转账"], [0, 604801 + index],
+            "scam", "author_draft:unreviewed", "impersonate_police")
+
+    benign: list[dict] = []
+    for path in [Path(benign_path), Path("data/samples/benign_hard.jsonl")]:
+        if path.exists():
+            benign += [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                       if line.strip() and json.loads(line).get("label") in {"benign", "edge"}]
+    by_text = {row["text"]: row for row in benign}
+    authored = [
+        "今天给孩子转账生活费，已经到账", "我把房租转账给房东了", "给同事转账还了午饭钱",
+        "买菜付款后收到电子小票", "今天下午去公园散步", "家里水电费已经缴清",
+        "明天接孩子放学", "快递已由物业代收",
+    ]
+    for text in authored:
+        by_text.setdefault(text, {"text": text, "source": "author_draft:unreviewed"})
+    benign_rows = list(by_text.values())[:30]
+    if len(benign_rows) < 30:
+        raise ValueError("need at least 30 distinct benign current messages")
+    for index, row in enumerate(benign_rows, 1):
+        add(f"mismerge_benign#{index:02d}", "mismerge_benign",
+            ["明天一起吃饭吧", row["text"]], [0, 300], "benign",
+            row.get("source", "adapted:benign"))
+        prior = "案件保密，请立即转账" if index <= 15 else "这是机密，别告诉家人"
+        add(f"mismerge_risky#{index:02d}", "mismerge_risky",
+            [prior, row["text"]], [0, 300], "benign", row.get("source", "adapted:benign"))
+
+    _write_jsonl(out, arcs)
+    return dict(Counter(row["stratum"] for row in arcs))
+
+
 def _write_jsonl(path: str | Path, rows: list[dict]) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:

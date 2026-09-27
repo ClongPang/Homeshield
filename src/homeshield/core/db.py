@@ -6,6 +6,12 @@ CREATE TABLE IF NOT EXISTS user(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     openid TEXT NOT NULL UNIQUE,
     token TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    session_epoch INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS session_reset_msg(
+    msg_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES user(id),
     created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS protection_group(
@@ -40,15 +46,29 @@ CREATE TABLE IF NOT EXISTS bind_code(
     expires_at INTEGER NOT NULL,
     used_at INTEGER
 );
+CREATE TABLE IF NOT EXISTS incident(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES user(id),
+    opened_at INTEGER NOT NULL,
+    last_query_at INTEGER NOT NULL,
+    closed_at INTEGER,
+    close_reason TEXT CHECK(close_reason IN ('timeout','explicit','manual'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_open_incident ON incident(user_id) WHERE closed_at IS NULL;
 CREATE TABLE IF NOT EXISTS query(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES user(id),
     content_type TEXT NOT NULL CHECK(content_type IN ('text','url','image')),
     content TEXT NOT NULL,
     msg_id TEXT,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    incident_id INTEGER REFERENCES incident(id),
+    transcript TEXT,
+    kind TEXT NOT NULL DEFAULT 'query' CHECK(kind IN ('query','ack'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_query_msg_id ON query(msg_id) WHERE msg_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_query_user_time ON query(user_id,created_at);
+CREATE INDEX IF NOT EXISTS ix_query_incident ON query(incident_id);
 CREATE TABLE IF NOT EXISTS query_group(
     query_id INTEGER NOT NULL REFERENCES query(id),
     group_id INTEGER NOT NULL REFERENCES protection_group(id),
@@ -66,7 +86,8 @@ CREATE TABLE IF NOT EXISTS verdict(
     reply TEXT NOT NULL,
     latency_ms INTEGER NOT NULL,
     mode TEXT NOT NULL CHECK(mode IN ('mock','llm')),
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    context_snapshot TEXT
 );
 CREATE TABLE IF NOT EXISTS alert(
     id INTEGER PRIMARY KEY AUTOINCREMENT,

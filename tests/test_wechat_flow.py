@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 
+import httpx
 from fastapi.testclient import TestClient
 
 from homeshield.core import messages
@@ -143,6 +144,72 @@ def _client(tmp_path, **extra):
 def _qs():
     ts, nonce = "1", "n"
     return f"signature={_sign('t', ts, nonce)}&timestamp={ts}&nonce={nonce}"
+
+
+def test_wechat_ack_and_reset(tmp_path):
+    client = _client(tmp_path)
+    _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[开通 家庭]]></Content>"))
+    deps = client.app.state.deps
+    query = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[请转账]]></Content><MsgId>q1</MsgId>"))
+    assert messages.RECEIVED_ACK in query.text
+    user = deps.repos.users.get_by_openid("o_user")
+    assert deps.repos.incident.list_for_user(user.id)[0]["closed_at"] is None
+    ack_xml = _xml("text", "<Content><![CDATA[谢谢]]></Content><MsgId>a1</MsgId>")
+    ack = _post_callback(client, _qs(), ack_xml)
+    assert messages.ACK_QUERY_REPLY in ack.text
+    _post_callback(client, _qs(), ack_xml)
+    assert deps.conn.execute("SELECT COUNT(*) FROM query WHERE msg_id='a1'").fetchone()[0] == 1
+    assert deps.conn.execute("SELECT COUNT(*) FROM verdict v JOIN query q ON q.id=v.query_id WHERE q.msg_id='a1'").fetchone()[0] == 0
+    reset = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[新的]]></Content>"))
+    assert messages.SESSION_RESET_REPLY in reset.text
+    assert deps.repos.incident.list_for_user(user.id)[0]["close_reason"] == "explicit"
+
+
+def test_wechat_query_arriving_before_reset_cannot_reopen_old_case(tmp_path, monkeypatch):
+    app = create_app(Settings(mode="mock", db_path=str(tmp_path / "race.db"), wechat_token="t"))
+    deps = app.state.deps
+    sent = []
+
+    async def fake_send(openid, text):
+        sent.append((openid, text))
+
+    monkeypatch.setattr(deps.wechat, "send_customer_service", fake_send)
+    original_verify = deps.verification.verify
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_verify(**kwargs):
+        if kwargs.get("msg_id") == "q-before-reset":
+            started.set()
+            await release.wait()
+        return await original_verify(**kwargs)
+
+    monkeypatch.setattr(deps.verification, "verify", delayed_verify)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            async def post(content, msg_id):
+                xml = _xml("text", f"<Content><![CDATA[{content}]]></Content><MsgId>{msg_id}</MsgId>")
+                return await client.post(f"/wechat/callback?{_qs()}", content=xml.encode())
+
+            await post("开通 家庭", "open-1")
+            first_task = asyncio.create_task(post("旧查询", "q-before-reset"))
+            await asyncio.wait_for(started.wait(), 2)
+            reset = await post("新的", "reset-1")
+            assert messages.SESSION_RESET_REPLY in reset.text
+            release.set()
+            await first_task
+            user = deps.repos.users.get_by_openid("o_user")
+            old = deps.conn.execute("SELECT incident_id FROM query WHERE msg_id='q-before-reset'").fetchone()
+            assert old is not None and old["incident_id"] is None
+            assert deps.repos.incident.list_for_user(user.id) == []
+            await post("新查询", "q-after-reset")
+            assert deps.repos.incident.list_for_user(user.id)[0]["closed_at"] is None
+            await post("新的", "reset-1")  # 微信重试旧命令不应关闭新案件
+            assert deps.repos.incident.list_for_user(user.id)[0]["closed_at"] is None
+
+    asyncio.run(scenario())
+    assert sent  # 后台查询仍有独立回复
 
 
 def test_open_command_creates_group_and_admin(tmp_path):

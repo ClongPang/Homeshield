@@ -98,3 +98,15 @@ def test_safe_advice_code_owned():
     assert "随便花" not in reply
     assert "看起来没什么问题" not in reply
     assert is_valid_reply(reply)
+
+
+def test_cross_message_basis_override():
+    basis = "前情有保密要求，本条又要求转账（跨消息）"
+    llm = FakeLLM(["【依据】旧截图里写了秘密账号\\n【建议】先和家人核实"])
+    reply = asyncio.run(LLMReply(llm).generate(
+        _verdict(Level.DANGEROUS), _features(), [], basis_override=basis
+    ))
+    assert basis in reply and "秘密账号" not in reply
+    assert is_valid_reply(reply)
+    plain = asyncio.run(TemplateReply().generate(_verdict(Level.DANGEROUS), _features(), []))
+    assert "要求转账：转账" in plain

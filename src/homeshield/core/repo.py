@@ -221,7 +221,7 @@ class QueryRepo:
         self.conn = conn
 
     def insert(self, user_id: int, memberships: list[Member], content_type: str,
-               content: str, msg_id: str | None) -> int:
+               content: str, msg_id: str | None, kind: str = "query") -> int:
         try:
             with WRITE_LOCK, self.conn:
                 # 查询群快照和成员生命周期共用写锁,不把已退群成员的旧列表写入查询。
@@ -236,8 +236,8 @@ class QueryRepo:
                     raise ValidationError("user has no active group")
                 now = utc_timestamp()
                 cur = self.conn.execute(
-                    "INSERT INTO query(user_id,content_type,content,msg_id,created_at) VALUES(?,?,?,?,?)",
-                    (user_id, content_type, content, msg_id, now),
+                    "INSERT INTO query(user_id,content_type,content,msg_id,created_at,kind) VALUES(?,?,?,?,?,?)",
+                    (user_id, content_type, content, msg_id, now, kind),
                 )
                 qid = int(cur.lastrowid)
                 for member in memberships:
@@ -257,6 +257,27 @@ class QueryRepo:
         row = self.conn.execute("SELECT * FROM query WHERE id=?", (query_id,)).fetchone()
         return dict(row) if row else None
 
+    def update_transcript(self, query_id: int, transcript: str) -> None:
+        with WRITE_LOCK, self.conn:
+            self.conn.execute(
+                "UPDATE query SET transcript=? WHERE id=? AND content_type='image'",
+                (transcript, query_id),
+            )
+
+    def supply_context(self, query_id: int, user_id: int, window_seconds: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT prior.id,prior.content_type,prior.content,prior.transcript,"
+            "prior.created_at,prior.incident_id,cur.incident_id AS current_incident_id,"
+            "cur.created_at AS current_created_at FROM query cur JOIN query prior "
+            "ON prior.user_id=cur.user_id WHERE cur.id=? AND cur.user_id=? "
+            "AND cur.kind='query' AND cur.incident_id IS NOT NULL "
+            "AND prior.kind='query' AND prior.id<cur.id "
+            "AND prior.created_at>=cur.created_at-? "
+            "ORDER BY prior.created_at DESC,prior.id DESC LIMIT 200",
+            (query_id, user_id, window_seconds),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_groups_for_query(self, query_id: int) -> list[dict]:
         rows = self.conn.execute(
             "SELECT qg.group_id,qg.query_member_id,g.name,g.disbanded_at FROM query_group qg "
@@ -268,9 +289,100 @@ class QueryRepo:
     def count_queries_for_group_since(self, group_id: int, since: int) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) c FROM query_group qg JOIN query q ON q.id=qg.query_id "
-            "WHERE qg.group_id=? AND q.created_at>=?", (group_id, since),
+            "WHERE qg.group_id=? AND q.created_at>=? AND q.kind='query'", (group_id, since),
         ).fetchone()
         return int(row["c"])
+
+
+@_serialize_repo_access
+class IncidentRepo:
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+    def current_epoch(self, user_id: int) -> int:
+        row = self.conn.execute("SELECT session_epoch FROM user WHERE id=?", (user_id,)).fetchone()
+        if row is None:
+            raise ValidationError("user not found")
+        return int(row["session_epoch"])
+
+    def attach_query_to_incident(self, query_id: int, user_id: int, idle_seconds: int,
+                                 expected_epoch: int | None = None) -> int | None:
+        # SQLite 的同一连接由 WRITE_LOCK 串行化;冲突重试覆盖多连接写入窗口。
+        for attempt in range(2):
+            try:
+                with WRITE_LOCK, self.conn:
+                    # 读代次前先拿 SQLite 写锁,防止另一进程在检查后、入案前完成重开。
+                    self.conn.execute("BEGIN IMMEDIATE")
+                    if expected_epoch is not None and self.current_epoch(user_id) != expected_epoch:
+                        return None  # 回调收到查询后用户已显式重开;旧查询仅按本条判定
+                    query = self.conn.execute(
+                        "SELECT created_at FROM query WHERE id=? AND user_id=? AND kind='query'",
+                        (query_id, user_id),
+                    ).fetchone()
+                    if query is None:
+                        raise ValidationError("query not found")
+                    now = int(query["created_at"])
+                    inc = self.conn.execute(
+                        "SELECT id,opened_at,last_query_at FROM incident WHERE user_id=? AND closed_at IS NULL",
+                        (user_id,),
+                    ).fetchone()
+                    if inc is not None and now < int(inc["opened_at"]) - idle_seconds:
+                        return None  # 超过同案空闲窗的迟到查询不可并入后来才开启的案件
+                    if inc is not None and now - int(inc["last_query_at"]) <= idle_seconds:
+                        incident_id = int(inc["id"])
+                        self.conn.execute(
+                            "UPDATE incident SET last_query_at=? WHERE id=?",
+                            (max(now, int(inc["last_query_at"])), incident_id),
+                        )
+                    else:
+                        if inc is not None:
+                            self.conn.execute(
+                                "UPDATE incident SET closed_at=?,close_reason='timeout' WHERE id=?",
+                                (now, inc["id"]),
+                            )
+                        cur = self.conn.execute(
+                            "INSERT INTO incident(user_id,opened_at,last_query_at) VALUES(?,?,?)",
+                            (user_id, now, now),
+                        )
+                        incident_id = int(cur.lastrowid)
+                    self.conn.execute(
+                        "UPDATE query SET incident_id=? WHERE id=?", (incident_id, query_id)
+                    )
+                    return incident_id
+            except sqlite3.IntegrityError:
+                if attempt:
+                    raise
+        raise RuntimeError("incident attach failed")
+
+    def close_open_incident(self, user_id: int, reason: str = "explicit",
+                            msg_id: str | None = None) -> bool:
+        if reason not in {"explicit", "manual"}:
+            raise ValidationError("invalid close reason")
+        with WRITE_LOCK, self.conn:
+            if msg_id:
+                try:
+                    self.conn.execute(
+                        "INSERT INTO session_reset_msg(msg_id,user_id,created_at) VALUES(?,?,?)",
+                        (msg_id, user_id, utc_timestamp()),
+                    )
+                except sqlite3.IntegrityError:
+                    return False
+            self.conn.execute(
+                "UPDATE user SET session_epoch=session_epoch+1 WHERE id=?", (user_id,)
+            )
+            self.conn.execute(
+                "UPDATE incident SET closed_at=?,close_reason=? WHERE user_id=? AND closed_at IS NULL",
+                (utc_timestamp(), reason, user_id),
+            )
+        return True
+
+    def list_for_user(self, user_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT i.*,COUNT(q.id) AS query_count FROM incident i LEFT JOIN query q "
+            "ON q.incident_id=i.id AND q.kind='query' WHERE i.user_id=? "
+            "GROUP BY i.id ORDER BY i.id DESC", (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 @_serialize_repo_access
@@ -279,13 +391,14 @@ class VerdictRepo:
         self.conn = conn
 
     def insert(self, query_id: int, level: Level, cited_ids: list[str], features_snapshot: list[dict],
-               reason: str, reply: str, latency_ms: int, mode: Mode) -> int:
+               reason: str, reply: str, latency_ms: int, mode: Mode,
+               context_snapshot: str | None = None) -> int:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
-                "INSERT INTO verdict(query_id,level,cited_ids,features,reason,reply,latency_ms,mode,created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO verdict(query_id,level,cited_ids,features,reason,reply,latency_ms,mode,created_at,context_snapshot)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (query_id, level.value, json.dumps(cited_ids), json.dumps(features_snapshot, ensure_ascii=False),
-                 reason, reply, latency_ms, mode.value, utc_timestamp()),
+                 reason, reply, latency_ms, mode.value, utc_timestamp(), context_snapshot),
             )
         return int(cur.lastrowid)
 
@@ -602,9 +715,10 @@ class Repos:
     alert: AlertRepo
     correction: CorrectionRepo
     bind_code: BindCodeRepo
+    incident: IncidentRepo
 
 
 def make_repos(conn: sqlite3.Connection) -> Repos:
     users = UserRepo(conn)
     return Repos(conn,users,GroupRepo(conn),MemberRepo(conn,users),QueryRepo(conn),VerdictRepo(conn),
-                 AlertRepo(conn),CorrectionRepo(conn),BindCodeRepo(conn))
+                 AlertRepo(conn),CorrectionRepo(conn),BindCodeRepo(conn),IncidentRepo(conn))

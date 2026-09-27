@@ -13,7 +13,7 @@ from collections import Counter
 from pathlib import Path
 
 from homeshield.kbbuild.db import OFFLINE_DB_PATH, connect, init_schema
-from homeshield.kbbuild.export import export_conversations, export_eval
+from homeshield.kbbuild.export import export_conversations, export_cross_message, export_eval
 from homeshield.kbbuild.importer import import_fraud_r1_dataset
 
 _LANG_FILE = {"zh": "Chinese", "en": "English"}
@@ -125,6 +125,13 @@ def _cmd_export_conversations(args) -> None:
     print("→", args.out)
 
 
+def _cmd_export_cross_message(args) -> None:
+    conn = connect(args.db)
+    summary = export_cross_message(conn, args.out, benign_path=args.benign, seed=args.seed)
+    print("export-cross-message:", json.dumps(summary, ensure_ascii=False))
+    print("→", args.out)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser("kbbuild", description="离线素材库构建工具")
     ap.add_argument("--db", default=OFFLINE_DB_PATH, help="离线库路径")
@@ -147,12 +154,17 @@ def main() -> None:
     p.add_argument("--per-class", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", default="data/samples/fraud_r1_conversations.jsonl")
+    p = sub.add_parser("export-cross-message", help="导出分层跨消息弧(含待复核样本)")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--benign", default="data/samples/two_sided_v0.jsonl")
+    p.add_argument("--out", default="data/samples/fraud_r1_cross_message.jsonl")
 
     args = ap.parse_args()
     {"init-db": _cmd_init_db, "import": _cmd_import,
      "stats": _cmd_stats, "export-eval": _cmd_export_eval,
      "mechanics-report": _cmd_mechanics_report,
-     "export-conversations": _cmd_export_conversations}[args.cmd](args)
+     "export-conversations": _cmd_export_conversations,
+     "export-cross-message": _cmd_export_cross_message}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -150,6 +150,7 @@ def build_group_router(
             raise HTTPException(409, "duplicate msg_id")
         result = outcome.result
         return {
+            "kind": outcome.kind,
             "query_id": result.query_id, "verdict_id": result.verdict_id,
             "level": result.verdict.level.value if result.verdict else None,
             "cited_ids": result.verdict.cited_ids if result.verdict else [],

@@ -11,6 +11,7 @@ from homeshield.core.intake import ingest
 from homeshield.core.models import Member, User
 from homeshield.core.pipeline import Pipeline, PipelineResult
 from homeshield.core.repo import Repos
+from homeshield.core.triage import classify
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class VerificationOutcome:
     query_id: int
     duplicate: bool
     result: PipelineResult | None  # duplicate 时为 None
+    kind: str = "query"
 
 
 class VerificationService:
@@ -37,6 +39,7 @@ class VerificationService:
         content_type: str | None = None,
         channel: str = "web",
         msg_id: str | None = None,
+        session_epoch: int | None = None,
     ) -> VerificationOutcome:
         if user is None and member is not None and member.user_id is not None:
             user = self.repos.users.get(member.user_id)
@@ -46,6 +49,9 @@ class VerificationService:
             memberships = self.repos.member.list_for_user(user.id)
         if not memberships:
             raise ValueError("user has no active group")
+        kind = "query"
+        if (content_type is None or content_type == "text") and classify(content) == "ack":
+            kind = "ack"
         intake = ingest(
             self.repos,
             user_id=user.id,
@@ -54,9 +60,25 @@ class VerificationService:
             content_type=content_type,
             channel=channel,
             msg_id=msg_id,
+            kind=kind,
         )
         if intake.duplicate:
-            return VerificationOutcome(query_id=intake.query_id or 0, duplicate=True, result=None)
+            previous = self.repos.query.get(intake.query_id or 0)
+            return VerificationOutcome(query_id=intake.query_id or 0, duplicate=True, result=None,
+                                       kind=previous["kind"] if previous else kind)
+        if kind == "ack":
+            return VerificationOutcome(
+                query_id=intake.query_id, duplicate=False,
+                result=PipelineResult(query_id=intake.query_id, reply=messages.ACK_QUERY_REPLY,
+                                      latency_ms=0), kind="ack",
+            )
+        try:
+            self.repos.incident.attach_query_to_incident(
+                intake.query_id, user.id, self.pipeline.incident_idle_seconds,
+                expected_epoch=session_epoch,
+            )
+        except Exception:
+            logger.warning("incident partition failed, judge current message only", exc_info=True)
         try:
             result = await self.pipeline.run(intake.message, intake.query_id)
         except Exception:
@@ -68,4 +90,4 @@ class VerificationService:
                 latency_ms=0,
                 degraded=True,
             )
-        return VerificationOutcome(query_id=result.query_id, duplicate=False, result=result)
+        return VerificationOutcome(query_id=result.query_id, duplicate=False, result=result, kind="query")
