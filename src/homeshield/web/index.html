@@ -39,12 +39,13 @@ async function query(payload) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token, msg_id: crypto.randomUUID(), ...payload }),
     });
-    if (resp.status === 401) return show("链接已失效,请让家人重新发一条链接");
-    if (!resp.ok) return show("小盾暂时出错了,请稍后再试");
+    if (resp.status === 401) return show("链接已失效，请让家人重新发一条链接");
+    if (resp.status === 409) return show("这条消息已经提交过了，请稍等结果");
+    if (!resp.ok) return show("小盾暂时出错了，请稍后再试");
     const data = await resp.json();
-    show(data.reply || "小盾暂时出错了,请稍后再试");
+    show(data.reply || "小盾暂时出错了，请稍后再试");
   } catch (e) {
-    show("网络出了点问题,请稍后再试");
+    show("网络出了点问题，请稍后再试");
   }
 }
 

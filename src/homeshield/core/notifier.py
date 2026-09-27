@@ -89,7 +89,7 @@ class AlertRouter:
                 continue
             if context["active_group_count"] == 1:
                 template_id = self.template_id
-                data = {"thing1":{"value":content[:20]},"phrase1":{"value":"高危预警"}}
+                data = {"thing1":{"value":_clip(content)},"phrase1":{"value":"高危预警"}}
             else:
                 template_id = self.multi_template_id
                 if not template_id:
@@ -98,8 +98,8 @@ class AlertRouter:
                 names = [g["name"] for g in context["groups"]]
                 first = names[0]
                 label = f"{first}等{len(names)}群" if len(names)>1 else first
-                data = {"thing1":{"value":content[:20]},"phrase1":{"value":"高危预警"},
-                        "thing2":{"value":label[:20]}}
+                data = {"thing1":{"value":_clip(content)},"phrase1":{"value":"高危预警"},
+                        "thing2":{"value":_clip(label)}}
             if not template_id:
                 continue
             url = f"{self.base_url}/alert/{verdict_id}?token={context['token']}" if self.base_url else None
@@ -107,6 +107,11 @@ class AlertRouter:
                 await self.wechat.send_template(context["openid"],data,url=url,template_id=template_id)
             except Exception:
                 logger.warning("wechat template send failed openid=%s",context["openid"],exc_info=True)
+
+
+def _clip(text: str, limit: int = 20) -> str:
+    """微信模板字段限长,截断补省略号。"""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def wire_alerts(bus: EventBus, broker: AlertBroker, repos: Repos, base_url: str = "",

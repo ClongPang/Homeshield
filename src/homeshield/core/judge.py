@@ -177,6 +177,6 @@ async def judge_with_validation(
         last = out
     logger.warning("validation exhausted, degrade to manual review")
     raise DegradeError(
-        "这条消息我拿不准,请把内容给家人看看再决定",
+        "这条消息我拿不准，请把内容给家人看看再决定",
         f"validation exhausted: {last}",
     )

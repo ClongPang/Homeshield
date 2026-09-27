@@ -174,7 +174,7 @@ class Pipeline:
             raise
         except Exception as e:  # 网络/格式失败 → 降级
             logger.warning("image transcribe failed, degrade to text prompt", exc_info=True)
-            raise DegradeError("图片看不清,请把内容打成文字发我", f"transcribe failed: {e}") from e
+            raise DegradeError("图片看不清，请把内容打成文字发我", f"transcribe failed: {e}") from e
 
     # ---- 阶段 2:特征抽取 + 检索 ----------------------------------------
     async def _extract(self, conversation: Conversation) -> Extraction:

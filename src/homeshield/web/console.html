@@ -59,13 +59,39 @@ function tokenUrl(path, withGroup = false) {
   if (withGroup && current) url.searchParams.set("group_id", current.id);
   return url;
 }
+// 后端错误详情(机器码/英文)→家人可读文案;未知详情不外露原文,收口为通用兜底。
+const ERROR_TEXTS = {
+  "no active group": "你还没有加入防护群。",
+  "group_id is required": "请先选择一个防护群。",
+  "group not found": "没有找到这个防护群，请刷新后重试。",
+  "only trusted member can manage group": "只有信任成员可以执行这个操作。",
+  "invitation unavailable": "邀请已失效，请重新生成邀请。",
+  "name is empty": "请填写名称。",
+  "correction not found": "没有找到这条反馈。",
+  "correction not in a related group": "这条反馈不在你所在的防护群中，无法处理。",
+  "member not found": "没有找到这位成员，请刷新后重试。",
+  "only member or trusted member can rename": "只有本人或信任成员可以修改称呼。",
+  "an unbound invitation cannot be trusted": "对方还没有加入，不能设为信任成员。",
+  "group reached max members": "防护群成员数已达上限。",
+  "only active trusted member can manage members": "只有信任成员可以管理成员。",
+  "cannot change own trust": "不能修改自己的信任权限。",
+  "cannot demote the last trusted member": "群内至少要有一位信任成员，请先移交权限。",
+  "only active bound members can be trusted": "只有已加入的成员才能设为信任成员。"
+};
+function errorText(data) {
+  const d = data && data.detail;
+  const key = typeof d === "string" ? d : (d && typeof d.reason === "string" ? d.reason : "");
+  if (ERROR_TEXTS[key]) return ERROR_TEXTS[key];
+  if (typeof key === "string" && key.startsWith("duplicate msg_id")) return "这条消息已经提交过了。";
+  return "操作失败，请稍后再试。";
+}
 async function request(path, {method="GET", body=null, group=false} = {}) {
   const url = tokenUrl(path, group);
   const response = await fetch(url, {method, headers: body ? {"Content-Type":"application/json"} : {},
     body: body ? JSON.stringify({token, ...body}) : undefined});
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) { byId("app").replaceChildren(el("div", "链接已失效，请让家人重新发送控制台链接。", "card")); throw new Error("unauthorized"); }
-  if (!response.ok) throw new Error(data.detail?.reason || data.detail || "操作失败，请稍后再试。");
+  if (!response.ok) throw new Error(errorText(data));
   return data;
 }
 function action(label, run, cls="") { const b=el("button",label,cls); b.onclick=async()=>{ clearNotice(); try { await run(); } catch(e) { notice(String(e.message || e)); } }; return b; }

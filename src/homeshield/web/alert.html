@@ -46,7 +46,7 @@ function renderDetail(d) {
     app.append(el("div",`你已反馈：${label}（${state}）`,"card muted"));
   } else {
     const box=el("div",undefined,"card"); box.append(el("b","核实之后，这条预警准吗？"));
-    box.append(el("div","提交后，原查询消息会展示给你仍在的相关防护群信任成员，用于确认这条反馈。","muted"));
+    box.append(el("div","提交后，你所在防护群的信任成员会看到这条消息，用来确认这条反馈。","muted"));
     box.append(button("是误报",()=>feedback("false_positive")));
     box.append(button("是真骗局",()=>feedback("real"),"danger")); app.append(box);
   }

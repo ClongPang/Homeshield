@@ -33,8 +33,17 @@ def test_llm_cannot_override_conclusion():
     """LLM 把结论写成 safe 语气,产出仍由代码按判定级别决定。"""
     llm = FakeLLM(["【结论】看起来没什么问题\n【依据】出现转账要求\n【建议】不要理会"])
     reply = asyncio.run(LLMReply(llm).generate(_verdict(Level.DANGEROUS), _features(), []))
-    assert reply.startswith("【结论】⚠️ 是骗子,别转钱")
+    assert reply.startswith("【结论】⚠️ 这是典型骗术，千万别转钱")
     assert "看起来没什么问题" not in reply
+    assert validate_reply(reply)
+
+
+def test_dangerous_reply_no_identity_claim_and_official_fallback():
+    """高危结论不断言发送者身份(免责),96110 官方兜底后缀代码所有、不被 LLM 覆盖。"""
+    llm = FakeLLM(["【依据】对方自称公检法\n【建议】挂断并拨110核实"])
+    reply = asyncio.run(LLMReply(llm).generate(_verdict(Level.DANGEROUS), _features(), []))
+    assert "是骗子" not in reply
+    assert "紧急可拨反诈专线96110" in reply
     assert validate_reply(reply)
 
 
@@ -50,9 +59,16 @@ def test_delivery_notice_is_added_only_by_alert_coordinator():
 def test_fallback_to_template_on_garbage():
     llm = FakeLLM(["我不知道你在说什么", "这是一条消息"])
     reply = asyncio.run(LLMReply(llm).generate(_verdict(Level.SUSPICIOUS), _features(), []))
-    assert reply.startswith("【结论】⚠️ 这条消息有问题,多留个心眼")
-    assert "transfer:转账" in reply  # 模板兜底的依据取自特征
+    assert reply.startswith("【结论】⚠️ 这条消息有问题，多留个心眼")
+    assert "要求转账：转账" in reply  # 模板兜底的依据取自特征,类型以中文标签呈现
+    assert "transfer" not in reply  # 机器 id 不出用户面
     assert validate_reply(reply)
+
+
+def test_unknown_feature_type_falls_back_to_chinese_label():
+    features = [Feature(id="F01", type="not_a_mechanic", value="奇怪内容")]
+    reply = asyncio.run(TemplateReply().generate(_verdict(Level.SUSPICIOUS), features, []))
+    assert "可疑特征：奇怪内容" in reply
 
 
 def test_delivery_notice_survives_truncation():

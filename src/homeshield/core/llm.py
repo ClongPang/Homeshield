@@ -78,7 +78,7 @@ class MockLLM:
 
     async def transcribe_image(self, image_b64: str, hint: str) -> str:
         if "DEGRADE" in image_b64[:64] or "DEGRADE" in hint:
-            raise DegradeError("图片看不清,请把内容打成文字发我", "mock transcribe degrade")
+            raise DegradeError("图片看不清，请把内容打成文字发我", "mock transcribe degrade")
         return f"转写文本(mock):{hint or image_b64[:16]}"
 
 

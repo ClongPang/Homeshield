@@ -26,7 +26,11 @@ def build_group_router(
             raise HTTPException(401, "invalid token")
         return user
 
-    def group_for_user(user: User, group_id: int | None) -> dict:
+    def resolve_user_group(user: User, group_id: int | None) -> dict:
+        """
+        在用户加入的群里找到目标群，返回群信息。
+        没传群 ID 时，只有用户只加入一个群才会自动选中；加入多个群就必须指定。它用于确定“操作哪个群”
+        """
         groups = deps.repos.group.list_for_user(user.id)
         if group_id is None:
             if len(groups) != 1:
@@ -39,14 +43,17 @@ def build_group_router(
             raise HTTPException(404, "group not found")
         return group
 
-    def membership(user: User, group_id: int) -> Member:
+    def require_active_membership(user: User, group_id: int) -> Member:
+        """
+        找到这个用户在目标群里的那条成员记录，返回 Member
+        """
         row = next((m for m in deps.repos.member.list_for_user(user.id) if m.group_id == group_id), None)
         if row is None:
             raise HTTPException(404, "group not found")
         return row
 
     def require_trusted(user: User, group_id: int) -> Member:
-        member = membership(user, group_id)
+        member = require_active_membership(user, group_id)
         if not member.trusted:
             raise HTTPException(403, "only trusted member can manage group")
         return member
@@ -154,7 +161,7 @@ def build_group_router(
     def api_alerts(token: str = Query(""), group_id: int | None = Query(None)):
         user = user_by_token(token)
         with WRITE_LOCK:
-            group = group_for_user(user, group_id)
+            group = resolve_user_group(user, group_id)
             rows = deps.repos.alert.list_for_user_group(user.id, group["id"])
         return {"group_id": group["id"], "alerts": [
             {"verdict_id": r["verdict_id"], "level": r["level"],
@@ -183,8 +190,8 @@ def build_group_router(
     def api_corrections_list(token: str = Query(""), group_id: int | None = Query(None)):
         user = user_by_token(token)
         with WRITE_LOCK:
-            group = group_for_user(user, group_id)
-            viewer = membership(user, group["id"])
+            group = resolve_user_group(user, group_id)
+            viewer = require_active_membership(user, group["id"])
             rows = deps.repos.correction.list_pending_with_context(group["id"]) if viewer.trusted else []
         return {"group_id": group["id"], "viewer_trusted": viewer.trusted, "pending": rows}
 
@@ -221,14 +228,14 @@ def build_group_router(
     def api_weekly(token: str = Query(""), group_id: int | None = Query(None)):
         user = user_by_token(token)
         with WRITE_LOCK:
-            group = group_for_user(user, group_id)
+            group = resolve_user_group(user, group_id)
             return weekly_report(deps.repos, group["id"])
 
     @router.get("/api/groups/{gid}/members")
     def api_members(gid: int, token: str = Query("")):
         user = user_by_token(token)
         with WRITE_LOCK:
-            viewer = membership(user, gid)
+            viewer = require_active_membership(user, gid)
             return {
                 "group_id": gid, "viewer_id": viewer.id, "viewer_trusted": viewer.trusted,
                 "members": [
@@ -286,7 +293,7 @@ def build_group_router(
     def api_remove_member(gid: int, member_id: int, body: TokenIn):
         user = user_by_token(body.token)
         with WRITE_LOCK:
-            actor = membership(user, gid)
+            actor = require_active_membership(user, gid)
             if actor.id == member_id:
                 result = translate_validation(deps.groups.leave, user.id, gid)
             else:
@@ -301,7 +308,7 @@ def build_group_router(
         if not name:
             raise HTTPException(400, "name is empty")
         with WRITE_LOCK:
-            actor = membership(user, gid)
+            actor = require_active_membership(user, gid)
             target = deps.repos.member.get(member_id)
             if target is None or target.group_id != gid or target.ended_at is not None:
                 raise HTTPException(404, "member not found")

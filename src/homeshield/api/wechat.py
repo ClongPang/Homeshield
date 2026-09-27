@@ -102,7 +102,7 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
         return messages.BIND_SUCCESS.format(
             group=group["name"] if group else "我的防护群",
             name=bound.name,
-            link=f"\n个人网页入口:{link}" if link else "",
+            link=f"\n个人网页入口：{link}" if link else "",
         )
     if list_groups:
         if user is None:
@@ -110,8 +110,8 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
         groups = deps.repos.group.list_for_user(user.id)
         if not groups:
             return messages.BIND_GUIDE_OUTSIDE_GROUP
-        return "你加入的防护群:\n" + "\n".join(
-            f"{i}. {g['name']}({ '信任成员' if g['trusted'] else '普通成员'})" for i,g in enumerate(groups,1)
+        return "你加入的防护群：\n" + "\n".join(
+            f"{i}. {g['name']}（{'信任成员' if g['trusted'] else '普通成员'}）" for i,g in enumerate(groups,1)
         )
     if open_name is not None:
         if user is None:
@@ -122,9 +122,9 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
         elif not open_name:
             groups = deps.repos.group.list_for_user(user.id)
             if groups:
-                return "你已加入这些防护群:\n" + "\n".join(
+                return "你已加入这些防护群：\n" + "\n".join(
                     f"{i}. {g['name']}" for i,g in enumerate(groups,1)
-                ) + "\n新建群请回复:开通 群名"
+                ) + "\n新建群请回复：开通 群名"
             try:
                 admin = deps.binding.open_group(openid)
             except BindingError as e:
@@ -144,14 +144,14 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
         try:
             if disband_name is not None:
                 deps.groups.disband(user.id,target["id"])
-                return f"「{target['name']}」已解散,群内成员将无法再查看历史提醒。"
+                return f"「{target['name']}」已解散，群内成员将无法再查看历史提醒。"
             result = deps.groups.leave(user.id,target["id"])
-            return f"已退出「{target['name']}」。" + ("群内最后一名成员已退出,防护群已自动解散。" if result=="disbanded" else "")
+            return f"已退出「{target['name']}」。" + ("群内最后一名成员已退出，防护群已自动解散。" if result=="disbanded" else "")
         except Exception as e:
             reason = getattr(e,"message",None) or str(e)
             if "trust" in reason:
-                return "你是群内最后一位信任成员。请先把信任权限交给其他成员,再退出。"
-            return "无法完成操作,请检查群名和权限。"
+                return "你是群内最后一位信任成员。请先把信任权限交给其他成员，再退出。"
+            return "无法完成操作，请检查群名和权限。"
     else:
         return None
     group = deps.repos.group.get(admin.group_id)
@@ -228,5 +228,5 @@ def _resolve_group(deps: Deps, user_id: int, selector: str):
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
-        return "群名重复,请先回复「我的群」,再用列表序号操作。"
+        return "群名重复，请先回复「我的群」，再用列表序号操作。"
     return "没有找到这个防护群。回复「我的群」查看群列表。"

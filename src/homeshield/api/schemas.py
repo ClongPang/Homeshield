@@ -1,4 +1,4 @@
-"""家人 API 的请求载荷模型(token 凭证统一随体携带)。"""
+"""API的请求载荷模型(token 凭证统一随体携带)。"""
 from pydantic import BaseModel as PayloadModel
 
 
