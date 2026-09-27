@@ -1,8 +1,8 @@
-"""回复生成:结论行代码所有权、家人告知后缀、截断保护、回退。"""
+"""回复生成:结论行代码所有权、实际告警说明、截断保护、回退。"""
 import asyncio
 
 from homeshield.core.models import Feature, JudgeOutput, Level
-from homeshield.core.reply import LLMReply, TemplateReply, validate_reply
+from homeshield.core.reply import LLMReply, TemplateReply, add_delivery_notice, validate_reply
 
 
 class FakeLLM:
@@ -38,12 +38,13 @@ def test_llm_cannot_override_conclusion():
     assert validate_reply(reply)
 
 
-def test_family_suffix_code_owned():
+def test_delivery_notice_is_added_only_by_alert_coordinator():
     llm = FakeLLM(["【依据】对方自称公检法\n【建议】挂断并拨110核实"])
     dangerous = asyncio.run(LLMReply(llm).generate(_verdict(Level.DANGEROUS), _features(), []))
-    assert dangerous.endswith("我已经把这条消息告诉了你的家人")
+    assert "已为防护群发出高危提醒" not in dangerous
+    assert add_delivery_notice(dangerous,"已为防护群发出高危提醒").endswith("已为防护群发出高危提醒")
     safe = asyncio.run(LLMReply(llm).generate(_verdict(Level.SAFE), _features(), []))
-    assert "告诉了你的家人" not in safe
+    assert add_delivery_notice(safe,"") == safe
 
 
 def test_fallback_to_template_on_garbage():
@@ -54,21 +55,21 @@ def test_fallback_to_template_on_garbage():
     assert validate_reply(reply)
 
 
-def test_suffix_survives_truncation():
-    """依据/建议超长时截正文,家人告知后缀必须完整。"""
+def test_delivery_notice_survives_truncation():
+    """依据/建议超长时截正文,实际送达说明仍保留。"""
     long_value = "https://very-long-scam-domain.example.com/path?token=" + "x" * 60
     features = [Feature(id=f"F0{i}", type="url", value=long_value, evidence_span=long_value) for i in (1, 2)]
     verdict = JudgeOutput(level=Level.DANGEROUS, confidence=90, cited_ids=["F01", "F02"], reason="")
-    reply = asyncio.run(TemplateReply().generate(verdict, features, []))
+    reply = add_delivery_notice(asyncio.run(TemplateReply().generate(verdict, features, [])),"已向妈妈家发出高危提醒")
     assert len(reply) <= 150
-    assert reply.endswith("我已经把这条消息告诉了你的家人")
+    assert reply.endswith("已向妈妈家发出高危提醒")
     assert validate_reply(reply)
 
 
 def test_template_reply_safe_no_suffix():
     reply = asyncio.run(TemplateReply().generate(_verdict(Level.SAFE), _features(), []))
     assert reply.startswith("【结论】没发现已知骗术的特征")
-    assert "告诉了你的家人" not in reply
+    assert "已为防护群发出高危提醒" not in reply
     assert validate_reply(reply)
 
 

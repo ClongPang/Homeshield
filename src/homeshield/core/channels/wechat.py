@@ -80,9 +80,10 @@ class WeChatChannel:
             json={"touser": openid, "msgtype": "text", "text": {"content": text[:2000]}},
         )
 
-    async def send_template(self, openid: str, data: dict, url: str | None = None) -> None:
+    async def send_template(self, openid: str, data: dict, url: str | None = None,
+                            template_id: str | None = None) -> None:
         token = await self.access_token()
-        payload = {"touser": openid, "template_id": self.s.wechat_template_id, "data": data}
+        payload = {"touser": openid, "template_id": template_id or self.s.wechat_template_id, "data": data}
         if url:
             payload["url"] = url  # 点击通知直达控制台
         await self._client.post(

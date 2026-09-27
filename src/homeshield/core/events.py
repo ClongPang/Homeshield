@@ -17,13 +17,14 @@ from typing import Any, Callable
 from homeshield.core.models import JudgeOutput, Message
 
 
-@dataclass(frozen=True)
+@dataclass
 class VerdictCompleted:
     message: Message
     verdict: JudgeOutput
     reply: str
     query_id: int
     verdict_id: int
+    queryer_notice: str = ""
 
 
 Handler = Callable[[Any], Any] # 接收 1 个任意类型参数、返回任意类型的函数

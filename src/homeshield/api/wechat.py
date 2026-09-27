@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from homeshield.core import messages
-from homeshield.core.binding import BindingError, parse_bind_command
+from homeshield.core.binding import BindingError, parse_bind_command, parse_group_command, parse_open_command
 from homeshield.core.deps import Deps
 from homeshield.core.errors import DuplicateMessage
 from homeshield.core.models import Member
@@ -19,7 +19,7 @@ from homeshield.core.verification import VerificationService
 
 logger = logging.getLogger(__name__)
 
-OPEN_COMMANDS = {"开通", "开通家庭"}
+GROUP_LIST_COMMANDS = {"我的群", "我的防护群"}
 
 
 def build_wechat_router(deps: Deps, verification: VerificationService) -> APIRouter:
@@ -56,55 +56,110 @@ def build_wechat_router(deps: Deps, verification: VerificationService) -> APIRou
 
         # 开通/绑定是纯 DB 操作,5s 窗口内同步回结果;未绑定者只引导不判定
         openid = data.get("FromUserName", "")
-        member = deps.repos.member.get_by_openid(openid)
-        command_reply = _binding_reply(deps, member, openid, kind, data.get("Content", ""))
+        user = deps.repos.users.get_by_openid(openid)
+        memberships = deps.repos.member.list_for_user(user.id) if user else []
+        command_reply = _binding_reply(deps, user, openid, kind, data.get("Content", ""))
         if command_reply is not None:
             return PlainTextResponse(ch.passive_text_reply(data, command_reply))
-        if member is None:
+        if user is None:
             return PlainTextResponse(ch.passive_text_reply(data, messages.BIND_GUIDE))
+        if not memberships:
+            return PlainTextResponse(ch.passive_text_reply(data, messages.BIND_GUIDE_OUTSIDE_GROUP))
 
         # text / image:5s 窗口内先回可见回执,正式判定经客服接口异步送达
-        background.add_task(_handle_wechat_message, deps, verification, ch, data, member)
+        background.add_task(_handle_wechat_message, deps, verification, ch, data, user, memberships)
         return PlainTextResponse(ch.passive_text_reply(data, messages.RECEIVED_ACK))
 
     return router
 
 
-def _binding_reply(deps: Deps, member: Member | None, openid: str, kind: str, text: str) -> str | None:
+def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str | None:
     """开通/绑定命令的同步回复;非命令消息返回 None 交回判定链路。
 
-    未绑定:命令即时执行,其他文本返回 None 由调用方引导。
-    已绑定:命令提示已在家庭中(防止把邀请码当可疑消息判定);其余交回判定。
+    查询消息不选群;命令以当前用户的活跃群列表解析。
     """
     if kind != "text":
         return None
     code = parse_bind_command(text)
-    is_open = text.strip() in OPEN_COMMANDS
-    if code is None and not is_open:
+    open_name = parse_open_command(text)
+    list_groups = text.strip() in GROUP_LIST_COMMANDS
+    exit_name = parse_group_command(text,"退出") or parse_group_command(text,"退群")
+    disband_name = parse_group_command(text,"解散")
+    if code is None and open_name is None and not list_groups and exit_name is None and disband_name is None:
         return None
-    if member is not None:
-        return messages.BIND_ALREADY
     if code is not None:
         try:
             bound = deps.binding.bind(openid, code)
-        except BindingError:
+        except BindingError as exc:
+            if exc.reason == "already_in_group":
+                return messages.BIND_ALREADY
+            if exc.reason == "retry":
+                return messages.BIND_RETRY
             return messages.BIND_INVALID
         fam = deps.repos.family.get(bound.family_id)
-        link = bound.entry_url(deps.settings.public_base_url)
+        identity = deps.repos.users.get(bound.user_id) if bound.user_id is not None else None
+        link = identity.entry_url(deps.settings.public_base_url) if identity else ""
         return messages.BIND_SUCCESS.format(
             family=fam["name"] if fam else "我的家庭",
             name=bound.name,
             link=f"\n个人网页入口:{link}" if link else "",
         )
-    try:
-        admin = deps.binding.open_family(openid)
-    except BindingError as e:
-        return messages.OPEN_LIMIT if e.reason == "limit" else messages.BIND_ALREADY
+    if list_groups:
+        if user is None:
+            return messages.BIND_GUIDE
+        groups = deps.repos.family.list_for_user(user.id)
+        if not groups:
+            return messages.BIND_GUIDE_OUTSIDE_GROUP
+        return "你加入的防护群:\n" + "\n".join(
+            f"{i}. {g['name']}({ '信任成员' if g['trusted'] else '普通成员'})" for i,g in enumerate(groups,1)
+        )
+    if open_name is not None:
+        if user is None:
+            try:
+                admin = deps.binding.open_family(openid,open_name or None)
+            except BindingError as e:
+                return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else messages.BIND_ALREADY
+        elif not open_name:
+            groups = deps.repos.family.list_for_user(user.id)
+            if groups:
+                return "你已加入这些防护群:\n" + "\n".join(
+                    f"{i}. {g['name']}" for i,g in enumerate(groups,1)
+                ) + "\n新建群请回复:开通 群名"
+            try:
+                admin = deps.binding.open_family(openid)
+            except BindingError as e:
+                return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else messages.BIND_ALREADY
+        else:
+            try:
+                admin = deps.binding.create_group(user.id,open_name)
+            except BindingError as e:
+                return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else "群名不能为空。"
+    elif exit_name is not None or disband_name is not None:
+        if user is None:
+            return messages.BIND_GUIDE
+        group_name = exit_name or disband_name
+        target = _resolve_group(deps,user.id,group_name)
+        if isinstance(target,str):
+            return target
+        try:
+            if disband_name is not None:
+                deps.groups.disband(user.id,target["id"])
+                return f"「{target['name']}」已解散,群内成员将无法再查看历史提醒。"
+            result = deps.groups.leave(user.id,target["id"])
+            return f"已退出「{target['name']}」。" + ("群内最后一名成员已退出,防护群已自动解散。" if result=="disbanded" else "")
+        except Exception as e:
+            reason = getattr(e,"message",None) or str(e)
+            if "trust" in reason:
+                return "你是群内最后一位信任成员。请先把信任权限交给其他成员,再退出。"
+            return "无法完成操作,请检查群名和权限。"
+    else:
+        return None
     fam = deps.repos.family.get(admin.family_id)
-    url = admin.entry_url(deps.settings.public_base_url)
+    identity = deps.repos.users.get(user.id if user else admin.user_id)
+    url = identity.entry_url(deps.settings.public_base_url) if identity else ""
     if url:
         return messages.OPEN_SUCCESS.format(family=fam["name"] if fam else "我的家庭", url=url)
-    return messages.OPEN_NO_URL
+    return messages.OPEN_NO_URL.format(family=fam["name"] if fam else "我的防护群")
 
 
 async def _welcome_wechat(deps: Deps, ch, data: dict) -> None:
@@ -117,7 +172,7 @@ async def _welcome_wechat(deps: Deps, ch, data: dict) -> None:
 
 
 async def _handle_wechat_message(
-    deps: Deps, verification: VerificationService, ch, data: dict, member: Member
+    deps: Deps, verification: VerificationService, ch, data: dict, user, memberships: list[Member]
 ) -> None:
     """消息判定链路:幂等 ingest → 管线 → 客服接口异步回消息。成员已由回调入口解析。"""
     openid = data.get("FromUserName", "")
@@ -140,13 +195,17 @@ async def _handle_wechat_message(
         return
     try:
         outcome = await verification.verify(
-            member=member,
+            user=user,
+            memberships=memberships,
             content=content,
             content_type=ctype,
             channel="wechat",
             msg_id=data.get("MsgId") or None,
         )
     except DuplicateMessage:
+        return
+    except ValueError:
+        await ch.send_customer_service(openid,messages.BIND_GUIDE_OUTSIDE_GROUP)
         return
     if outcome.duplicate or outcome.result is None:
         return
@@ -157,3 +216,17 @@ async def _handle_wechat_message(
         await ch.send_customer_service(openid, result.reply)
     except Exception:
         logger.warning("wechat reply failed openid=%s", openid, exc_info=True)
+
+
+def _resolve_group(deps: Deps, user_id: int, selector: str):
+    groups = deps.repos.family.list_for_user(user_id)
+    matches = [g for g in groups if g["name"] == selector]
+    if not matches and selector.isdigit():
+        index = int(selector)
+        if 1 <= index <= len(groups):
+            return groups[index-1]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        return "群名重复,请先回复「我的群」,再用列表序号操作。"
+    return "没有找到这个防护群。回复「我的群」查看群列表。"

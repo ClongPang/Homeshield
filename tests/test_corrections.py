@@ -7,13 +7,13 @@ import pytest
 from homeshield.core.deps import make_pipeline
 from homeshield.core.errors import ValidationError
 from homeshield.core.feedback import CorrectionService, weekly_report
-from homeshield.core.intake import ingest
+from conftest import ingest_member
 from homeshield.core.models import CorrectionLabel, CorrectionStatus
 
 
 def _make_verdict(deps, family):
     fid, elder, _ = family
-    intake = ingest(deps.repos, member_id=elder, family_id=fid, content="别告诉家人,立即转账")
+    intake = ingest_member(deps.repos, elder, content="别告诉家人,立即转账")
     return asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id)).verdict_id
 
 
@@ -21,7 +21,7 @@ def test_untrusted_pending_trusted_confirm(deps, family):
     fid, untrusted, trusted = family
     vid = _make_verdict(deps, family)
     svc = CorrectionService(deps.repos)
-    cid, status = svc.submit(vid, untrusted, CorrectionLabel.REAL, note="这是真的骗局")
+    cid, status = svc.submit(vid, deps.repos.member.get(untrusted).user_id, CorrectionLabel.REAL, note="这是真的骗局")
     assert status is CorrectionStatus.PENDING
     with pytest.raises(ValidationError):
         svc.decide(cid, untrusted, "confirm")  # 未受信任不能决定
@@ -33,7 +33,7 @@ def test_untrusted_pending_trusted_confirm(deps, family):
 def test_trusted_submit_directly_confirmed(deps, family):
     fid, elder, adult = family
     vid = _make_verdict(deps, family)
-    _, status = CorrectionService(deps.repos).submit(vid, adult, CorrectionLabel.FALSE_POSITIVE)
+    _, status = CorrectionService(deps.repos).submit(vid, deps.repos.member.get(adult).user_id, CorrectionLabel.FALSE_POSITIVE)
     assert status is CorrectionStatus.CONFIRMED
 
 
@@ -41,7 +41,7 @@ def test_weekly_report(deps, family):
     fid, elder, adult = family
     vid = _make_verdict(deps, family)
     svc = CorrectionService(deps.repos)
-    cid, _ = svc.submit(vid, adult, CorrectionLabel.FALSE_POSITIVE, note="正常消息")
+    cid, _ = svc.submit(vid, deps.repos.member.get(adult).user_id, CorrectionLabel.FALSE_POSITIVE, note="正常消息")
     report = weekly_report(deps.repos, fid)
     assert report["queries"] == 1
     assert report["corrections"] == 1
@@ -52,7 +52,7 @@ def test_expire_pending(deps, family):
     fid, elder, adult = family
     vid = _make_verdict(deps, family)
     svc = CorrectionService(deps.repos)
-    cid, _ = svc.submit(vid, elder, CorrectionLabel.REAL)
+    cid, _ = svc.submit(vid, deps.repos.member.get(elder).user_id, CorrectionLabel.REAL)
     # 未超时:不动
     assert svc.expire_pending(max_age_days=7) == 0
     # 超时(模拟 8 天前创建):置 rejected — 直接改库中 created_at 验证转移
@@ -67,7 +67,7 @@ def test_stale_pending_cannot_be_confirmed(deps, family):
     fid, elder, adult = family
     vid = _make_verdict(deps, family)
     svc = CorrectionService(deps.repos)
-    cid, _ = svc.submit(vid, elder, CorrectionLabel.REAL)
+    cid, _ = svc.submit(vid, deps.repos.member.get(elder).user_id, CorrectionLabel.REAL)
     deps.conn.execute("UPDATE correction SET created_at=?", [time.time() - 8 * 86400])
     deps.conn.commit()
     with pytest.raises(ValidationError, match="expired"):
@@ -80,6 +80,5 @@ def test_fresh_pending_still_confirmable(deps, family):
     fid, elder, adult = family
     vid = _make_verdict(deps, family)
     svc = CorrectionService(deps.repos)
-    cid, _ = svc.submit(vid, elder, CorrectionLabel.REAL)
+    cid, _ = svc.submit(vid, deps.repos.member.get(elder).user_id, CorrectionLabel.REAL)
     assert svc.decide(cid, adult, "confirm") is CorrectionStatus.CONFIRMED
-

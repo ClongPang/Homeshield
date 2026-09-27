@@ -9,7 +9,7 @@ from homeshield.core.channels.wechat import WeChatChannel
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps, make_pipeline
 from homeshield.core.events import VerdictCompleted
-from homeshield.core.intake import ingest
+from conftest import ingest_member
 from homeshield.api.wechat import _welcome_wechat
 from homeshield.server import create_app
 
@@ -22,8 +22,8 @@ class FakeChannel:
     async def send_customer_service(self, openid, text):
         self.sent.append((openid, text))
 
-    async def send_template(self, openid, data, url=None):
-        self.templates.append((openid, data, url))
+    async def send_template(self, openid, data, url=None, template_id=None):
+        self.templates.append((openid, data, url, template_id))
 
 
 def test_classify():
@@ -71,7 +71,7 @@ def test_welcome_sends_guide_only_no_autobind(deps):
     fake = FakeChannel()
     asyncio.run(_welcome_wechat(deps, fake, {"FromUserName": "o_new"}))
     assert fake.sent == [("o_new", messages.WELCOME)]
-    assert deps.repos.member.get_by_openid("o_new") is None
+    assert deps.repos.users.get_by_openid("o_new") is None
 
 
 def test_pipeline_crash_becomes_fallback_reply(deps, family, monkeypatch):
@@ -89,14 +89,16 @@ def test_pipeline_crash_becomes_fallback_reply(deps, family, monkeypatch):
 def test_template_message_carries_console_link(deps, family):
     fid, elder_id, _ = family
     elder = deps.repos.member.get(elder_id)
-    adult = deps.repos.member.get(deps.repos.member.add(fid, "女儿", openid="o_adult"))
+    adult_member = deps.repos.member.get(deps.repos.member.add(fid, "女儿", openid="o_adult"))
+    adult = deps.repos.users.get(adult_member.user_id)
     fake = FakeChannel()
     router = deps.alert_router
     router.wechat = fake
     router.base_url = "http://shield.test"
+    router.template_id = "TPL"
 
     # alert 外键依赖真实 query/verdict,先走一遍管线产生它们
-    intake = ingest(deps.repos, member_id=elder_id, family_id=fid, content="别告诉家人,立即转账")
+    intake = ingest_member(deps.repos, elder_id, content="别告诉家人,立即转账")
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
     event = VerdictCompleted(
         message=intake.message,
@@ -107,8 +109,9 @@ def test_template_message_carries_console_link(deps, family):
     )
     asyncio.run(router(event))
     assert fake.templates, "dangerous 必须触发模板消息"
-    _, _, url = fake.templates[0]
+    _, _, url, template_id = fake.templates[0]
     assert url == f"http://shield.test/alert/{result.verdict_id}?token={adult.token}"
+    assert template_id == "TPL"
 
 
 def _sign(token, ts, nonce):
@@ -143,26 +146,68 @@ def _qs():
 
 
 def test_open_command_creates_family_and_admin(tmp_path):
-    """「开通」自助建家:同步回控制台链接,openid 直落为 adult 管理员。"""
+    """「开通」自助建群:同步回控制台链接,创建者在群内拥有信任权限。"""
     client = _client(tmp_path, public_base_url="http://shield.test")
     r = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[开通]]></Content>"))
     assert r.status_code == 200
 
     deps = client.app.state.deps
-    admin = deps.repos.member.get_by_openid("o_user")
-    assert admin is not None and admin.trusted is True
-    fam = deps.repos.family.get(admin.family_id)
+    admin = deps.repos.users.get_by_openid("o_user")
+    member = deps.repos.member.list_for_user(admin.id)[0]
+    assert admin is not None and member.trusted is True
+    fam = deps.repos.family.get(member.family_id)
     assert fam is not None
     assert admin.token in r.text and f"/console?token={admin.token}" in r.text
 
 
+def test_exit_preserves_identity_and_bare_open_reuses_it(tmp_path):
+    client=_client(tmp_path)
+    _post_callback(client,_qs(),_xml("text","<Content><![CDATA[开通 妈妈家]]></Content>"))
+    deps=client.app.state.deps
+    user=deps.repos.users.get_by_openid("o_user")
+    creator=deps.repos.member.list_for_user(user.id)[0]
+    second_id=deps.repos.member.add(creator.family_id,"女儿",openid="o_daughter")
+    deps.repos.member.set_trust(second_id,True)
+
+    exited=_post_callback(client,_qs(),_xml("text","<Content><![CDATA[退出 妈妈家]]></Content>"))
+    assert "已退出「妈妈家」" in exited.text
+    assert user.token and deps.repos.member.get(creator.id).ended_at is not None
+    assert deps.repos.member.list_for_user(user.id)==[]
+
+    ordinary=_post_callback(client,_qs(),_xml("text","<Content><![CDATA[这条消息是真的吗]]></Content>"))
+    assert messages.BIND_GUIDE_OUTSIDE_GROUP in ordinary.text
+    reopened=_post_callback(client,_qs(),_xml("text","<Content><![CDATA[开通]]></Content>"))
+    assert "开通成功" in reopened.text
+    assert deps.repos.users.get_by_openid("o_user").token==user.token
+    assert len(deps.repos.member.list_for_user(user.id))==1
+
+
+def test_creator_can_disband_by_group_name(tmp_path):
+    client=_client(tmp_path)
+    _post_callback(client,_qs(),_xml("text","<Content><![CDATA[开通 妈妈家]]></Content>"))
+    deps=client.app.state.deps
+    user=deps.repos.users.get_by_openid("o_user")
+    creator=deps.repos.member.list_for_user(user.id)[0]
+    response=_post_callback(client,_qs(),_xml("text","<Content><![CDATA[解散 妈妈家]]></Content>"))
+    assert "已解散" in response.text
+    assert deps.repos.family.get(creator.family_id)["disbanded_at"] is not None
+    assert deps.repos.member.get(creator.id).end_reason=="disbanded"
+
+
 def test_open_twice_rejected(tmp_path):
+    """已有群时裸开通回群列表;带名开通才创建新群。"""
     client = _client(tmp_path)
     _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[开通]]></Content>"))
     r = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[开通]]></Content>"))
-    assert messages.BIND_ALREADY in r.text
+    assert "你已加入这些防护群" in r.text and "开通 群名" in r.text
     deps = client.app.state.deps
     assert len(deps.repos.member.list_members(1)) == 1
+    named = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[开通 岳父家]]></Content>"))
+    assert "岳父家" in named.text
+    assert len(deps.repos.member.list_for_user(deps.repos.users.get_by_openid("o_user").id)) == 2
+    listed = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[我的群]]></Content>"))
+    assert "默认" not in listed.text and "记账" not in listed.text
+    assert "我的防护群" in listed.text and "岳父家" in listed.text
 
 
 def test_bind_command_joins_family(tmp_path):
@@ -176,18 +221,35 @@ def test_bind_command_joins_family(tmp_path):
 
     r = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code'].lower()}]]></Content>"))
     assert "绑定成功" in r.text and "测试家庭" in r.text and "妈妈" in r.text  # 家庭名+成员名
-    assert deps.repos.member.get(elder_id).openid == "o_user"
+    assert deps.repos.users.get(deps.repos.member.get(elder_id).user_id).openid == "o_user"
 
-    # 领取后再发同一码:已在家庭,不判定
+    # 领取后再发同一码:一次性口令已失效,不进入判定
     r2 = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code']}]]></Content>"))
-    assert messages.BIND_ALREADY in r2.text
+    assert messages.BIND_INVALID in r2.text
 
 
 def test_bind_invalid_code_replies_hint(tmp_path):
     client = _client(tmp_path)
     r = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[绑定 BADCODE0]]></Content>"))
     assert messages.BIND_INVALID in r.text
-    assert client.app.state.deps.repos.member.get_by_openid("o_user") is None
+    assert client.app.state.deps.repos.users.get_by_openid("o_user") is None
+
+
+def test_bind_already_in_group_gets_correct_reply(tmp_path):
+    client = _client(tmp_path)
+    deps = client.app.state.deps
+    fid = deps.repos.family.create("测试家庭")
+    existing = deps.repos.member.add(fid, "妈妈", openid="o_user")
+    trusted = deps.repos.member.add(fid, "儿子", trusted=True, openid="o_son")
+    slot = deps.repos.member.add(fid, "妈妈的新邀请位")
+    code = deps.binding.issue_code(deps.repos.member.get(slot), created_by=trusted)
+
+    response = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code']}]]></Content>"))
+
+    assert messages.BIND_ALREADY in response.text
+    assert messages.BIND_INVALID not in response.text
+    assert deps.repos.member.get(slot).user_id is None
+    assert deps.repos.bind_code.peek(code["code"]) is not None
 
 
 def test_unbound_text_gets_guide_not_judged(tmp_path):
@@ -196,7 +258,7 @@ def test_unbound_text_gets_guide_not_judged(tmp_path):
     r = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[这是骗子吗]]></Content>"))
     assert messages.BIND_GUIDE in r.text
     deps = client.app.state.deps
-    assert deps.repos.member.get_by_openid("o_user") is None
+    assert deps.repos.users.get_by_openid("o_user") is None
     assert deps.repos.query.count(1, 0) == 0  # 无判定落库
 
 
@@ -223,7 +285,7 @@ def test_wechat_route_fallback_and_signature(tmp_path):
     r = _post_callback(client, qs, _xml("event", "<Event><![CDATA[subscribe]]></Event>"))
     assert r.text == "success"
     deps = client.app.state.deps
-    assert deps.repos.member.get_by_openid("o_user") is None
+    assert deps.repos.users.get_by_openid("o_user") is None
 
     # 错误签名:拒绝
     bad = "signature=bad&timestamp=1&nonce=n"

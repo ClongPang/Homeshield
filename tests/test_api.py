@@ -1,8 +1,12 @@
-"""API 契约冒烟:token 鉴权、query / corrections 队列 / weekly / members + 400/401/409。"""
+"""个人 token 与群上下文 API 的验收用例。"""
 import pytest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 from homeshield.core.config import Settings
+from homeshield.core.errors import ValidationError
 from homeshield.server import create_app
 
 
@@ -14,280 +18,279 @@ def client(tmp_path):
 
 @pytest.fixture()
 def family(client):
-    """返回 (untrusted, trusted) 两个带 token 的成员对象。"""
     deps = client.app.state.deps
     fid = deps.repos.family.create("F")
-    untrusted = deps.repos.member.get(deps.repos.member.add(fid, "妈妈"))
-    trusted = deps.repos.member.get(deps.repos.member.add(fid, "儿子", trusted=True))
-    return untrusted, trusted
+    mom_member = deps.repos.member.get(deps.repos.member.add(fid, "妈妈", openid="test:mom"))
+    trusted_member = deps.repos.member.get(deps.repos.member.add(fid, "儿子", True, "test:son"))
+    mom = _actor(deps, mom_member)
+    trusted = _actor(deps, trusted_member)
+    return fid, mom, trusted
 
 
-def test_query_and_weekly_flow(client, family):
-    elder, adult = family
-    r = client.post("/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"})
-    assert r.status_code == 200
-    data = r.json()
-    assert data["level"] == "dangerous" and data["verdict_id"] is not None
-    assert data["reply"].startswith("【结论】")
-
-    r2 = client.post(
-        "/api/corrections",
-        json={"token": adult.token, "verdict_id": data["verdict_id"], "label": "false_positive"},
-    )
-    assert r2.json()["status"] == "confirmed"
-
-    w = client.get("/api/weekly", params={"token": adult.token}).json()
-    assert w["queries"] == 1 and w["dangerous"] == 1 and w["false_positives"] == 1
+def _actor(deps, member):
+    user=deps.repos.users.get(member.user_id) if member.user_id is not None else None
+    return SimpleNamespace(member=member,id=member.id,user_id=user.id if user else None,
+                           token=user.token if user else None,openid=user.openid if user else None,
+                           family_id=member.family_id,name=member.name,trusted=member.trusted)
 
 
-def test_invalid_token_401(client):
-    assert client.post("/api/query", json={"token": "nope", "content": "x"}).status_code == 401
-    assert client.get("/api/weekly", params={"token": "nope"}).status_code == 401
-    assert client.get("/api/stream", params={"token": "nope"}).status_code == 401
-    assert client.get("/api/members", params={"token": "nope"}).status_code == 401
-    assert client.get("/api/alerts", params={"token": "nope"}).status_code == 401
+def test_query_alert_feedback_and_weekly(client, family):
+    fid, mom, trusted = family
+    result = client.post("/api/query", json={"token": mom.token, "content": "别告诉家人,立即转账"}).json()
+    assert result["level"] == "dangerous"
+    assert result["reply"].startswith("【结论】") and "已为防护群发出高危提醒" in result["reply"]
+
+    history = client.get("/api/alerts", params={"token": trusted.token}).json()
+    assert [a["verdict_id"] for a in history["alerts"]] == [result["verdict_id"]]
+    detail = client.get(f"/api/alerts/{result['verdict_id']}", params={"token": trusted.token}).json()
+    assert detail["group_names"] == ["F"] and detail["my_feedback"] is None
+
+    correction = client.post("/api/corrections", json={
+        "token": trusted.token, "verdict_id": result["verdict_id"], "label": "false_positive",
+    }).json()
+    assert correction["status"] == "confirmed"
+    weekly = client.get("/api/weekly", params={"token": trusted.token}).json()
+    assert weekly["group_id"] == fid
+    assert weekly["queries"] == weekly["dangerous"] == weekly["corrections"] == weekly["false_positives"] == 1
 
 
-def test_alerts_history(client, family):
-    """控制台打开即可见历史高危告警(不依赖页面先开着收 SSE),按判定去重。"""
-    elder, adult = family
-    first = client.post(
-        "/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"}
-    ).json()
-    second = client.post(
-        "/api/query", json={"token": elder.token, "content": "儿子,别告诉家人,马上转账救急"}
-    ).json()
-    assert first["level"] == "dangerous" and second["level"] == "dangerous"
-
-    d = client.get("/api/alerts", params={"token": adult.token}).json()
-    assert [a["verdict_id"] for a in d["alerts"]] == [second["verdict_id"], first["verdict_id"]]
-    assert all(a["level"] == "dangerous" for a in d["alerts"])
-    assert d["alerts"][0]["summary"].startswith("儿子")
+def test_invalid_token_is_401(client):
+    assert client.post("/api/query", json={"token":"nope","content":"x"}).status_code == 401
+    for path in ("/api/groups", "/api/weekly", "/api/stream", "/api/alerts", "/api/corrections"):
+        assert client.get(path, params={"token":"nope"}).status_code == 401
 
 
-def test_alerts_history_empty(client, family):
-    _, adult = family
-    assert client.get("/api/alerts", params={"token": adult.token}).json()["alerts"] == []
+def test_query_without_active_group_does_not_enter_pipeline(client):
+    deps = client.app.state.deps
+    user = deps.repos.users.get_or_create("test:outside")
+    assert client.get("/api/groups", params={"token":user.token}).json() == {"groups": []}
+    response = client.post("/api/query", json={"token":user.token,"content":"这是骗子吗"})
+    assert response.status_code == 400
+    assert deps.conn.execute("SELECT COUNT(*) FROM query WHERE user_id=?", (user.id,)).fetchone()[0] == 0
 
 
-def test_pending_queue_flow(client, family):
-    elder, adult = family
-    data = client.post(
-        "/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"}
-    ).json()
-    c = client.post(
-        "/api/corrections",
-        json={"token": elder.token, "verdict_id": data["verdict_id"], "label": "real", "note": "真是骗局"},
-    )
-    assert c.json()["status"] == "pending"
+def test_query_membership_ended_during_intake_returns_400(client, family, monkeypatch):
+    fid, mom, _ = family
+    deps = client.app.state.deps
+    original = deps.repos.member.list_for_user
 
-    queue = client.get("/api/corrections", params={"token": adult.token}).json()["pending"]
-    assert len(queue) == 1
-    assert queue[0]["by_name"] == "妈妈" and queue[0]["label"] == "real"
-    assert queue[0]["content"].startswith("别告诉家人")
+    def return_snapshot_then_leave(user_id, active_only=True):
+        memberships = original(user_id, active_only)
+        if user_id == mom.user_id:
+            monkeypatch.setattr(deps.repos.member, "list_for_user", original)
+            deps.groups.leave(user_id, fid)
+            monkeypatch.setattr(deps.repos.member, "list_for_user", return_snapshot_then_leave)
+        return memberships
 
-    done = client.post(
-        f"/api/corrections/{queue[0]['id']}/confirm",
-        json={"token": adult.token, "decision": "confirm"},
-    )
-    assert done.json()["status"] == "confirmed"
-    assert client.get("/api/corrections", params={"token": adult.token}).json()["pending"] == []
+    monkeypatch.setattr(deps.repos.member, "list_for_user", return_snapshot_then_leave)
+    response = client.post("/api/query", json={"token": mom.token, "content": "请帮我看看"})
+
+    assert response.status_code == 400
+    assert deps.conn.execute("SELECT COUNT(*) FROM query WHERE user_id=?", (mom.user_id,)).fetchone()[0] == 0
 
 
-def test_members_endpoint_hides_token(client, family):
-    _, adult = family
-    d = client.get("/api/members", params={"token": adult.token}).json()
-    assert {m["name"] for m in d["members"]} == {"妈妈", "儿子"}
-    assert all("token" not in m for m in d["members"])
+def test_identity_credentials_live_only_on_user_rows(client):
+    conn=client.app.state.deps.conn
+    member_columns={row["name"] for row in conn.execute("PRAGMA table_info(member)")}
+    user_columns={row["name"] for row in conn.execute("PRAGMA table_info(user)")}
+    query_columns={row["name"] for row in conn.execute("PRAGMA table_info(query)")}
+    assert {"openid","token"}.issubset(user_columns)
+    assert "openid" not in member_columns and "token" not in member_columns
+    assert "user_id" in query_columns and "family_id" not in query_columns and "member_id" not in query_columns
 
 
-def test_400_empty_content(client, family):
-    elder, _ = family
-    assert client.post("/api/query", json={"token": elder.token, "content": "  "}).status_code == 400
+def test_multi_group_pages_require_group_id_and_queries_snapshot_all_groups(client, family):
+    fid, mom, trusted = family
+    deps = client.app.state.deps
+    second = deps.repos.family.create("岳父家")
+    second_member = deps.repos.member.get(deps.repos.member.add(second,"妈妈",openid=mom.openid))
+    deps.repos.member.add(second,"岳父",True,"test:father")
+    assert second_member.user_id==mom.user_id
+    assert deps.repos.users.get(second_member.user_id).token == mom.token
+
+    assert client.get("/api/weekly",params={"token":mom.token}).status_code == 400
+    assert client.get("/api/alerts",params={"token":mom.token}).status_code == 400
+    assert client.get("/api/corrections",params={"token":mom.token}).status_code == 400
+
+    result=client.post("/api/query",json={"token":mom.token,"content":"别告诉家人,立即转账"}).json()
+    rows=deps.conn.execute(
+        "SELECT qg.family_id FROM query_group qg WHERE qg.query_id=? ORDER BY qg.family_id",
+        (result["query_id"],),
+    ).fetchall()
+    assert [r[0] for r in rows] == [fid,second]
+    assert "F" in result["reply"] and "岳父家" in result["reply"]
+
+    groups=client.get("/api/groups",params={"token":mom.token}).json()["groups"]
+    assert {g["id"] for g in groups} == {fid,second}
+    alerts=client.get("/api/alerts",params={"token":trusted.token,"group_id":fid}).json()
+    assert len(alerts["alerts"]) == 1
 
 
-def test_409_duplicate_msg_id(client, family):
-    elder, _ = family
-    body = {"token": elder.token, "content": "你好", "msg_id": "M42"}
-    assert client.post("/api/query", json=body).status_code == 200
-    assert client.post("/api/query", json=body).status_code == 409
+def test_console_user_can_create_an_additional_group(client, family):
+    _, mom, _=family
+    created=client.post("/api/groups",json={"token":mom.token,"name":"朋友家"})
+    assert created.status_code==200 and created.json()["trusted"] is True
+    groups=client.get("/api/groups",params={"token":mom.token}).json()["groups"]
+    item=next(g for g in groups if g["id"]==created.json()["id"])
+    assert item["name"]=="朋友家" and item["is_creator"] is True
+    assert len(groups)==2
+
+
+def test_alert_access_revoked_on_leave_and_restored_on_rejoin(client, family):
+    fid, mom, trusted = family
+    deps=client.app.state.deps
+    result=client.post("/api/query",json={"token":mom.token,"content":"别告诉家人,立即转账"}).json()
+    vid=result["verdict_id"]
+    assert client.get("/api/alerts",params={"token":trusted.token,"group_id":fid}).status_code == 200
+
+    deps.repos.member.set_trust(mom.id,True)
+    assert deps.groups.leave(trusted.user_id,fid)=="left"
+    assert deps.repos.users.get_by_token(trusted.token).id == trusted.user_id
+    assert client.get("/api/alerts",params={"token":trusted.token,"group_id":fid}).status_code == 404
+    denied=client.get(f"/api/alerts/{vid}",params={"token":trusted.token})
+    assert denied.status_code == 410 and denied.json()["detail"]["reason"] == "membership_ended"
+    old=deps.repos.member.get(trusted.id)
+    assert old.user_id == trusted.user_id and old.ended_at is not None
+
+    slot=deps.repos.member.add(fid,"儿子")
+    code=deps.binding.issue_code(deps.repos.member.get(slot),created_by=mom.id)
+    joined=deps.binding.bind(trusted.openid,code["code"])
+    assert joined.id != trusted.id and deps.repos.users.get(joined.user_id).token == trusted.token
+    assert len(client.get("/api/alerts",params={"token":trusted.token,"group_id":fid}).json()["alerts"]) == 1
+
+
+def test_creator_disband_retains_rows_and_returns_410(client):
+    deps=client.app.state.deps
+    creator_member=deps.binding.open_family("o_creator","父母家")
+    creator=_actor(deps,creator_member)
+    member_row=deps.repos.member.get(deps.repos.member.add(creator.family_id,"家人",True,"test:family"))
+    member=_actor(deps,member_row)
+    result=client.post("/api/query",json={"token":member.token,"content":"别告诉家人,立即转账"}).json()
+    assert client.request("DELETE",f"/api/groups/{creator.family_id}",json={"token":member.token}).status_code==400
+    response=client.request("DELETE",f"/api/groups/{creator.family_id}",json={"token":creator.token})
+    assert response.status_code == 200
+    assert deps.repos.member.get(creator.id).end_reason == "disbanded"
+    assert deps.repos.member.get(creator.id).user_id==creator.user_id
+    assert deps.conn.execute("SELECT COUNT(*) FROM alert WHERE verdict_id=?",(result["verdict_id"],)).fetchone()[0]>0
+    assert deps.conn.execute("PRAGMA foreign_key_check").fetchall()==[]
+    assert client.get(f"/api/alerts/{result['verdict_id']}",params={"token":member.token}).json()["detail"]["reason"] == "group_disbanded"
+    assert client.get("/api/groups",params={"token":creator.token}).json()["groups"] == []
+
+
+def test_last_bound_member_exit_auto_disbands_but_invite_removal_does_not(client):
+    deps=client.app.state.deps
+    solo=deps.binding.open_family("o_solo","独居群")
+    slot=deps.repos.member.add(solo.family_id,"未绑定邀请")
+    code=deps.binding.issue_code(deps.repos.member.get(slot),created_by=solo.id)
+    assert deps.groups.remove(solo.family_id,slot)=="left"
+    assert deps.repos.bind_code.peek(code["code"]) is None
+    assert deps.repos.family.get(solo.family_id)["disbanded_at"] is None
+    assert deps.groups.leave(solo.user_id,solo.family_id)=="disbanded"
+    assert deps.repos.family.get(solo.family_id)["disbanded_at"] is not None
+
+
+def test_pending_correction_is_shared_across_related_groups(client, family):
+    fid, mom, trusted = family
+    deps=client.app.state.deps
+    second=deps.repos.family.create("岳父家")
+    deps.repos.member.add(second,"妈妈",openid=mom.openid)
+    second_trusted=_actor(deps,deps.repos.member.get(deps.repos.member.add(second,"岳父",True,"test:father")))
+    result=client.post("/api/query",json={"token":mom.token,"content":"别告诉家人,立即转账"}).json()
+    submitted=client.post("/api/corrections",json={"token":mom.token,"verdict_id":result["verdict_id"],"label":"real"}).json()
+    assert submitted["status"] == "pending"
+    duplicate=client.post("/api/corrections",json={"token":mom.token,"verdict_id":result["verdict_id"],"label":"false_positive"}).json()
+    assert duplicate["correction_id"]==submitted["correction_id"] and duplicate["status"]=="pending"
+    assert deps.conn.execute("SELECT COUNT(*) FROM correction WHERE verdict_id=?",(result["verdict_id"],)).fetchone()[0]==1
+    own_view=client.get("/api/corrections",params={"token":mom.token,"group_id":fid}).json()
+    assert own_view["viewer_trusted"] is False and own_view["pending"]==[]
+    first_queue=client.get("/api/corrections",params={"token":trusted.token,"group_id":fid}).json()["pending"]
+    second_queue=client.get("/api/corrections",params={"token":second_trusted.token,"group_id":second}).json()["pending"]
+    assert len(first_queue)==len(second_queue)==1
+    done=client.post(f"/api/corrections/{submitted['correction_id']}/confirm",json={"token":second_trusted.token}).json()
+    assert done["status"]=="confirmed"
+    assert client.get("/api/corrections",params={"token":trusted.token,"group_id":fid}).json()["pending"]==[]
+
+
+def test_group_members_and_invitation_page(client, family):
+    fid, _, trusted=family
+    response=client.post(f"/api/groups/{fid}/members",json={"token":trusted.token,"name":"爸爸"})
+    assert response.status_code==200
+    invite=response.json()
+    assert invite["trusted"] is False and invite["entry_url"] is None
+    assert client.get("/api/join/NOPE0000").status_code==404
+    info=client.get(f"/api/join/{invite['bind_code']}")
+    assert info.status_code==200
+    assert info.json()["group_name"]=="F" and info.json()["member_name"]=="爸爸"
+    assert info.json()["command"]==f"绑定 {invite['bind_code']}" and "token" not in info.json()
+    assert client.get(f"/join/{invite['bind_code']}").status_code==200
+    assert client.get("/join/NOPE0000").status_code==200
+    members=client.get(f"/api/groups/{fid}/members",params={"token":trusted.token}).json()["members"]
+    assert {m["name"] for m in members}=={"妈妈","儿子","爸爸"}
+
+
+def test_group_management_trust_guard_rename_and_mute(client, family):
+    fid, mom, trusted=family
+    deps=client.app.state.deps
+    # 无创建者的运维群不能由家人解散;群级数据路由按 user 成员关系授权。
+    assert client.request("DELETE",f"/api/groups/{fid}",json={"token":trusted.token}).status_code==400
+    assert client.patch(f"/api/groups/{fid}",json={"token":trusted.token,"name":"新群名"}).status_code==200
+    renamed=client.get("/api/groups",params={"token":mom.token}).json()["groups"]
+    assert renamed[0]["name"]=="新群名"
+    assert client.patch(f"/api/groups/{fid}/members/{mom.id}",json={"token":mom.token,"name":"阿姨"}).status_code==200
+    muted=client.post(f"/api/groups/{fid}/mute",json={"token":mom.token,"mute":True}).json()
+    assert muted["mute"] is True
+    assert client.get("/api/groups",params={"token":mom.token}).json()["groups"][0]["mute"] is True
+
+    # 最后一名信任成员退出或降级会被拒,转移信任后可以操作。
+    denied=client.request("DELETE",f"/api/groups/{fid}/members/{trusted.id}",json={"token":trusted.token})
+    assert denied.status_code==400 and "trust" in denied.json()["detail"]
+    self_demote=client.post(f"/api/groups/{fid}/members/{trusted.id}/trust",json={"token":trusted.token,"trusted":False})
+    assert self_demote.status_code==400
+    assert client.post(f"/api/groups/{fid}/members/{mom.id}/trust",json={"token":trusted.token,"trusted":True}).status_code==200
+    assert client.request("DELETE",f"/api/groups/{fid}/members/{trusted.id}",json={"token":trusted.token}).json()["status"]=="left"
+
+
+def test_concurrent_trust_changes_preserve_a_trusted_member(client, family):
+    fid, mom, trusted = family
+    deps=client.app.state.deps
+    deps.repos.member.set_trust(mom.id,True)
+    barrier=Barrier(2)
+
+    def demote(actor, target):
+        barrier.wait()
+        try:
+            deps.groups.set_trust(fid,target.id,False,actor.id)
+            return "updated"
+        except ValidationError:
+            return "rejected"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes=list(pool.map(lambda pair: demote(*pair),[(mom,trusted),(trusted,mom)]))
+
+    assert sorted(outcomes)==["rejected","updated"]
+    active_trusted=deps.conn.execute(
+        "SELECT COUNT(*) FROM member WHERE family_id=? AND ended_at IS NULL AND user_id IS NOT NULL AND trusted=1",
+        (fid,),
+    ).fetchone()[0]
+    assert active_trusted==1
+
+
+def test_parallel_reads_share_sqlite_connection_safely(client, family):
+    fid, mom, _ = family
+    deps=client.app.state.deps
+
+    def read_views(_):
+        user=deps.repos.users.get_by_token(mom.token)
+        memberships=deps.repos.member.list_for_user(user.id)
+        groups=deps.repos.family.list_for_user(user.id)
+        alerts=deps.repos.alert.list_for_user_group(user.id,fid)
+        return user.id,len(memberships),len(groups),len(alerts)
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results=list(pool.map(read_views,range(48)))
+    assert set(results)=={(mom.user_id,1,1,0)}
 
 
 def test_static_views(client):
-    assert client.get("/").status_code == 200
-    assert client.get("/console").status_code == 200
-
-
-def test_alert_detail_feedback_and_scoping(client, family):
-    elder, adult = family
-    data = client.post(
-        "/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"}
-    ).json()
-    vid = data["verdict_id"]
-
-    d = client.get(f"/api/alerts/{vid}", params={"token": adult.token}).json()
-    assert d["level"] == "dangerous" and d["reply"].startswith("【结论】")
-    assert d["my_feedback"] is None
-
-    client.post("/api/corrections", json={"token": adult.token, "verdict_id": vid, "label": "real"})
-    d2 = client.get(f"/api/alerts/{vid}", params={"token": adult.token}).json()
-    assert d2["my_feedback"]["label"] == "real"
-    assert d2["my_feedback"]["status"] == "confirmed"
-
-    # 别的家庭看不到这条告警
-    deps = client.app.state.deps
-    other_fid = deps.repos.family.create("别家")
-    other = deps.repos.member.get(deps.repos.member.add(other_fid, "外人"))
-    assert client.get(f"/api/alerts/{vid}", params={"token": other.token}).status_code == 404
-
-
-def test_alert_history_listing(client, family):
-    elder, adult = family
-    client.post("/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"})
-    history = client.get("/api/alerts", params={"token": adult.token}).json()["alerts"]
-    assert len(history) == 1 and history[0]["level"] == "dangerous"
-
-
-def test_alert_fanout_covers_all_members(client, family):
-    """群模型告警面:dangerous 对全体成员落 alert(不再按角色过滤)。"""
-    untrusted, _ = family
-    deps = client.app.state.deps
-    data = client.post(
-        "/api/query", json={"token": untrusted.token, "content": "别告诉家人,立即转账"}
-    ).json()
-    rows = deps.conn.execute(
-        "SELECT member_id FROM alert WHERE verdict_id=?", [data["verdict_id"]]
-    ).fetchall()
-    assert {r["member_id"] for r in rows} == {m.id for m in deps.repos.member.list_members(1)}
-
-
-def test_add_member_and_bind_code_flow(client, family):
-    """信任成员创建成员位拿邀请码;新位默认不受信任;重发作废旧码由绑定域测试覆盖。"""
-    _, trusted = family
-    r = client.post("/api/members", json={"token": trusted.token, "name": "爸爸"})
-    assert r.status_code == 200
-    data = r.json()
-    assert data["name"] == "爸爸" and data["trusted"] is False
-    assert len(data["bind_code"]) == 8 and data["bind_expires_at"] > 0
-    assert data["entry_url"] is None  # 测试环境未配 PUBLIC_BASE_URL
-
-    members = client.get("/api/members", params={"token": trusted.token}).json()["members"]
-    dad = next(m for m in members if m["name"] == "爸爸")
-    assert dad["bound"] is False and dad["id"] == data["member_id"]
-
-    r2 = client.post(f"/api/members/{data['member_id']}/bind-code", json={"token": trusted.token})
-    assert r2.status_code == 200
-    assert r2.json()["bind_code"] != data["bind_code"]
-
-
-def test_add_member_untrusted_forbidden(client, family):
-    untrusted, _ = family
-    r = client.post("/api/members", json={"token": untrusted.token, "name": "x"})
-    assert r.status_code == 403
-    assert (
-        client.post("/api/members/1/bind-code", json={"token": untrusted.token}).status_code == 403
-    )
-
-
-def test_add_member_rejects_empty_name(client, family):
-    _, trusted = family
-    assert client.post("/api/members", json={"token": trusted.token, "name": "  "}).status_code == 400
-
-
-def test_trust_toggle(client, family):
-    """信任成员翻转他人信任位;不能改自己;未受信任调用 403。"""
-    untrusted, trusted = family
-    deps = client.app.state.deps
-    other = deps.repos.member.get(deps.repos.member.add(untrusted.family_id, "爸爸"))
-
-    r = client.post(f"/api/members/{other.id}/trust", json={"token": trusted.token, "trusted": True})
-    assert r.status_code == 200
-    assert deps.repos.member.get(other.id).trusted is True
-
-    assert client.post(
-        f"/api/members/{other.id}/trust", json={"token": untrusted.token, "trusted": False}
-    ).status_code == 403
-
-    r = client.post(f"/api/members/{other.id}/trust", json={"token": trusted.token, "trusted": False})
-    assert r.status_code == 200
-    assert deps.repos.member.get(other.id).trusted is False
-
-    # 不能改自己:防止最后一个可管理者自我降级后无人管理
-    assert client.post(
-        f"/api/members/{trusted.id}/trust", json={"token": trusted.token, "trusted": False}
-    ).status_code == 400
-
-    # 跨家庭目标 404
-    other_fid = deps.repos.family.create("别家")
-    outsider = deps.repos.member.get(deps.repos.member.add(other_fid, "外人"))
-    assert client.post(
-        f"/api/members/{outsider.id}/trust", json={"token": trusted.token, "trusted": True}
-    ).status_code == 404
-
-    # 并发互降护栏:条件更新保证群内恒有信任成员;对普通成员重复降级不生效
-    assert deps.repos.member.get(trusted.id).trusted is True
-    assert deps.repos.member.demote_with_guard(untrusted.id, untrusted.family_id) is False  # 目标本已普通
-    deps.repos.member.set_trust(untrusted.id, True)
-    assert deps.repos.member.demote_with_guard(untrusted.id, untrusted.family_id) is True
-    assert deps.repos.member.demote_with_guard(untrusted.id, untrusted.family_id) is False
-    assert deps.repos.member.get(untrusted.id).trusted is False
-
-    # 信任位决定纠正即时生效与否
-    vid = client.post(
-        "/api/query", json={"token": untrusted.token, "content": "别告诉家人,立即转账"}
-    ).json()["verdict_id"]
-    assert client.post(
-        "/api/corrections", json={"token": other.token, "verdict_id": vid, "label": "real"}
-    ).json()["status"] == "pending"
-    client.post(f"/api/members/{other.id}/trust", json={"token": trusted.token, "trusted": True})
-    vid2 = client.post(
-        "/api/query", json={"token": untrusted.token, "content": "儿子,别告诉家人,马上转账救急"}
-    ).json()["verdict_id"]
-    assert client.post(
-        "/api/corrections", json={"token": other.token, "verdict_id": vid2, "label": "real"}
-    ).json()["status"] == "confirmed"
-
-
-def test_add_member_caps_at_max_members(client, family):
-    untrusted, trusted = family
-    deps = client.app.state.deps
-    for _ in range(deps.settings.max_members - 2):
-        deps.repos.member.add(untrusted.family_id, "占位")
-    r = client.post("/api/members", json={"token": trusted.token, "name": "再来一个"})
-    assert r.status_code == 400
-
-
-def test_cross_family_correction_submit_rejected(client, family):
-    """别家成员对别家判定提交纠正:必须被拒(多租户隔离)。"""
-    elder, _ = family
-    data = client.post("/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"}).json()
-
-    deps = client.app.state.deps
-    other_fid = deps.repos.family.create("别家")
-    stranger = deps.repos.member.get(deps.repos.member.add(other_fid, "外人"))
-    r = client.post(
-        "/api/corrections",
-        json={"token": stranger.token, "verdict_id": data["verdict_id"], "label": "false_positive"},
-    )
-    assert r.status_code == 400
-
-
-def test_cross_family_correction_decide_rejected(client, family):
-    """别家管理员不能裁决本家的待确认纠正。"""
-    elder, adult = family
-    data = client.post("/api/query", json={"token": elder.token, "content": "别告诉家人,立即转账"}).json()
-    c = client.post(
-        "/api/corrections",
-        json={"token": elder.token, "verdict_id": data["verdict_id"], "label": "real"},
-    ).json()
-
-    deps = client.app.state.deps
-    other_fid = deps.repos.family.create("别家")
-    stranger = deps.repos.member.get(deps.repos.member.add(other_fid, "外人"))
-    r = client.post(f"/api/corrections/{c['correction_id']}/confirm", json={"token": stranger.token})
-    assert r.status_code == 400
-    # 本家管理员裁决不受影响
-    ok = client.post(
-        f"/api/corrections/{c['correction_id']}/confirm", json={"token": adult.token}
-    )
-    assert ok.json()["status"] == "confirmed"
+    for path in ("/", "/console", "/alert/1", "/join/ABC23467"):
+        assert client.get(path).status_code==200

@@ -1,8 +1,4 @@
-"""领域模型与枚举。
-
-member.openid 微信零注册映射;member.token 个人链接凭证;
-query.msg_id 幂等键;时间戳为 unix 秒整数。
-"""
+"""领域模型与枚举。身份凭证属于 user,成员关系属于 member。时间戳为 Unix 秒整数。"""
 from datetime import datetime, timezone
 from enum import StrEnum
 
@@ -33,7 +29,7 @@ class Mode(StrEnum):
 class CorrectionLabel(StrEnum):
     REAL = "real"  # 漏报(提交时)
     FALSE_POSITIVE = "false_positive"
-    CONFIRMED_SCAM = "confirmed_scam"  # real 经 adult 确认后落库
+    CONFIRMED_SCAM = "confirmed_scam"  # real 经信任成员确认后落库
 
 
 class CorrectionStatus(StrEnum):
@@ -55,10 +51,11 @@ def max_level(a: Level, b: Level) -> Level:
 
 
 class Message(BaseModel):
-    """intake 归一化产物。"""
+    """intake 产物及受理时固定的群和成员关系快照。"""
 
-    member_id: int
-    family_id: int
+    user_id: int
+    family_ids: list[int]
+    membership_ids: list[int]
     content_type: ContentType
     content: str
     channel: str = "web"  # wechat | web
@@ -169,33 +166,39 @@ class JudgeOutput(BaseModel):
     reason: str = ""
 
 
+class User(BaseModel):
+    """跨群身份。openid 对应微信账号,token 是个人控制台凭证。"""
+
+    id: int
+    openid: str
+    token: str
+    created_at: int
+
+    def entry_url(self, base_url: str) -> str:
+        if not base_url:
+            return ""
+        return f"{base_url.rstrip('/')}/console?token={self.token}"
+
+
 class Member(BaseModel):
-    """群成员。trusted 是唯一的成员内差异:纠正即时生效 + 可管理成员;
+    """群成员关系。trusted 是唯一的成员内差异:纠正即时生效 + 可管理成员;
     它是数据质量防火墙,不是身份层级——由信任成员管理,与年龄无关。"""
 
     id: int
     family_id: int
+    user_id: int | None = None
     name: str
     trusted: bool = False
-    openid: str | None = None
-    token: str | None = None  # 个人链接凭证,仅部署者经 CLI 分发,不出现在家人可见接口
-
-    def entry_url(self, base_url: str) -> str:
-        """个人网页入口(链接即凭证):全员控制台(告警/周报/纠正队列)。
-
-        server 告警深链/成员位创建与 cli link 共用此唯一拼接处;
-        未配对外地址返回空串。
-        """
-        if not base_url or not self.token:
-            return ""
-        return f"{base_url.rstrip('/')}/console?token={self.token}"
+    mute: bool = False
+    ended_at: int | None = None
+    end_reason: str | None = None
 
 
 class CorrectionRecord(BaseModel):
     id: int
     verdict_id: int
-    by_member_id: int
+    by_user_id: int
     label: CorrectionLabel
     note: str = ""
     status: CorrectionStatus
-    decided_by: int | None = None
+    decided_by_membership_id: int | None = None

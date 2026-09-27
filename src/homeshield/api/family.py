@@ -1,20 +1,17 @@
-"""家人 API 路由:token 鉴权 + 家庭数据读写。
-
-凭证 = 不可枚举 token(链接即凭证);无/错 token 一律 401,接口不回传 token。
-所有数据按 member.family_id 隔离(告警跨家庭 404,纠正跨家庭 400);
-成员管理与纠正确认仅信任成员(trusted)。
-"""
+"""按个人身份鉴权的家人与防护群 API。"""
 import json
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from homeshield.api.schemas import CorrectionIn, DecideIn, MemberIn, QueryIn, TokenIn, TrustIn
-from homeshield.core.binding import BindingError
+from homeshield.api.schemas import (
+    CorrectionIn, DecideIn, GroupIn, MemberIn, MemberPatchIn, QueryIn, TokenIn, TrustIn, MuteIn,
+)
 from homeshield.core.deps import Deps
-from homeshield.core.errors import DuplicateMessage, HomeshieldError
+from homeshield.core.errors import DuplicateMessage, HomeshieldError, ValidationError
 from homeshield.core.feedback import CorrectionService, weekly_report
-from homeshield.core.models import CorrectionLabel, Member
+from homeshield.core.models import CorrectionLabel, Member, User
+from homeshield.core.repo import WRITE_LOCK
 from homeshield.core.verification import VerificationService
 
 
@@ -23,193 +20,301 @@ def build_family_router(
 ) -> APIRouter:
     router = APIRouter()
 
-    def member_by_token(token: str) -> Member:
-        member = deps.repos.member.get_by_token(token or "")
-        if member is None:
+    def user_by_token(token: str) -> User:
+        user = deps.repos.users.get_by_token(token or "")
+        if user is None:
             raise HTTPException(401, "invalid token")
+        return user
+
+    def group_for_user(user: User, group_id: int | None) -> dict:
+        groups = deps.repos.family.list_for_user(user.id)
+        if group_id is None:
+            if len(groups) != 1:
+                if not groups:
+                    raise HTTPException(404, "no active group")
+                raise HTTPException(400, "group_id is required")
+            return groups[0]
+        group = next((g for g in groups if g["id"] == group_id), None)
+        if group is None:
+            raise HTTPException(404, "group not found")
+        return group
+
+    def membership(user: User, family_id: int) -> Member:
+        row = next((m for m in deps.repos.member.list_for_user(user.id) if m.family_id == family_id), None)
+        if row is None:
+            raise HTTPException(404, "group not found")
+        return row
+
+    def require_trusted(user: User, family_id: int) -> Member:
+        member = membership(user, family_id)
+        if not member.trusted:
+            raise HTTPException(403, "only trusted member can manage group")
         return member
+
+    @router.get("/api/join/{code}")
+    def api_join_info(code: str):
+        row = deps.repos.bind_code.peek(code)
+        if row is None:
+            raise HTTPException(404, "invitation unavailable")
+        target = deps.repos.member.get(int(row["member_id"]))
+        group = deps.repos.family.get(target.family_id) if target else None
+        if target is None or group is None:
+            raise HTTPException(404, "invitation unavailable")
+        return {"group_name": group["name"], "member_name": target.name,
+                "expires_at": row["expires_at"], "command": f"绑定 {row['code']}"}
+
+    def translate_validation(fn, *args):
+        try:
+            return fn(*args)
+        except (HomeshieldError, ValueError) as e:
+            raise HTTPException(400, str(e)) from e
+
+    @router.get("/api/groups")
+    def api_groups(token: str = Query("")):
+        user = user_by_token(token)
+        return {"groups": [
+            {"id": g["id"], "name": g["name"], "trusted": bool(g["trusted"]),
+             "mute": bool(g["mute"]), "member_count": g["member_count"],
+             "is_creator": deps.repos.family.get(g["id"])["created_by_user_id"] == user.id}
+            for g in deps.repos.family.list_for_user(user.id)
+        ]}
+
+    @router.post("/api/groups")
+    def api_create_group(body: GroupIn):
+        user = user_by_token(body.token)
+        try:
+            admin = deps.binding.create_group(user.id, body.name)
+        except HomeshieldError as e:
+            raise HTTPException(400, str(e)) from e
+        group = deps.repos.family.get(admin.family_id)
+        return {"id": admin.family_id, "name": group["name"], "trusted": True}
+
+    @router.patch("/api/groups/{gid}")
+    def api_rename_group(gid: int, body: GroupIn):
+        user = user_by_token(body.token)
+        with WRITE_LOCK:
+            require_trusted(user, gid)
+            translate_validation(deps.groups.rename, gid, body.name)
+        return {"id": gid, "name": body.name.strip()}
+
+    @router.delete("/api/groups/{gid}")
+    def api_disband_group(gid: int, body: TokenIn):
+        user = user_by_token(body.token)
+        translate_validation(deps.groups.disband, user.id, gid)
+        return {"disbanded": True, "group_id": gid}
 
     @router.post("/api/query")
     async def api_query(body: QueryIn):
-        member = member_by_token(body.token)
+        user = user_by_token(body.token)
+        memberships = deps.repos.member.list_for_user(user.id)
+        if not memberships:
+            raise HTTPException(400, "no active group; join or create a group before querying")
         try:
             outcome = await verification.verify(
-                member=member,
-                content=body.content,
-                content_type=body.content_type,
-                channel="web",
-                msg_id=body.msg_id,
+                user=user, memberships=memberships, content=body.content,
+                content_type=body.content_type, channel="web", msg_id=body.msg_id,
             )
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         except DuplicateMessage as e:
-            raise HTTPException(409, f"duplicate msg_id={e.msg_id}")
+            raise HTTPException(409, f"duplicate msg_id={e.msg_id}") from e
         if outcome.duplicate:
             raise HTTPException(409, "duplicate msg_id")
         result = outcome.result
         return {
-            "query_id": result.query_id,
-            "verdict_id": result.verdict_id,
+            "query_id": result.query_id, "verdict_id": result.verdict_id,
             "level": result.verdict.level.value if result.verdict else None,
             "cited_ids": result.verdict.cited_ids if result.verdict else [],
-            "reply": result.reply,
-            "latency_ms": result.latency_ms,
+            "reply": result.reply, "latency_ms": result.latency_ms,
         }
 
     @router.get("/api/stream")
     async def api_stream(token: str = Query("")):
-        member = member_by_token(token)
-        q = deps.broker.subscribe(member.family_id)
+        user = user_by_token(token)
+        q = deps.broker.subscribe(user.id)
 
         async def gen():
             try:
                 while True:
                     payload = await q.get()
+                    current = deps.repos.alert.active_family_ids_for_user(user.id)
+                    names_by_id = dict(zip(payload["group_ids"], payload["group_names"]))
+                    allowed = [gid for gid in payload["group_ids"] if gid in current]
+                    if not allowed:
+                        continue
+                    payload["group_ids"] = allowed
+                    payload["group_names"] = [names_by_id.get(gid, "") for gid in allowed]
                     yield f"event: alert\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
             finally:
-                deps.broker.unsubscribe(member.family_id, q)
+                deps.broker.unsubscribe(user.id, q)
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     @router.get("/api/alerts")
-    def api_alerts(token: str = Query("")):
-        """高危告警历史:控制台打开时先渲染历史,SSE 只补增量。"""
-        member = member_by_token(token)
-        rows = deps.repos.alert.list_by_family(member.family_id)
-        return {
-            "alerts": [
-                {
-                    "verdict_id": r["verdict_id"],
-                    "level": r["level"],
-                    "summary": r["content"][:50],
-                    "delivered_at": r["delivered_at"],
-                }
-                for r in rows
-            ]
-        }
+    def api_alerts(token: str = Query(""), group_id: int | None = Query(None)):
+        user = user_by_token(token)
+        with WRITE_LOCK:
+            group = group_for_user(user, group_id)
+            rows = deps.repos.alert.list_for_user_group(user.id, group["id"])
+        return {"group_id": group["id"], "alerts": [
+            {"verdict_id": r["verdict_id"], "level": r["level"],
+             "summary": r["content"][:50], "delivered_at": r["delivered_at"],
+             "group_name": r["group_name_at_alert"]}
+            for r in rows
+        ]}
 
     @router.get("/api/alerts/{verdict_id}")
     def api_alert_detail(verdict_id: int, token: str = Query("")):
-        """单条告警详情(落地页数据):结论、依据与本人反馈状态。"""
-        member = member_by_token(token)
-        detail = deps.repos.verdict.get_with_context(verdict_id)
-        if detail is None or detail["family_id"] != member.family_id:
+        user = user_by_token(token)
+        detail, denial = deps.repos.alert.access_detail(user.id, verdict_id)
+        if denial:
+            raise HTTPException(410, {"reason": denial})
+        if detail is None:
             raise HTTPException(404, "alert not found")
-        mine = deps.repos.correction.get_by_verdict_and_member(verdict_id, member.id)
+        mine = deps.repos.correction.get_by_verdict_and_user(verdict_id, user.id)
         return {
-            "verdict_id": verdict_id,
-            "level": detail["level"],
-            "reply": detail["reply"],
-            "summary": detail["content"][:80],
-            "created_at": detail["created_at"],
-            "my_feedback": (
-                {"label": mine.label.value, "status": mine.status.value} if mine else None
-            ),
+            "verdict_id": verdict_id, "level": detail["level"], "reply": detail["reply"],
+            "summary": detail["content"][:80], "created_at": detail["created_at"],
+            "group_names": detail["group_names"],
+            "my_feedback": ({"label": mine.label.value, "status": mine.status.value} if mine else None),
         }
 
     @router.get("/api/corrections")
-    def api_corrections_list(token: str = Query("")):
-        member = member_by_token(token)
-        rows = deps.repos.correction.list_pending_with_context(member.family_id)
-        return {"viewer_trusted": member.trusted, "pending": rows}
+    def api_corrections_list(token: str = Query(""), group_id: int | None = Query(None)):
+        user = user_by_token(token)
+        with WRITE_LOCK:
+            group = group_for_user(user, group_id)
+            viewer = membership(user, group["id"])
+            rows = deps.repos.correction.list_pending_with_context(group["id"]) if viewer.trusted else []
+        return {"group_id": group["id"], "viewer_trusted": viewer.trusted, "pending": rows}
 
     @router.post("/api/corrections")
     def api_corrections(body: CorrectionIn):
-        member = member_by_token(body.token)
+        user = user_by_token(body.token)
         try:
             cid, status = corrections.submit(
-                body.verdict_id, member.id, CorrectionLabel(body.label), body.note
+                body.verdict_id, user.id, CorrectionLabel(body.label), body.note
             )
         except (HomeshieldError, ValueError) as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
         return {"correction_id": cid, "status": status.value}
 
     @router.post("/api/corrections/{cid}/confirm")
     def api_confirm(cid: int, body: DecideIn):
-        member = member_by_token(body.token)
-        try:
-            status = corrections.decide(cid, member.id, body.decision)
-        except HomeshieldError as e:
-            raise HTTPException(400, str(e))
+        user = user_by_token(body.token)
+        with WRITE_LOCK:
+            record, groups = deps.repos.correction.get_with_groups(cid)
+            if record is None:
+                raise HTTPException(404, "correction not found")
+            active = {m.family_id: m for m in deps.repos.member.list_for_user(user.id)}
+            actor = next((active[g["family_id"]] for g in groups
+                          if g["family_id"] in active and active[g["family_id"]].trusted), None)
+            if actor is None:
+                raise HTTPException(400, "correction not in a related group")
+            try:
+                status = corrections.decide(cid, actor.id, body.decision)
+            except HomeshieldError as e:
+                raise HTTPException(400, str(e)) from e
         return {"status": status.value}
 
-    @router.get("/api/members")
-    def api_members(token: str = Query("")):
-        member = member_by_token(token)
-        return {
-            "viewer_id": member.id,
-            "viewer_trusted": member.trusted,
-            "members": [
-                {
-                    "id": m.id,
-                    "name": m.name,
-                    "trusted": m.trusted,
-                    "bound": m.openid is not None,
-                }
-                for m in deps.repos.member.list_members(member.family_id)
-            ],
-        }
+    @router.get("/api/weekly")
+    def api_weekly(token: str = Query(""), group_id: int | None = Query(None)):
+        user = user_by_token(token)
+        with WRITE_LOCK:
+            group = group_for_user(user, group_id)
+            return weekly_report(deps.repos, group["id"])
 
-    @router.post("/api/members")
-    def api_add_member(body: MemberIn):
-        """创建成员位并签发绑定码;仅信任成员,成员数封顶。新位默认不受信任。"""
-        member = member_by_token(body.token)
-        if not member.trusted:
-            raise HTTPException(403, "only trusted member can manage members")
-        try:
-            deps.binding.ensure_member_capacity(member.family_id)
-        except BindingError:
-            raise HTTPException(400, "family reached max members")
+    @router.get("/api/groups/{gid}/members")
+    def api_members(gid: int, token: str = Query("")):
+        user = user_by_token(token)
+        with WRITE_LOCK:
+            viewer = membership(user, gid)
+            return {
+                "group_id": gid, "viewer_id": viewer.id, "viewer_trusted": viewer.trusted,
+                "members": [
+                    {"id": m.id, "name": m.name, "trusted": m.trusted,
+                     "bound": m.user_id is not None, "is_me": m.user_id == user.id,
+                     "mute": m.mute}
+                    for m in deps.repos.member.list_members(gid)
+                ],
+            }
+
+    @router.post("/api/groups/{gid}/members")
+    def api_add_member(gid: int, body: MemberIn):
+        user = user_by_token(body.token)
         name = body.name.strip()
         if not name:
             raise HTTPException(400, "name is empty")
-        target = deps.repos.member.get(deps.repos.member.add(member.family_id, name))
-        code = deps.binding.issue_code(target, created_by=member.id)
+        with WRITE_LOCK:
+            actor = require_trusted(user, gid)
+            try:
+                target_id = deps.groups.create_member_slot(gid, name)
+                target = deps.repos.member.get(target_id)
+                code = deps.binding.issue_code(target, created_by=actor.id)
+            except HomeshieldError as e:
+                raise HTTPException(400, str(e)) from e
         return {
-            "member_id": target.id,
-            "name": target.name,
-            "trusted": target.trusted,
-            "bind_code": code["code"],
-            "bind_expires_at": code["expires_at"],
-            "entry_url": target.entry_url(deps.settings.public_base_url) or None,
+            "member_id": target.id, "name": target.name, "trusted": target.trusted,
+            "bind_code": code["code"], "bind_expires_at": code["expires_at"],
+            "entry_url": (f"{deps.settings.public_base_url.rstrip('/')}/join/{code['code']}"
+                          if deps.settings.public_base_url else None),
         }
 
-    @router.post("/api/members/{member_id}/bind-code")
-    def api_reissue_bind_code(member_id: int, body: TokenIn):
-        """重发绑定码(作废旧码);给自己重发即是本人微信绑定入口。"""
-        member = member_by_token(body.token)
-        if not member.trusted:
-            raise HTTPException(403, "only trusted member can manage members")
-        target = deps.repos.member.get(member_id)
-        if target is None or target.family_id != member.family_id:
-            raise HTTPException(404, "member not found")
-        try:
-            code = deps.binding.issue_code(target, created_by=member.id)
-        except BindingError as e:
-            raise HTTPException(400, e.reason)
+    @router.post("/api/groups/{gid}/members/{member_id}/bind-code")
+    def api_reissue_bind_code(gid: int, member_id: int, body: TokenIn):
+        user = user_by_token(body.token)
+        with WRITE_LOCK:
+            actor = require_trusted(user, gid)
+            target = deps.repos.member.get(member_id)
+            if target is None or target.family_id != gid or target.ended_at is not None:
+                raise HTTPException(404, "member not found")
+            try:
+                code = deps.binding.issue_code(target, created_by=actor.id)
+            except HomeshieldError as e:
+                raise HTTPException(400, str(e)) from e
         return {"bind_code": code["code"], "bind_expires_at": code["expires_at"]}
 
-    @router.post("/api/members/{member_id}/trust")
-    def api_set_trust(member_id: int, body: TrustIn):
-        """纠正信任位翻转;仅信任成员可操作,且不能改自己(防止最后一个可管理者自我降级)。"""
-        member = member_by_token(body.token)
-        if not member.trusted:
-            raise HTTPException(403, "only trusted member can manage members")
-        target = deps.repos.member.get(member_id)
-        if target is None or target.family_id != member.family_id:
-            raise HTTPException(404, "member not found")
-        if target.id == member.id:
-            raise HTTPException(400, "cannot change own trust")
-        if body.trusted or not target.trusted:
-            deps.repos.member.set_trust(target.id, body.trusted)
-        elif not deps.repos.member.demote_with_guard(target.id, member.family_id):
-            # 并发互降窗口在此关闭:条件更新保证全群永远保留一名信任成员
-            raise HTTPException(400, "cannot demote the last trusted member")
-        return {"member_id": target.id, "trusted": body.trusted}
+    @router.post("/api/groups/{gid}/members/{member_id}/trust")
+    def api_set_trust(gid: int, member_id: int, body: TrustIn):
+        user = user_by_token(body.token)
+        with WRITE_LOCK:
+            actor = require_trusted(user, gid)
+            translate_validation(deps.groups.set_trust, gid, member_id, body.trusted, actor.id)
+        return {"member_id": member_id, "trusted": body.trusted}
 
-    @router.get("/api/weekly")
-    def api_weekly(token: str = Query("")):
-        member = member_by_token(token)
-        return weekly_report(deps.repos, member.family_id)
+    @router.delete("/api/groups/{gid}/members/{member_id}")
+    def api_remove_member(gid: int, member_id: int, body: TokenIn):
+        user = user_by_token(body.token)
+        with WRITE_LOCK:
+            actor = membership(user, gid)
+            if actor.id == member_id:
+                result = translate_validation(deps.groups.leave, user.id, gid)
+            else:
+                require_trusted(user, gid)
+                result = translate_validation(deps.groups.remove, gid, member_id)
+        return {"status": result}
+
+    @router.patch("/api/groups/{gid}/members/{member_id}")
+    def api_rename_member(gid: int, member_id: int, body: MemberPatchIn):
+        user = user_by_token(body.token)
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "name is empty")
+        with WRITE_LOCK:
+            actor = membership(user, gid)
+            target = deps.repos.member.get(member_id)
+            if target is None or target.family_id != gid or target.ended_at is not None:
+                raise HTTPException(404, "member not found")
+            if target.user_id != user.id and not actor.trusted:
+                raise HTTPException(403, "only member or trusted member can rename")
+            deps.repos.member.rename(member_id, name)
+        return {"member_id": member_id, "name": name}
+
+    @router.post("/api/groups/{gid}/mute")
+    def api_mute(gid: int, body: MuteIn):
+        user = user_by_token(body.token)
+        with WRITE_LOCK:
+            translate_validation(deps.groups.set_mute, gid, user.id, body.mute)
+        return {"group_id": gid, "mute": body.mute}
 
     return router

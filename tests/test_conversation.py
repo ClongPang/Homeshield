@@ -4,7 +4,7 @@ import json
 
 from homeshield.core.deps import make_pipeline
 from homeshield.core.features import FeatureSpec, escalation_feature
-from homeshield.core.intake import ingest
+from conftest import ingest_member
 from homeshield.core.models import Conversation
 from homeshield.core.pipeline import _to_conversation
 
@@ -55,7 +55,7 @@ def test_escalation_absent_cases():
 def test_pipeline_multi_turn_assigns_turns_and_escalation(deps, family):
     fid, elder, _ = family
     content = "【第1轮】我是你领导,这是我的新号\n【第2轮】在开会不方便接电话,帮我垫付5万合同款,马上"
-    intake = ingest(deps.repos, member_id=elder, family_id=fid, content=content)
+    intake = ingest_member(deps.repos, elder, content=content)
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
     assert result.verdict is not None
     feats = result.verdict.model_dump()  # cited/reason 引用特征

@@ -40,7 +40,7 @@ from homeshield.core.models import (
     Mode,
     max_level,
 )
-from homeshield.core.reply import ReplyGenerator
+from homeshield.core.reply import ReplyGenerator, add_delivery_notice
 from homeshield.core.repo import Repos
 from homeshield.core.retrieval import Retriever
 
@@ -273,16 +273,17 @@ class Pipeline:
             self.judge.mode if isinstance(self.judge.mode, Mode) else Mode(self.judge.mode),
         )
         await self.bus.publish(
-            VerdictCompleted(
+            event := VerdictCompleted(
                 message=message, verdict=verdict, reply=reply,
                 query_id=query_id, verdict_id=verdict_id,
             )
         )
+        user_reply = add_delivery_notice(reply, event.queryer_notice)
         return PipelineResult(
             query_id=query_id,
             verdict_id=verdict_id,
             verdict=verdict,
-            reply=reply,
+            reply=user_reply,
             latency_ms=latency_ms,
             rule_floor_level=extraction.rule_floor,
         )

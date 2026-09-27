@@ -30,6 +30,21 @@ class MemberIn(PayloadModel):
     name: str
 
 
+class GroupIn(PayloadModel):
+    token: str
+    name: str
+
+
+class MemberPatchIn(PayloadModel):
+    token: str
+    name: str
+
+
 class TrustIn(PayloadModel):
     token: str
     trusted: bool
+
+
+class MuteIn(PayloadModel):
+    token: str
+    mute: bool

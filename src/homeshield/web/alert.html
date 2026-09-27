@@ -1,79 +1,66 @@
 <!doctype html>
-<!-- 告警落地页:模板消息直达;展示本条判定详情,一键反馈误报/真骗局 -->
 <html lang="zh">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>家中盾 · 告警详情</title>
 <style>
-  body { font-family: -apple-system, sans-serif; font-size: 20px; margin: 0; background: #f6f7f9; }
+  body { font-family: -apple-system, sans-serif; font-size: 18px; margin: 0; background: #f6f7f9; color: #20252b; }
   .wrap { max-width: 520px; margin: 0 auto; padding: 16px; }
-  h1 { font-size: 24px; }
-  .card { background: #fff; border-radius: 12px; padding: 16px; margin-top: 14px; line-height: 1.6; white-space: pre-wrap; }
-  .big { font-size: 22px; }
+  h1 { font-size: 24px; } .card { background: #fff; border-radius: 12px; padding: 16px; margin-top: 14px; line-height: 1.6; white-space: pre-wrap; }
   .meta { color: #666; font-size: 14px; margin-top: 6px; }
-  button { padding: 14px 18px; font-size: 20px; border: 0; border-radius: 10px; background: #2b6cb0; color: #fff; margin: 10px 10px 0 0; }
-  .danger { background: #c05621; }
-  .muted { color: #666; font-size: 15px; }
+  button { padding: 12px 16px; font-size: 17px; border: 0; border-radius: 10px; background: #2b6cb0; color: #fff; margin: 10px 10px 0 0; }
+  .danger { background: #c05621; } .muted { color: #666; font-size: 15px; }
 </style>
 </head>
-<body>
-<div class="wrap" id="app"><div class="card">加载中…</div></div>
+<body><main class="wrap" id="app"><div class="card">加载中…</div></main>
 <script>
 const token = new URLSearchParams(location.search).get("token") || "";
 const vid = location.pathname.split("/").pop();
-const HEADS = { dangerous: "⚠️ 高危预警", suspicious: "⚠️ 需要留意", safe: "判定:看起来安全" };
-
-function render(text) {
-  document.getElementById("app").innerHTML = `<div class="card">${text}</div>`;
-}
-
+const app = document.getElementById("app");
+const el = (tag, text, cls) => { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; };
+function show(text) { app.replaceChildren(el("div",text,"card")); }
 async function load() {
   try {
-    const resp = await fetch(`/api/alerts/${vid}?token=${encodeURIComponent(token)}`);
-    if (resp.status === 401) return render("链接已失效,请让家人重新发一条链接");
-    if (resp.status === 404) return render("没有找到这条告警");
-    if (!resp.ok) return render("服务暂时不可用,请稍后再试");
-    renderDetail(await resp.json());
-  } catch (e) {
-    render("网络出了点问题,请稍后再试");
-  }
+    const response=await fetch(`/api/alerts/${encodeURIComponent(vid)}?token=${encodeURIComponent(token)}`);
+    if(response.status===401) return show("链接已失效，请让家人重新发送控制台链接。");
+    if(response.status===404) return show("没有找到这条告警。");
+    if(response.status===410) {
+      const reason=(await response.json().catch(()=>({}))).detail?.reason;
+      return show(reason==="group_disbanded" ? "该防护群已解散，历史提醒无法查看。" : "你已不在这个防护群，暂时无法查看这条提醒。");
+    }
+    if(!response.ok) return show("服务暂时不可用，请稍后再试。");
+    renderDetail(await response.json());
+  } catch { show("网络出了点问题，请稍后再试。"); }
 }
-
 function renderDetail(d) {
-  const when = d.created_at ? new Date(d.created_at * 1000).toLocaleString() : "";
-  let html = `<h1>${HEADS[d.level] || "告警详情"}</h1>` +
-    `<div class="card"><b>转发的消息</b>\n${d.summary}</div>` +
-    `<div class="card big">${d.reply}</div>` +
-    `<div class="meta">${when}</div>`;
-  if (d.my_feedback) {
-    const name = d.my_feedback.label === "false_positive" ? "误报" : "真骗局";
-    const state = d.my_feedback.status === "confirmed" ? "已确认" : "待确认";
-    html += `<div class="card muted">你已反馈:${name}(${state})</div>`;
+  app.replaceChildren();
+  app.append(el("h1","⚠️ 高危预警"));
+  if(d.group_names?.length) app.append(el("div",`相关防护群：${d.group_names.join("、")}`,"meta"));
+  const content=el("div",undefined,"card"); content.append(el("b","转发的消息"),el("div",d.summary)); app.append(content);
+  app.append(el("div",d.reply,"card"));
+  if(d.created_at) app.append(el("div",new Date(d.created_at*1000).toLocaleString(),"meta"));
+  if(d.my_feedback) {
+    const label=d.my_feedback.label==="false_positive"?"误报":"真骗局";
+    const state=d.my_feedback.status==="confirmed"?"已确认":d.my_feedback.status==="rejected"?"已驳回":"待确认";
+    app.append(el("div",`你已反馈：${label}（${state}）`,"card muted"));
   } else {
-    html += `<div class="card"><b>核实之后,这条预警准吗?</b><br>` +
-      `<button onclick="feedback('false_positive')">是误报</button>` +
-      `<button class="danger" onclick="feedback('real')">是真骗局</button></div>`;
+    const box=el("div",undefined,"card"); box.append(el("b","核实之后，这条预警准吗？"));
+    box.append(el("div","提交后，原查询消息会展示给你仍在的相关防护群信任成员，用于确认这条反馈。","muted"));
+    box.append(button("是误报",()=>feedback("false_positive")));
+    box.append(button("是真骗局",()=>feedback("real"),"danger")); app.append(box);
   }
-  document.getElementById("app").innerHTML = html;
 }
-
+function button(text,run,cls="") { const b=el("button",text,cls); b.onclick=run; return b; }
 async function feedback(label) {
   try {
-    const resp = await fetch("/api/corrections", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, verdict_id: Number(vid), label }),
-    });
-    if (resp.status === 401) return render("链接已失效,请让家人重新发一条链接");
-    if (!resp.ok) return render("提交失败,请稍后再试");
-    load();
-  } catch (e) {
-    render("网络出了点问题,请稍后再试");
-  }
+    const response=await fetch("/api/corrections",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({token,verdict_id:Number(vid),label})});
+    if(response.status===401) return show("链接已失效，请让家人重新发送控制台链接。");
+    if(!response.ok) return show("提交失败，请确认你仍在相关防护群中后重试。");
+    await load();
+  } catch { show("网络出了点问题，请稍后再试。"); }
 }
-
 load();
-</script>
-</body>
+</script></body>
 </html>

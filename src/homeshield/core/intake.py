@@ -5,7 +5,8 @@
 import re
 from dataclasses import dataclass
 
-from homeshield.core.models import ContentType, Message
+from homeshield.core.errors import ValidationError
+from homeshield.core.models import ContentType, Member, Message
 from homeshield.core.repo import Repos
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -29,8 +30,8 @@ def detect_content_type(content: str, declared: str | None = None) -> ContentTyp
 def ingest(
     repos: Repos,
     *,
-    member_id: int,
-    family_id: int,
+    user_id: int,
+    memberships: list[Member],
     content: str,
     content_type: str | None = None,
     channel: str = "web",
@@ -38,20 +39,29 @@ def ingest(
 ) -> IntakeResult:
     if not content or not content.strip():
         raise ValueError("empty content")  # → API 层转 400
+    if not memberships:
+        raise ValueError("user has no active group")
     if msg_id:
         existed = repos.query.exists_by_msg_id(msg_id)
         if existed:
             return IntakeResult(message=None, duplicate=True, query_id=int(existed["id"]))
     ctype = detect_content_type(content, content_type)
+    try:
+        query_id = repos.query.insert(user_id, memberships, ctype.value, content, msg_id)
+    except ValidationError as exc:
+        # 成员关系可能在入口读取后、查询快照写入前被终止。
+        # 将这个并发结果按正常的“当前不在群内”处理，不能泄漏为 500。
+        if str(exc) == "user has no active group":
+            raise ValueError("user has no active group") from exc
+        raise
+    snapshot = repos.query.groups(query_id)
     message = Message(
-        member_id=member_id,
-        family_id=family_id,
+        user_id=user_id,
+        family_ids=[g["family_id"] for g in snapshot],
+        membership_ids=[g["query_member_id"] for g in snapshot],
         content_type=ctype,
         content=content,
         channel=channel,
         msg_id=msg_id,
-    )
-    query_id = repos.query.insert(
-        family_id, member_id, ctype.value, content, msg_id
     )
     return IntakeResult(message=message, duplicate=False, query_id=query_id)

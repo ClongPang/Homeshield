@@ -17,7 +17,7 @@ from homeshield.eval.metrics import threshold_sweep
 from homeshield.eval.report import render_report
 
 
-def _make_runner(deps, member_id: int, family_id: int, config):
+def _make_runner(deps, member_id: int, config):
     pipeline = make_pipeline(deps, config)
 
     async def run(sample) -> tuple[str, int, int]:
@@ -26,10 +26,11 @@ def _make_runner(deps, member_id: int, family_id: int, config):
             if sample.turns
             else sample.text
         )
+        member = deps.repos.member.get(member_id)
         intake = ingest(
             deps.repos,
-            member_id=member_id,
-            family_id=family_id,
+            user_id=member.user_id,
+            memberships=deps.repos.member.list_for_user(member.user_id),
             content=content,
         )
         result = await pipeline.run(intake.message, intake.query_id)
@@ -62,7 +63,7 @@ def main() -> None:
     profile = Counter(s.source.split(":", 1)[0] for s in samples)
     deps = build_deps(settings)
     fid = deps.repos.family.create("eval")
-    mid = deps.repos.member.add(fid, "evaler")
+    mid = deps.repos.member.add(fid, "evaler", openid="test:eval")
 
     names = [c.strip() for c in args.configs.split(",")] if args.configs else None
     if args.checkpoint:
@@ -70,11 +71,11 @@ def main() -> None:
 
     async def _evaluate():
         matrix = await run_matrix(
-            lambda cfg: _make_runner(deps, mid, fid, cfg), samples, names,
+            lambda cfg: _make_runner(deps, mid, cfg), samples, names,
             checkpoint=args.checkpoint or None,
         )
         # 单一事件循环:AsyncOpenAI 客户端绑定创建它的循环,跨 asyncio.run 复用会炸
-        full_run = _make_runner(deps, mid, fid, None)
+        full_run = _make_runner(deps, mid, None)
         scores = await _collect_scores(full_run, samples)
         return matrix, scores
 

@@ -1,5 +1,4 @@
 <!doctype html>
-<!-- 子女控制台:链接即凭证(?token=),周报 + 成员管理(邀请码) + 告警(历史拉取 + SSE 增量) + 待确认纠正队列 -->
 <html lang="zh">
 <head>
 <meta charset="utf-8" />
@@ -10,248 +9,246 @@
   .wrap { max-width: 760px; margin: 0 auto; padding: 20px; }
   h1 { font-size: 22px; } h2 { font-size: 16px; color: #9aa0a6; margin: 18px 0 6px; }
   .card { background: #1a2027; border-radius: 12px; padding: 14px; margin: 10px 0; line-height: 1.6; }
-  .alert { border-left: 4px solid #e5534b; }
-  .pending { border-left: 4px solid #d29922; }
-  button { padding: 6px 12px; border: 0; border-radius: 8px; background: #2b6cb0; color: #fff; margin-right: 8px; margin-top: 8px; }
-  .muted { color: #9aa0a6; font-size: 13px; }
-  .meta { color: #9aa0a6; font-size: 13px; }
-  input, select { background: #10141a; color: #e8eaed; border: 1px solid #30363d; border-radius: 8px; padding: 6px 10px; margin-right: 8px; }
+  .alert { border-left: 4px solid #e5534b; } .pending { border-left: 4px solid #d29922; }
+  button { padding: 6px 12px; border: 0; border-radius: 8px; background: #2b6cb0; color: #fff; margin: 6px 8px 0 0; }
+  button.secondary { background: #57606a; } button.danger { background: #a33a36; }
+  .muted, .meta { color: #9aa0a6; font-size: 13px; }
+  input, select { background: #10141a; color: #e8eaed; border: 1px solid #30363d; border-radius: 8px; padding: 7px 10px; margin-right: 8px; }
   code { background: #10141a; padding: 2px 8px; border-radius: 6px; letter-spacing: 2px; font-size: 18px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .hidden { display: none; }
 </style>
 </head>
 <body>
 <div class="wrap" id="app">
   <h1>家中盾 · 控制台</h1>
-  <div class="card" id="weekly"></div>
-  <h2>防护群成员</h2>
-  <div id="family"><div class="card muted">加载中…</div></div>
-  <div class="card" id="codeBox" style="display:none"></div>
-  <div class="card" id="addBox" style="display:none">
-    <div>添加家人</div>
-    <div style="margin-top:6px">
-      <input id="newName" placeholder="称呼,如:妈妈" maxlength="20" />
-      <button onclick="addMember()">生成邀请码</button>
-    </div>
-    <div class="muted">生成后把「绑定 邀请码」发给家人:请 ta 关注公众号后回复即可加入。</div>
+  <div class="card" id="empty" hidden>
+    <b>你还没有加入防护群</b>
+    <div class="muted">创建自己的群，或请群主发送邀请链接。收到邀请后，打开家中盾公众号发送绑定口令即可加入。</div>
+    <div class="row" style="margin-top:10px"><input id="firstGroupName" placeholder="新防护群名称" maxlength="30" /><button id="createFirst">创建防护群</button></div>
   </div>
-  <h2>待确认的纠正</h2>
-  <div id="queue"></div>
-  <h2>高危告警</h2>
-  <div id="alerts"><div class="card muted">暂无告警,等待推送…</div></div>
+  <section id="groupApp" hidden>
+    <div class="card row">
+      <b id="groupHeading"></b>
+      <select id="groupSelect" class="hidden" aria-label="选择防护群"></select>
+      <span class="muted" id="muteState"></span>
+    </div>
+    <div id="groupData" hidden>
+      <div class="card" id="weekly"></div>
+      <div class="card row" id="groupControls"></div>
+      <h2>防护群成员</h2><div id="members"></div>
+      <div class="card hidden" id="codeBox"></div>
+      <div class="card" id="addBox"><div>邀请家人加入</div><div class="row" style="margin-top:6px">
+        <input id="newName" placeholder="群内称呼,如:妈妈" maxlength="20" /><button id="addMember">生成邀请</button>
+      </div><div class="muted">把邀请链接发给家人，或让对方关注公众号后回复绑定口令。</div></div>
+      <h2>待确认的纠正</h2><div id="queue"></div>
+      <h2>高危告警</h2><div id="alerts"><div class="card muted">暂无告警。</div></div>
+    </div>
+  </section>
+  <div class="card hidden" id="notice"></div>
 </div>
 <script>
 const token = new URLSearchParams(location.search).get("token") || "";
-const label_name = (l) => (l === "false_positive" ? "说是误报" : "说是真骗局");
-
-function showFatal(text) {
-  document.getElementById("app").innerHTML = `<div class="card">${text}</div>`;
+let groups = [], current = null, eventSource = null, groupLoadSeq = 0, groupsRefreshSeq = 0;
+const byId = id => document.getElementById(id);
+const el = (tag, text, cls) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; };
+function notice(text) { const box = byId("notice"); box.textContent = text; box.classList.remove("hidden"); }
+function clearNotice() { byId("notice").classList.add("hidden"); }
+function tokenUrl(path, withGroup = false) {
+  const url = new URL(path, location.origin); url.searchParams.set("token", token);
+  if (withGroup && current) url.searchParams.set("group_id", current.id);
+  return url;
 }
-
-async function api(path) {
-  const resp = await fetch(path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token));
-  if (resp.status === 401) {
-    showFatal("链接已失效,请让家人重新发一条链接");
-    throw new Error("unauthorized");
-  }
-  if (!resp.ok) {
-    showFatal("服务暂时不可用,请稍后再试");
-    throw new Error("server error");
-  }
-  return resp.json();
+async function request(path, {method="GET", body=null, group=false} = {}) {
+  const url = tokenUrl(path, group);
+  const response = await fetch(url, {method, headers: body ? {"Content-Type":"application/json"} : {},
+    body: body ? JSON.stringify({token, ...body}) : undefined});
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401) { byId("app").replaceChildren(el("div", "链接已失效，请让家人重新发送控制台链接。", "card")); throw new Error("unauthorized"); }
+  if (!response.ok) throw new Error(data.detail?.reason || data.detail || "操作失败，请稍后再试。");
+  return data;
 }
+function action(label, run, cls="") { const b=el("button",label,cls); b.onclick=async()=>{ clearNotice(); try { await run(); } catch(e) { notice(String(e.message || e)); } }; return b; }
 
-const post = (path, body) => fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token, ...body }) });
-
-function loadFamily() {
-  api("/api/members").then(d => {
-    const box = document.getElementById("family");
-    box.innerHTML = "";
-    document.getElementById("addBox").style.display = d.viewer_trusted ? "" : "none";
-    for (const m of d.members) {
-      const div = document.createElement("div");
-      div.className = "card";
-      const title = document.createElement("div");
-      title.textContent = `${m.name}${m.id === d.viewer_id ? "(我)" : ""} · ${m.bound ? "已绑定微信" : "未绑定"}` +
-        (m.trusted ? " · 可确认纠正" : "");
-      div.append(title);
-      if (d.viewer_trusted && !m.bound) {
-        const b = document.createElement("button");
-        b.textContent = "生成邀请码";
-        b.onclick = () => reissue(m.id);
-        div.append(b);
-      }
-      // 信任位按钮:不能操作自己(接口同样拒绝,防最后一个可管理者消失)
-      if (d.viewer_trusted && m.id !== d.viewer_id) {
-        if (m.trusted) {
-          const t = document.createElement("button");
-          t.textContent = "收回纠正信任";
-          t.style.background = "#57606a";
-          t.onclick = () => setTrust(m.id, false);
-          div.append(t);
-        } else {
-          const t = document.createElement("button");
-          t.textContent = "设为可确认纠正";
-          t.onclick = () => setTrust(m.id, true);
-          div.append(t);
-        }
-      }
-      box.append(div);
+async function loadGroups() {
+  const refreshSeq = ++groupsRefreshSeq;
+  groupLoadSeq++;
+  const data = await request("/api/groups");
+  if (refreshSeq !== groupsRefreshSeq) return;
+  groups = data.groups;
+  if (!groups.length) {
+    current = null;
+    if(eventSource) { eventSource.close(); eventSource = null; }
+    byId("empty").hidden = false; byId("groupApp").hidden = true;
+    byId("createFirst").onclick = () => createGroup(byId("firstGroupName").value.trim()).catch(e=>notice(String(e.message||e)));
+    return;
+  }
+  byId("empty").hidden = true; byId("groupApp").hidden = false;
+  const savedValue = sessionStorage.getItem("hs_group_id");
+  const savedId = savedValue ? Number(savedValue) : null;
+  current = groups.length === 1 ? groups[0] : groups.find(g => g.id === savedId) || null;
+  const select = byId("groupSelect"); select.replaceChildren();
+  if (groups.length > 1) { const placeholder=el("option","请选择防护群"); placeholder.value=""; select.append(placeholder); }
+  for (const g of groups) { const option=el("option",g.name); option.value=g.id; option.selected=g.id===current?.id; select.append(option); }
+  select.classList.toggle("hidden", groups.length < 2);
+  select.value = current ? String(current.id) : "";
+  select.onchange = () => {
+    groupLoadSeq++;
+    current = groups.find(g => g.id === Number(select.value)) || null;
+    if (!current) {
+      sessionStorage.removeItem("hs_group_id"); byId("groupHeading").textContent="请选择防护群";
+      byId("muteState").textContent=""; byId("groupData").hidden=true; return;
     }
-  }).catch(() => {});
-}
-
-function setTrust(memberId, trusted) {
-  post(`/api/members/${memberId}/trust`, { trusted }).then(() => loadFamily());
-}
-
-// 创建/重发邀请码共用展示:码只在此处可见,接口不回传 token
-function showCode(d) {
-  const box = document.getElementById("codeBox");
-  box.style.display = "";
-  box.innerHTML = "";
-  const line = document.createElement("div");
-  const code = document.createElement("code");
-  code.textContent = d.bind_code;
-  line.append("邀请码:", code, ` (有效期至 ${new Date(d.bind_expires_at * 1000).toLocaleString()})`);
-  const tip = document.createElement("div");
-  tip.className = "muted";
-  tip.textContent = `让 ta 关注公众号后回复:绑定 ${d.bind_code}`;
-  const cp = document.createElement("button");
-  cp.textContent = "复制绑定口令";
-  cp.onclick = () => {
-    if (navigator.clipboard) navigator.clipboard.writeText(`绑定 ${d.bind_code}`);
-    cp.replaceWith("已复制 ✓");
+    sessionStorage.setItem("hs_group_id",current.id);
+    loadCurrentGroup().catch(e=>notice(String(e.message||e))); connectStream();
   };
-  box.append(line, tip, cp);
-  if (d.entry_url) {
-    const link = document.createElement("div");
-    link.className = "muted";
-    link.textContent = `或把网页链接直接发给 ta:${d.entry_url}`;
-    box.append(link);
+  if (!current) {
+    byId("groupHeading").textContent="请选择防护群"; byId("muteState").textContent="";
+    byId("groupData").hidden=true; return;
+  }
+  await loadCurrentGroup();
+  connectStream();
+}
+
+async function createGroup(name) {
+  if (!name) { notice("请填写防护群名称。"); return; }
+  const created=await request("/api/groups", {method:"POST",body:{name}});
+  sessionStorage.setItem("hs_group_id",created.id);
+  byId("firstGroupName").value=""; await loadGroups();
+}
+
+async function loadCurrentGroup() {
+  const selected = current;
+  if (!selected) return;
+  const loadSeq = ++groupLoadSeq;
+  byId("groupData").hidden=true;
+  sessionStorage.setItem("hs_group_id",selected.id);
+  byId("groupHeading").textContent = selected.name;
+  byId("muteState").textContent = selected.mute ? "本群提醒已静音" : "本群提醒正常";
+  const [weekly, members, queue, alerts] = await Promise.all([
+    request(`/api/weekly?group_id=${selected.id}`), request(`/api/groups/${selected.id}/members`),
+    request(`/api/corrections?group_id=${selected.id}`), request(`/api/alerts?group_id=${selected.id}`)
+  ]);
+  if (loadSeq !== groupLoadSeq || current?.id !== selected.id) return;
+  byId("weekly").textContent = `近${weekly.days}天：查询 ${weekly.queries} 次 · 高危 ${weekly.dangerous} · 误报 ${weekly.false_positives} · 纠正 ${weekly.corrections}`;
+  byId("addBox").classList.toggle("hidden",!members.viewer_trusted);
+  renderGroupControls(); renderMembers(members); renderQueue(queue); renderAlerts(alerts.alerts);
+  byId("groupData").hidden=false;
+}
+
+function renderGroupControls() {
+  const box=byId("groupControls"); box.replaceChildren();
+  box.append(action("新建防护群",async()=>{
+    const name=prompt("新防护群名称"); if(!name || !name.trim()) return;
+    await createGroup(name.trim());
+  },"secondary"));
+  box.append(action(current.mute ? "开启本群提醒" : "静音本群提醒", async()=>{
+    await request(`/api/groups/${current.id}/mute`,{method:"POST",body:{mute:!current.mute}}); await loadGroups();
+  },"secondary"));
+  if (current.trusted) box.append(action("修改群名",async()=>{
+    const name=prompt("新的防护群名称",current.name); if(!name || !name.trim()) return;
+    await request(`/api/groups/${current.id}`,{method:"PATCH",body:{name:name.trim()}}); await loadGroups();
+  },"secondary"));
+  if (current.is_creator && current.trusted) box.append(action("解散防护群",async()=>{
+    if(!confirm(`解散「${current.name}」后，群成员将无法查看该群历史提醒。继续吗？`)) return;
+    await request(`/api/groups/${current.id}`,{method:"DELETE"}); await loadGroups();
+  },"danger"));
+  box.append(action("退出本群",async()=>{
+    if(!confirm(`退出「${current.name}」？`)) return;
+    const mine = document.querySelector('[data-me="true"]');
+    if(!mine) return;
+    await request(`/api/groups/${current.id}/members/${mine.dataset.memberId}`,{method:"DELETE"}); await loadGroups();
+  },"secondary"));
+}
+
+function renderMembers(data) {
+  const box=byId("members"); box.replaceChildren();
+  for (const m of data.members) {
+    const card=el("div",undefined,"card");
+    const title=el("div",`${m.name}${m.is_me?"（我）":""} · ${m.bound?"已加入":"等待绑定"}${m.trusted?" · 信任成员":""}`);
+    card.append(title);
+    if (m.is_me) { card.dataset.me="true"; card.dataset.memberId=m.id; }
+    if(data.viewer_trusted && !m.bound) card.append(action("生成/重发邀请",()=>reissue(m.id)));
+    if(m.is_me) card.append(action("修改我的群内称呼",async()=>{
+      const name=prompt("新的群内称呼",m.name); if(!name || !name.trim()) return;
+      await request(`/api/groups/${current.id}/members/${m.id}`,{method:"PATCH",body:{name:name.trim()}}); await loadCurrentGroup();
+    },"secondary"));
+    if(data.viewer_trusted && m.bound && !m.is_me) {
+      card.append(action(m.trusted?"收回信任权限":"设为信任成员",async()=>{
+        await request(`/api/groups/${current.id}/members/${m.id}/trust`,{method:"POST",body:{trusted:!m.trusted}}); await loadCurrentGroup();
+      },"secondary"));
+      card.append(action("移出本群",async()=>{
+        if(!confirm(`将${m.name}移出「${current.name}」？`)) return;
+        await request(`/api/groups/${current.id}/members/${m.id}`,{method:"DELETE"}); await loadCurrentGroup();
+      },"danger"));
+    }
+    box.append(card);
   }
 }
 
-function addMember() {
-  const name = document.getElementById("newName").value.trim();
-  if (!name) return;
-  post("/api/members", { name }).then(async r => {
-    if (r.status === 401) { showFatal("链接已失效,请让家人重新发一条链接"); throw new Error("unauthorized"); }
-    if (r.status === 403) { showFatal("只有可确认纠正的成员可以管理家庭成员"); throw new Error("forbidden"); }
-    if (!r.ok) { showCodeText("创建失败:" + ((await r.json().catch(() => ({}))).detail || "请稍后再试")); return; }
-    showCode(await r.json());
-    document.getElementById("newName").value = "";
-    loadFamily();
-  }).catch(() => {});
+async function addMember() {
+  const name=byId("newName").value.trim(); if(!name) return;
+  const invite=await request(`/api/groups/${current.id}/members`,{method:"POST",body:{name}});
+  byId("newName").value=""; showCode(invite); await loadCurrentGroup();
+}
+async function reissue(memberId) { showCode(await request(`/api/groups/${current.id}/members/${memberId}/bind-code`,{method:"POST",body:{}})); }
+function showCode(d) {
+  const box=byId("codeBox"); box.replaceChildren(); box.classList.remove("hidden");
+  box.append(el("div",`邀请码：${d.bind_code}`),el("div",`让家人关注公众号后回复：绑定 ${d.bind_code}`,"muted"));
+  const copy=action("复制绑定口令",async()=>{ await navigator.clipboard.writeText(`绑定 ${d.bind_code}`); copy.textContent="已复制 ✓"; }); box.append(copy);
+  if(d.entry_url) { const a=el("a",d.entry_url); a.href=d.entry_url; a.style.color="#8ab4f8"; box.append(el("div","邀请链接：","muted"),a); }
+  box.append(el("div",`有效期至 ${new Date(d.bind_expires_at*1000).toLocaleString()}`,"muted"));
 }
 
-function reissue(memberId) {
-  post(`/api/members/${memberId}/bind-code`, {}).then(async r => {
-    if (r.status === 401) { showFatal("链接已失效,请让家人重新发一条链接"); throw new Error("unauthorized"); }
-    if (!r.ok) { showCodeText("生成失败:" + ((await r.json().catch(() => ({}))).detail || "请稍后再试")); return; }
-    showCode(await r.json());
-  }).catch(() => {});
+function renderQueue(data) {
+  const box=byId("queue"); box.replaceChildren();
+  if(!data.pending.length) {
+    box.append(el("div",data.viewer_trusted?"没有等待确认的纠正。":"待确认的纠正只向信任成员展示。","card muted")); return;
+  }
+  for(const item of data.pending) {
+    const card=el("div",undefined,"card pending");
+    card.append(el("div",`${item.by_name} ${item.label==="false_positive"?"认为是误报":"认为是真骗局"}`));
+    card.append(el("div",item.content));
+    if(item.note) card.append(el("div",`留言：${item.note}`,"meta"));
+    if(data.viewer_trusted) {
+      card.append(el("div","确认后会将此结果用于防护群的风险判断。提交者的原消息会展示给本群信任成员。","meta"));
+      card.append(action("确认",async()=>{await request(`/api/corrections/${item.id}/confirm`,{method:"POST",body:{decision:"confirm"}}); await loadCurrentGroup();}));
+      card.append(action("驳回",async()=>{await request(`/api/corrections/${item.id}/confirm`,{method:"POST",body:{decision:"reject"}}); await loadCurrentGroup();},"secondary"));
+    } else card.append(el("div","等待信任成员确认","meta"));
+    box.append(card);
+  }
 }
 
-function showCodeText(text) {
-  const box = document.getElementById("codeBox");
-  box.style.display = "";
-  box.textContent = text;
-}
-
-function loadWeekly() {
-  api("/api/weekly").then(w => {
-    document.getElementById("weekly").textContent =
-      `近${w.days}天:查询 ${w.queries} 次 · 高危 ${w.dangerous} · 误报 ${w.false_positives} · 纠正 ${w.corrections}`;
-  }).catch(() => {});
-}
-
-function loadQueue() {
-  api("/api/corrections").then(d => {
-    const box = document.getElementById("queue");
-    box.innerHTML = "";
-    if (!d.pending.length) {
-      box.innerHTML = '<div class="card muted">没有等待确认的纠正。</div>';
-      return;
-    }
-    for (const item of d.pending) {
-      const div = document.createElement("div");
-      div.className = "card pending";
-      div.innerHTML = `<div>${item.by_name} ${label_name(item.label)}:</div>` +
-        `<div>${item.content}</div>` +
-        (item.note ? `<div class="meta">留言:${item.note}</div>` : "");
-      if (d.viewer_trusted) {
-        const ok = document.createElement("button");
-        ok.textContent = "同意";
-        ok.onclick = () => decide(item.id, "confirm");
-        const no = document.createElement("button");
-        no.textContent = "驳回";
-        no.style.background = "#57606a";
-        no.onclick = () => decide(item.id, "reject");
-        div.append(ok, no);
-      } else {
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = "等待信任成员确认";
-        div.append(meta);
-      }
-      box.append(div);
-    }
-  }).catch(() => {});
-}
-
-function decide(id, decision) {
-  post(`/api/corrections/${id}/confirm`, { decision }).then(() => loadQueue());
-}
-
-// 历史与实时共用一张卡片;数据形状对齐 SSE payload(+ delivered_at 仅历史有)
 function alertCard(a) {
-  const div = document.createElement("div");
-  div.className = "card alert";
-  div.dataset.vid = a.verdict_id;
-  const title = document.createElement("div");
-  title.textContent = `高危 #${a.verdict_id}:${a.summary}`;
-  const meta = document.createElement("div");
-  meta.className = "meta";
-  meta.textContent = a.delivered_at
-    ? new Date(a.delivered_at * 1000).toLocaleString()
-    : "刚刚";
-  const b = document.createElement("button");
-  b.textContent = "记录为误报";
-  b.onclick = () =>
-    post("/api/corrections", { verdict_id: a.verdict_id, label: "false_positive" })
-      .then(() => { b.replaceWith("已记录 ✓"); loadQueue(); loadWeekly(); });
-  div.append(title, meta, b);
-  return div;
+  const card=el("div",undefined,"card alert"); card.dataset.vid=a.verdict_id;
+  card.append(el("div",`高危 #${a.verdict_id}：${a.summary}`));
+  card.append(el("div",`${a.group_name || current.name} · ${new Date(a.delivered_at*1000).toLocaleString()}`,"meta"));
+  const link=el("a","查看详情"); link.href=`/alert/${a.verdict_id}?token=${encodeURIComponent(token)}`; link.style.color="#8ab4f8"; card.append(link);
+  card.append(action("记录为误报",async()=>{await request("/api/corrections",{method:"POST",body:{verdict_id:a.verdict_id,label:"false_positive"}}); await loadCurrentGroup();}));
+  return card;
+}
+function renderAlerts(alerts) {
+  const box=byId("alerts"); box.replaceChildren();
+  if(!alerts.length) { box.append(el("div","暂无告警。","card muted")); return; }
+  for(const a of alerts) box.append(alertCard(a));
 }
 
-function loadAlerts() {
-  api("/api/alerts").then(d => {
-    const box = document.getElementById("alerts");
-    // 合并式渲染:历史请求在途时 SSE 可能已插卡片,跳过已有的 verdict
-    const fresh = d.alerts.filter(a => !box.querySelector(`[data-vid="${a.verdict_id}"]`));
-    if (!fresh.length) return;
-    if (box.querySelector(".muted")) box.innerHTML = "";
-    for (const a of fresh) box.append(alertCard(a));
-  }).catch(() => {});
+function connectStream() {
+  if(eventSource) eventSource.close();
+  eventSource = new EventSource(`/api/stream?token=${encodeURIComponent(token)}`);
+  eventSource.addEventListener("alert", async event=>{
+    const a=JSON.parse(event.data);
+    if(a.group_ids.some(id=>!groups.some(g=>g.id===id))) await loadGroups();
+    if(!current || !a.group_ids.includes(current.id)) return;
+    const box=byId("alerts"); if(box.querySelector(`[data-vid="${a.verdict_id}"]`)) return;
+    if(box.querySelector(".muted")) box.replaceChildren();
+    box.prepend(alertCard({...a,group_name:a.group_names[a.group_ids.indexOf(current.id)]}));
+  });
+  eventSource.onerror=()=>{};
 }
 
-const es = new EventSource(`/api/stream?token=${encodeURIComponent(token)}`);
-es.onerror = () => {
-  document.getElementById("alerts").innerHTML =
-    '<div class="card muted">连接中断,自动重连中…</div>';
-};
-es.addEventListener("alert", e => {
-  const a = JSON.parse(e.data);
-  const box = document.getElementById("alerts");
-  if (box.querySelector(".muted")) box.innerHTML = "";
-  if (box.querySelector(`[data-vid="${a.verdict_id}"]`)) return; // 历史已在途,避免重复卡片
-  box.prepend(alertCard(a));
-});
-
-loadFamily();
-loadWeekly();
-loadQueue();
-loadAlerts();
+byId("addMember").onclick=()=>addMember().catch(e=>notice(String(e.message||e)));
+loadGroups().catch(e=>notice(String(e.message||e)));
 </script>
 </body>
 </html>

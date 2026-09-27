@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from homeshield.core import messages
 from homeshield.core.intake import ingest
-from homeshield.core.models import Member
+from homeshield.core.models import Member, User
 from homeshield.core.pipeline import Pipeline, PipelineResult
 from homeshield.core.repo import Repos
 
@@ -30,16 +30,26 @@ class VerificationService:
     async def verify(
         self,
         *,
-        member: Member,
+        member: Member | None = None,
+        user: User | None = None,
+        memberships: list[Member] | None = None,
         content: str,
         content_type: str | None = None,
         channel: str = "web",
         msg_id: str | None = None,
     ) -> VerificationOutcome:
+        if user is None and member is not None and member.user_id is not None:
+            user = self.repos.users.get(member.user_id)
+        if user is None:
+            raise ValueError("user has no active group")
+        if memberships is None:
+            memberships = self.repos.member.list_for_user(user.id)
+        if not memberships:
+            raise ValueError("user has no active group")
         intake = ingest(
             self.repos,
-            member_id=member.id,
-            family_id=member.family_id,
+            user_id=user.id,
+            memberships=memberships,
             content=content,
             content_type=content_type,
             channel=channel,

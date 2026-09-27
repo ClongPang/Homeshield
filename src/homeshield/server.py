@@ -1,8 +1,8 @@
 """
 HTTP 组合根(FastAPI):装配依赖与路由,业务在 core,协议在 api/
-家人凭证 = 不可枚举 token:所有家人 API 以 token 定位成员,无/错 token 一律
-401;接口不返回任何 token。多租户:成员经「开通/绑定码」入家(见 core/binding),
-网页 token 链接通道保留;所有家人数据按 member.family_id 隔离
+家人凭证 = 不可枚举 token:所有家人 API 以 token 定位 user,无/错 token 一律
+401;接口不返回 token。user 承载微信身份,member 表示群内成员关系,
+群数据按 family_id 隔离。多群开通/绑定见 core/binding。
 微信回调以平台签名校验;开通/绑定命令同步回复,其余 5s 窗口内先回执再异步判定
 路由分块:api/family.py(家人 API)· api/wechat.py(公众号回调)· 本文件仅装配 + 静态页
 """
@@ -44,6 +44,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/alert/{verdict_id}")
     def alert_page(verdict_id: int):
         return FileResponse(WEB_DIR / "alert.html")
+
+    @app.get("/join/{code}")
+    def join_page(code: str):
+        return FileResponse(WEB_DIR / "join.html")
 
     return app
 

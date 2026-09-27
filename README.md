@@ -1,6 +1,6 @@
 # 家中盾(Homeshield)—— 家庭反诈联防层
 
-> 规格:docs/《家中盾_产品定位.md》(做什么/为什么) + docs/《家中盾_架构技术.md》(怎么做)。
+> 规格:docs/《家中盾_产品定位.md》(做什么/为什么) + docs/《家中盾_架构技术.md》(架构) + docs/《家中盾_多群模型_实施规格.md》(多群行为与验收)。
 > 本 README 只讲**工程骨架**:怎么跑、怎么设计的、扩展点在哪。
 
 ## 快速开始(Python 3.12,uv 管理)
@@ -13,16 +13,15 @@ uv run uvicorn homeshield.server:app --reload   # MODE=mock 下即可完整演�
 uv run homeshield-eval        # 生成 docs/reports/report.md(FR-9)
 ```
 
-家人入家走公众号(见下文「家人入口」);本地无微信快速演示可沿用 CLI:
+家人入群走公众号(见下文「家人入口」);本地无微信演示可用 CLI 创建演示身份:
 
 ```bash
-uv run homeshield-cli add-family --name 我的家庭
-uv run homeshield-cli add-member --family-id 1 --name 妈妈 --role elder
-uv run homeshield-cli add-member --family-id 1 --name 儿子 --role adult
-uv run homeshield-cli link --member-id 2 --base-url http://localhost:8000
+uv run homeshield-cli add-family --name 演示群
+uv run homeshield-cli add-member --family-id <群ID> --name 演示用户 --trusted --demo-user
+uv run homeshield-cli link --member-id <成员ID> --base-url http://localhost:8000
 ```
 
-配置:复制 `.env.example` 为 `.env`,`MODE=llm` 时填 OpenAI 兼容接口与微信参数。
+演示身份不触发微信推送;不带 `--demo-user`/`--openid` 的 `add-member` 只建未绑定成员位。配置:复制 `.env.example` 为 `.env`,`MODE=llm` 时填 OpenAI 兼容接口与微信参数。
 
 ## 目录
 
@@ -31,11 +30,11 @@ src/homeshield/   唯一 Python 包(uv 安装,editable;标准 src 布局)
   server.py       FastAPI 装配根:依赖注入 + 路由挂载 + 静态页(uvicorn homeshield.server:app)
   api/            HTTP 路由层:schemas.py 请求模型 · family.py 家人 API · wechat.py 公众号回调
   cli.py          运维/演示 CLI(= homeshield-cli)
-  web/            长辈聊天页 index.html / 子女控制台 console.html / 告警落地页 alert.html
+  web/            聊天页 index.html / 群控制台 console.html / 告警页 alert.html / 邀请页 join.html
   core/           领域层(纯逻辑,依赖规则见 tests/test_architecture.py)
     models.py config.py errors.py events.py messages.py
     intake.py features.py retrieval.py judge.py reply.py notifier.py
-    feedback.py binding.py annotate.py verification.py pipeline.py
+    feedback.py binding.py groups.py annotate.py verification.py pipeline.py
     db.py repo.py llm.py deps.py       ← 适配器/组合根
     knowledge/  taxonomy.py mechanics.py cases.json   ← 骗术分类学+机制卡+案例种子
     channels/   wechat.py              ← 微信防腐层
@@ -65,10 +64,12 @@ pyproject.toml uv.lock .env.example
 | 组合根 | `deps.build_deps`(唯一 new 具体实现的地方) | server/cli/eval 共用装配;测试注入假实现 |
 | 日志约定 | `core/logsetup.py` + 各模块 `logger.warning(exc_info=True)` | 降级与外部调用失败不静默:留排查痕迹,不打断主链路 |
 
-## 关键工作区决策(规格未明说,骨架先行选定,欢迎推翻)
+## 当前多群实现口径
 
-1. **schema 三处最小扩展**:`member.openid`(零注册映射)、`member.token`(个人链接凭证)、`query.msg_id`(幂等落库);时间戳统一 INTEGER unix 秒。
-2. **多租户:公众号自助开通 + 绑定码入家**:陌生 openid 回复`开通`即建家庭并成为管理员(adult),家人由管理员在控制台生成 8 位一次性绑定码(默认 7 天),回复`绑定 <码>`入家;未绑定消息只引导不判定。护栏 `MAX_FAMILIES`×`MAX_MEMBERS`;旧的"自动绑 elder"单家庭捷径已删除(历史 family 1 成员不受影响)。
+多群行为与生命周期以[实施规格](docs/家中盾_多群模型_实施规格.md)为准:
+
+1. **身份与成员关系分离**:`user` 持有 `openid/token`;`member` 仅描述用户在某群的关系。查询保存 `query_group` 快照,退群/移除/解散保留成员历史。
+2. **查询不选群,群页显式选群**:查询触发相关群广播;单群沿用旧模板,多群接收者使用带群名模板。控制台按群展示告警、纠正队列和周报;首次多群访问先要求选择群。公众号命令包括`开通 [群名]`、`我的群`、`退出 <群名/序号>`与创建者`解散 <群名/序号>`。
 3. **`fpr_strict` 指标**:在规格 FPR(dangerous 级)之外补充用户感知口径(suspicious 亦计入),用于工作点选择;报告两者都出。
 4. **降级语义**:转写失败/引用校验耗尽 → 不落 verdict、不触发告警,回复走人工兜底文案(FR-2/FR-4 的"需人工判断")。
 5. **评测隔离**:`run_eval` 用 `:memory:` 库,不污染主库。
@@ -106,18 +107,18 @@ mock、种子样例、合成数据只有两个合法用途:**CI 管道回归**�
 - Linux:`cp deploy/systemd/homeshield.service /etc/systemd/system/ && systemctl enable --now homeshield`
 - macOS:`cp deploy/launchd/com.homeshield.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.homeshield.plist`
 
-对外可达:VPS 直接绑定 `0.0.0.0`,家用宽带用内网穿透(frp / Tailscale Funnel)。多租户部署必须配 `PUBLIC_BASE_URL`(开通/绑定成功后经客服消息把控制台/网页入口发给家人)。
+对外可达:VPS 直接绑定 `0.0.0.0`,家用宽带用内网穿透(frp / Tailscale Funnel)。多群部署配置 `PUBLIC_BASE_URL`;微信发送模板时保留 `WECHAT_TEMPLATE_ID`,并配置带群名字段的 `WECHAT_MULTI_TEMPLATE_ID`。
 
 家人入口(公众号,零注册):
 
-1. 新家庭:家人回复`开通`→ 自动建家庭,ta 成为管理员,收到控制台链接;
-2. 添加家人:管理员在控制台「添加家人」生成 8 位邀请码(或对未绑定成员重发),把`绑定 邀请码`发给对方;
-3. 家人:关注公众号回复`绑定 邀请码`即入家,直接转发可疑消息即可使用;
-4. 未绑定用户发其他消息只收到引导文案,不判定、不落库。
+1. 新群:家人回复`开通 [群名]`→ 建立防护群,创建者成为信任成员并收到个人控制台链接;
+2. 邀请:信任成员在控制台创建成员位并分享邀请链接或绑定口令;邀请页展示群名、成员称呼与口令,绑定前不展示个人 token;
+3. 加入:家人关注公众号回复`绑定 <码>`即加入该群,同一微信号可加入多个群;
+4. 用户退出全部群后仍保留个人身份,可裸回复`开通`新建群;未绑定者的其他消息只收到引导,不判定、不落库。
 
-护栏:`MAX_FAMILIES`(全局家庭数,默认 100)、`MAX_MEMBERS`(每家成员数,默认 10)、`BIND_CODE_TTL_DAYS`(邀请码有效期,默认 7 天)。CLI 的 `add-family/add-member/link` 保留为运维调试工具。
+护栏:`MAX_FAMILIES`(部署内活跃群总数,默认 100)、`MAX_GROUPS`(每个用户的活跃群数,默认 10)、`MAX_MEMBERS`(每群活跃成员位数,默认 10)、`BIND_CODE_TTL_DAYS`(邀请码有效期,默认 7 天)。CLI 的 `add-family/add-member/link/disband` 保留为运维与演示工具。
 
 ## 安全状态
 
-- 已完成:家人 API 以不可枚举 token 鉴权(链接即凭证,接口不回传 token);`/wechat/callback` 平台签名校验;多租户隔离——告警跨家庭 404,纠正提交/裁决跨家庭 400,成员管理仅 adult;绑定码一次性原子认领(防并发双花),过期/重发即失效。
+- 已完成:家人 API 以 user 级不可枚举 token 鉴权;`/wechat/callback` 平台签名校验;多群告警/历史授权/纠正队列按成员关系隔离;信任成员护栏与历史保留;绑定码一次性原子认领,过期/重发即失效。实施与验收记录见多群实施规格 §8.1。
 - 待办:前端渲染统一转义(防 XSS);生产微信加密模式与 IP 白名单;按家庭的 LLM 用量配额(当前滥用边界 = MAX_FAMILIES × MAX_MEMBERS × 查询频次)。

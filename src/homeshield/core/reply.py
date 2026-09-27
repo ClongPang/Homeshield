@@ -3,7 +3,7 @@
 权威内容归属:【结论】行、safe 兜底建议与"家人已知悉"后缀由代码按判定
 级别生成,LLM 只写【依据】【建议】两段(表达者不拥有权威内容);两段解析失败
 重试 ≤2 次,仍失败回退模板生成。
-回复中不出现成员名:非 safe 结论固定提示"我已经把这条消息告诉了你的家人"。
+回复不包含固定的通知声明;送达说明由协同层根据实际生成的告警补充。
 safe 口径:结论只说"未发现"(陈述检索结果),不说"安全"(担保);
 兜底建议是常驻核实习惯提醒,兼作覆盖范围免责。
 """
@@ -20,7 +20,6 @@ _HEADS = {
     Level.DANGEROUS.value: "⚠️ 是骗子,别转钱",
 }
 _SAFE_ADVICE = "涉及转账、验证码,永远先和家人核实"
-_FAMILY_SUFFIX = "\n我已经把这条消息告诉了你的家人"
 _REPLY_BUDGET = 150
 
 # 完整产出校验(FR-5):三段式齐全 + 长度
@@ -43,13 +42,30 @@ def _assemble(level: Level, basis: str, advice: str) -> str:
     """拼装三段式:结论行、safe 兜底建议与后缀代码所有;超长时按预算截两段正文,三段式结构完整。"""
     if level is Level.SAFE:
         advice = _SAFE_ADVICE  # safe 无可引用的骗术案例,建议即常驻核实提醒,不由 LLM 生成
-    suffix = "" if level is Level.SAFE else _FAMILY_SUFFIX
     head = f"【结论】{_HEADS[level.value]}"
-    budget = _REPLY_BUDGET - len(suffix) - len(head) - 10  # 10 = 两个换行 + 【依据】【建议】段标记
+    budget = _REPLY_BUDGET - len(head) - 10  # 10 = 两个换行 + 【依据】【建议】段标记
     half = max(budget, 10) // 2
     basis = basis[:half].rstrip()
     advice = advice[: max(budget - half, 10)].rstrip()
-    return f"{head}\n【依据】{basis}\n【建议】{advice}{suffix}"
+    return f"{head}\n【依据】{basis}\n【建议】{advice}"
+
+
+def add_delivery_notice(reply: str, notice: str) -> str:
+    """在回复预算内附加本次实际告警范围,不改变判定与三段式结构。"""
+    if not notice:
+        return reply
+    if len(reply) + 1 + len(notice) <= _REPLY_BUDGET:
+        return reply + "\n" + notice
+    parts = reply.rsplit("【建议】", 1)
+    if len(parts) != 2:
+        return reply[:_REPLY_BUDGET-1] + "…"
+    head, advice = parts
+    fixed = len(head) + len("【建议】") + 1  # 末尾换行
+    max_notice = max(1, _REPLY_BUDGET - fixed - 1)
+    if len(notice) > max_notice:
+        notice = notice[:max_notice-1].rstrip() + "…"
+    advice_budget = max(0, _REPLY_BUDGET - fixed - len(notice))
+    return head + "【建议】" + advice[:advice_budget].rstrip() + "\n" + notice
 
 
 class ReplyGenerator(Protocol):

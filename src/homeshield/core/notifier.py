@@ -1,21 +1,14 @@
-"""告警送达:管线发布事实,本模块订阅并执行送达策略。
-
-- AlertBroker:每群一个订阅队列,控制台 SSE 消费;
-- AlertRouter:async handler,仅 dangerous 触发:全体成员落 alert 表、SSE 广播,
-  模板消息推给已绑定微信的成员(后台化);
-- 模板消息经 TemplateSender 端口发送,微信适配器由组合根注入。
-"""
+"""dangerous 告警按查询时相关群生成,按接收用户去重。"""
 import asyncio
+from copy import deepcopy
 import logging
 from typing import Protocol
 
 from homeshield.core.events import EventBus, VerdictCompleted
-from homeshield.core.models import Level
+from homeshield.core.models import Level, utcnow
 from homeshield.core.repo import Repos
 
 logger = logging.getLogger(__name__)
-
-# fire-and-forget 任务登记,防止被垃圾回收(asyncio 官方推荐做法)
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 
@@ -24,78 +17,100 @@ class AlertBroker:
         self._subs: dict[int, list[asyncio.Queue]] = {}
         self._maxsize = maxsize
 
-    def subscribe(self, family_id: int) -> asyncio.Queue:
+    def subscribe(self, user_id: int) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=self._maxsize)
-        self._subs.setdefault(family_id, []).append(q)
+        self._subs.setdefault(user_id, []).append(q)
         return q
 
-    def unsubscribe(self, family_id: int, q: asyncio.Queue) -> None:
-        if q in self._subs.get(family_id, []):
-            self._subs[family_id].remove(q)
+    def unsubscribe(self, user_id: int, q: asyncio.Queue) -> None:
+        if q in self._subs.get(user_id, []):
+            self._subs[user_id].remove(q)
 
-    def publish(self, family_id: int, payload: dict) -> None:
-        for q in self._subs.get(family_id, []):
+    def publish(self, user_id: int, payload: dict) -> None:
+        for q in self._subs.get(user_id, []):
             try:
-                q.put_nowait(payload)
+                # 每个 SSE 订阅独立持有载荷；消费者会按当下权限过滤群列表。
+                q.put_nowait(deepcopy(payload))
             except asyncio.QueueFull:
-                pass  # 打扰预算优先于积压
+                pass
 
 
 class TemplateSender(Protocol):
-    async def send_template(self, openid: str, data: dict, url: str | None = None) -> None: ...
+    async def send_template(self, openid: str, data: dict, url: str | None = None,
+                            template_id: str | None = None) -> None: ...
 
 
 class AlertRouter:
-    """async handler:EventBus await 它完成 DB/SSE(快),模板消息后台(慢)。"""
-
-    def __init__(self, broker: AlertBroker, repos: Repos, base_url: str = ""):
+    def __init__(self, broker: AlertBroker, repos: Repos, base_url: str = "",
+                 template_id: str = "", multi_template_id: str = ""):
         self.broker = broker
         self.repos = repos
         self.base_url = base_url.rstrip("/")
-        self.wechat: TemplateSender | None = None  # 组合根注入,未配置则为 None
+        self.template_id = template_id
+        self.multi_template_id = multi_template_id
+        self.wechat: TemplateSender | None = None
 
     async def __call__(self, event: VerdictCompleted) -> None:
         if event.verdict.level is not Level.DANGEROUS:
-            return  # suspicious 只进周报
-        members = self.repos.member.list_members(event.message.family_id)
-        for m in members:
-            self.repos.alert.insert(event.verdict_id, m.id)
-        payload = {
-            "verdict_id": event.verdict_id,
-            "level": event.verdict.level.value,
-            "summary": event.message.content[:50],
-            "reply": event.reply,
-        }
-        self.broker.publish(event.message.family_id, payload)
-        self._spawn_wechat(members, payload)
-
-    def _spawn_wechat(self, members, payload: dict) -> None:
-        if self.wechat is None:
             return
-        openids = [m.openid for m in members if m.openid]
-        if not openids:
-            return
-        task = asyncio.create_task(self._notify(openids, payload))
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        fanout = self.repos.alert.create_for_verdict(event.verdict_id,event.query_id)
+        for recipient in fanout["recipients"]:
+            user_id = recipient["user_id"]
+            groups = recipient["groups"]
+            group_ids = sorted({g["family_id"] for g in groups})
+            group_names = []
+            for gid in group_ids:
+                group_names.append(next(g["name"] for g in groups if g["family_id"]==gid))
+            self.broker.publish(user_id,{
+                "verdict_id":event.verdict_id,"level":"dangerous",
+                "summary":event.message.content[:50],"group_ids":group_ids,
+                "group_names":group_names,"delivered_at":utcnow(),
+            })
+        if fanout["query_group_count"] > 1:
+            names = fanout["generated_group_names"]
+            event.queryer_notice = "已向" + "、".join(names) + "发出高危提醒" if names else "本次未通知群成员"
+        elif fanout["generated_group_names"]:
+            event.queryer_notice = "已为防护群发出高危提醒"
+        else:
+            event.queryer_notice = "本次未通知群成员"
+        if self.wechat is not None:
+            task = asyncio.create_task(self._notify(event.verdict_id,event.message.content,fanout["recipients"]))
+            _BACKGROUND_TASKS.add(task)
+            task.add_done_callback(_BACKGROUND_TASKS.discard)
 
-    async def _notify(self, openids: list[str], payload: dict) -> None:
-        for openid in openids:
+    async def _notify(self, verdict_id: int, content: str, recipients: list[dict]) -> None:
+        for recipient in recipients:
+            user_id = recipient["user_id"]
+            # 合成身份只用于演示与测试,永不触发真实微信推送。
+            if recipient["openid"].startswith(("demo:", "test:")):
+                continue
+            context = self.repos.alert.push_context(verdict_id,user_id)
+            if context is None:
+                continue
+            if context["active_group_count"] == 1:
+                template_id = self.template_id
+                data = {"thing1":{"value":content[:20]},"phrase1":{"value":"高危预警"}}
+            else:
+                template_id = self.multi_template_id
+                if not template_id:
+                    logger.warning("multi-group template missing; skip openid=%s",context["openid"])
+                    continue
+                names = [g["name"] for g in context["groups"]]
+                first = names[0]
+                label = f"{first}等{len(names)}群" if len(names)>1 else first
+                data = {"thing1":{"value":content[:20]},"phrase1":{"value":"高危预警"},
+                        "thing2":{"value":label[:20]}}
+            if not template_id:
+                continue
+            url = f"{self.base_url}/alert/{verdict_id}?token={context['token']}" if self.base_url else None
             try:
-                url = None
-                member = self.repos.member.get_by_openid(openid)
-                if self.base_url and member is not None and member.token:
-                    url = f"{self.base_url}/alert/{payload['verdict_id']}?token={member.token}"
-                await self.wechat.send_template(
-                    openid,
-                    {"thing1": {"value": payload["summary"][:20]}, "phrase1": {"value": "高危预警"}},
-                    url=url,
-                )
+                await self.wechat.send_template(context["openid"],data,url=url,template_id=template_id)
             except Exception:
-                logger.warning("wechat template send failed openid=%s", openid, exc_info=True)
+                logger.warning("wechat template send failed openid=%s",context["openid"],exc_info=True)
 
 
-def wire_alerts(bus: EventBus, broker: AlertBroker, repos: Repos, base_url: str = "") -> AlertRouter:
-    router = AlertRouter(broker, repos, base_url)
-    bus.subscribe(VerdictCompleted, router)
+def wire_alerts(bus: EventBus, broker: AlertBroker, repos: Repos, base_url: str = "",
+                template_id: str = "", multi_template_id: str = "") -> AlertRouter:
+    router = AlertRouter(broker,repos,base_url,template_id,multi_template_id)
+    bus.subscribe(VerdictCompleted,router)
     return router

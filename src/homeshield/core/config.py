@@ -32,8 +32,10 @@ class Settings:
     wechat_appid: str = ""
     wechat_secret: str = ""
     wechat_template_id: str = ""
+    wechat_multi_template_id: str = ""
     public_base_url: str = ""
     max_members: int = 10
+    max_groups: int = 10
     max_families: int = 100  # 多租户护栏:公众号自助开通的全局家庭上限
     bind_code_ttl_days: int = 7  # 绑定码有效期;超期/已用即失效
     db_path: str = "homeshield.db"
@@ -68,8 +70,10 @@ class Settings:
             wechat_appid=os.getenv("WECHAT_APPID", ""),
             wechat_secret=os.getenv("WECHAT_SECRET", ""),
             wechat_template_id=os.getenv("WECHAT_TEMPLATE_ID", ""),
+            wechat_multi_template_id=os.getenv("WECHAT_MULTI_TEMPLATE_ID", ""),
             public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
             max_members=int(os.getenv("MAX_MEMBERS", "10")),
+            max_groups=int(os.getenv("MAX_GROUPS", "10")),
             max_families=int(os.getenv("MAX_FAMILIES", "100")),
             bind_code_ttl_days=int(os.getenv("BIND_CODE_TTL_DAYS", "7")),
             db_path=os.getenv("DB_PATH", "homeshield.db"),

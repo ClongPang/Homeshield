@@ -13,6 +13,7 @@ from homeshield.core.binding import BindingService
 from homeshield.core.channels.wechat import WeChatChannel
 from homeshield.core.db import connect, init_schema
 from homeshield.core.events import EventBus
+from homeshield.core.groups import GroupService
 from homeshield.core.judge import Judge, LLMJudge, MockJudge
 from homeshield.core.llm import LLMPort, make_llm
 from homeshield.core.models import KbCase
@@ -47,6 +48,7 @@ class Deps:
     pipeline: Pipeline
     verification: VerificationService
     binding: BindingService
+    groups: GroupService
 
 
 def build_deps(settings: Settings) -> Deps:
@@ -66,10 +68,14 @@ def build_deps(settings: Settings) -> Deps:
     reply = (
         LLMReply(llm) if settings.use_llm else TemplateReply()
     )
-    router = wire_alerts(bus, broker, repos, base_url=settings.public_base_url)
+    router = wire_alerts(
+        bus,broker,repos,base_url=settings.public_base_url,
+        template_id=settings.wechat_template_id,multi_template_id=settings.wechat_multi_template_id,
+    )
     # 模板消息发送需要三件套(appid/secret 换 token,template_id 指模板);
     # 只配 wechat_token 时回调链路可用,告警模板保持关闭而非发送时失败
-    if wechat is not None and settings.wechat_appid and settings.wechat_secret and settings.wechat_template_id:
+    if (wechat is not None and settings.wechat_appid and settings.wechat_secret
+            and (settings.wechat_template_id or settings.wechat_multi_template_id)):
         router.wechat = wechat
     pipeline = Pipeline(
         repos=repos,
@@ -88,6 +94,7 @@ def build_deps(settings: Settings) -> Deps:
         max_families=settings.max_families,
         max_members=settings.max_members,
         code_ttl_days=settings.bind_code_ttl_days,
+        max_groups=settings.max_groups,
     )
     return Deps(
         settings=settings,
@@ -104,6 +111,7 @@ def build_deps(settings: Settings) -> Deps:
         pipeline=pipeline,
         verification=verification,
         binding=binding,
+        groups=GroupService(repos,settings.max_members),
     )
 
 
