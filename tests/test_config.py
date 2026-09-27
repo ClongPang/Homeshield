@@ -16,22 +16,22 @@ def _settings(**kw) -> Settings:
 
 def test_role_routing():
     s = _settings(chat_provider_name="DEEPSEEK", embed_provider_name="QWEN")
-    assert s.chat_endpoint().model == "deepseek-chat"
-    assert s.embed_endpoint().model == "qwen-embed"
-    assert s.transcribe_endpoint().model == "deepseek-chat"  # 未配置转写,回落 chat
+    assert s.get_chat_provider().model == "deepseek-chat"
+    assert s.get_embedding_provider().model == "qwen-embed"
+    assert s.get_transcription_provider().model == "deepseek-chat"  # 未配置转写,回落 chat
 
 
 def test_unspecified_chat_falls_back_to_first_provider():
     s = _settings()
-    assert s.chat_endpoint().name == "DEEPSEEK"
-    assert s.embed_endpoint() is None  # 未指名 embed → 检索退化为纯关键词
+    assert s.get_chat_provider().name == "DEEPSEEK"
+    assert s.get_embedding_provider() is None  # 未指名 embed → 检索退化为纯关键词
 
 
 def test_unknown_provider_fails_fast():
     with pytest.raises(ValueError, match="CHAT_PROVIDER"):
-        _settings(chat_provider_name="TYPPO").chat_endpoint()
+        _settings(chat_provider_name="TYPPO").get_chat_provider()
     with pytest.raises(ValueError, match="EMBED_PROVIDER"):
-        _settings(embed_provider_name="TYPPO").embed_endpoint()
+        _settings(embed_provider_name="TYPPO").get_embedding_provider()
 
 
 def test_load_scans_env(monkeypatch, tmp_path):
@@ -45,8 +45,8 @@ def test_load_scans_env(monkeypatch, tmp_path):
     env_file.write_text("# empty\n", encoding="utf-8")
     s = Settings.load(env_file=str(env_file))
     assert set(s.providers) == {"DEEPSEEK"}
-    assert s.chat_endpoint().name == "DEEPSEEK"
-    assert s.embed_endpoint() is None
+    assert s.get_chat_provider().name == "DEEPSEEK"
+    assert s.get_embedding_provider() is None
 
 
 def test_llm_routes_tasks_to_providers():
@@ -55,8 +55,8 @@ def test_llm_routes_tasks_to_providers():
     llm = OpenAICompatLLM(
         _settings(chat_provider_name="DEEPSEEK", embed_provider_name="QWEN")
     )
-    assert llm.endpoint_for("judge").name == "DEEPSEEK"
-    assert llm.endpoint_for("features").name == "DEEPSEEK"
-    assert llm.endpoint_for("reply").name == "DEEPSEEK"
-    assert llm.endpoint_for("transcribe").name == "DEEPSEEK"
-    assert llm.endpoint_for("embed").name == "QWEN"
+    assert llm.get_provider_for_task("judge").name == "DEEPSEEK"
+    assert llm.get_provider_for_task("features").name == "DEEPSEEK"
+    assert llm.get_provider_for_task("reply").name == "DEEPSEEK"
+    assert llm.get_provider_for_task("transcribe").name == "DEEPSEEK"
+    assert llm.get_provider_for_task("embed").name == "QWEN"

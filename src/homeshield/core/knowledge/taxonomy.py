@@ -69,9 +69,9 @@ REGISTRY: dict[str, ScamType] = {
 }
 
 
-def all_types() -> list[ScamType]:
+def list_scam_types() -> list[ScamType]:
     return list(REGISTRY.values())
 
 
-def get(type_id: str) -> ScamType | None:
+def get_scam_type(type_id: str) -> ScamType | None:
     return REGISTRY.get(type_id)

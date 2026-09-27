@@ -5,7 +5,7 @@ import logging
 from typing import Protocol
 
 from homeshield.core.events import EventBus, VerdictCompleted
-from homeshield.core.models import Level, utcnow
+from homeshield.core.models import Level, utc_timestamp
 from homeshield.core.repo import Repos
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class AlertBroker:
         if q in self._subs.get(user_id, []):
             self._subs[user_id].remove(q)
 
-    def publish(self, user_id: int, payload: dict) -> None:
+    def publish_alert(self, user_id: int, payload: dict) -> None:
         for q in self._subs.get(user_id, []):
             try:
                 # 每个 SSE 订阅独立持有载荷；消费者会按当下权限过滤群列表。
@@ -53,7 +53,7 @@ class AlertRouter:
     async def __call__(self, event: VerdictCompleted) -> None:
         if event.verdict.level is not Level.DANGEROUS:
             return
-        fanout = self.repos.alert.create_for_verdict(event.verdict_id,event.query_id)
+        fanout = self.repos.alert.record_alerts_for_verdict(event.verdict_id,event.query_id)
         for recipient in fanout["recipients"]:
             user_id = recipient["user_id"]
             groups = recipient["groups"]
@@ -61,10 +61,10 @@ class AlertRouter:
             group_names = []
             for gid in group_ids:
                 group_names.append(next(g["name"] for g in groups if g["group_id"]==gid))
-            self.broker.publish(user_id,{
+            self.broker.publish_alert(user_id,{
                 "verdict_id":event.verdict_id,"level":"dangerous",
                 "summary":event.message.content[:50],"group_ids":group_ids,
-                "group_names":group_names,"delivered_at":utcnow(),
+                "group_names":group_names,"delivered_at":utc_timestamp(),
             })
         if fanout["query_group_count"] > 1:
             names = fanout["generated_group_names"]
@@ -74,17 +74,17 @@ class AlertRouter:
         else:
             event.queryer_notice = "本次未通知群成员"
         if self.wechat is not None:
-            task = asyncio.create_task(self._notify(event.verdict_id,event.message.content,fanout["recipients"]))
+            task = asyncio.create_task(self._send_alert_notifications(event.verdict_id,event.message.content,fanout["recipients"]))
             _BACKGROUND_TASKS.add(task)
             task.add_done_callback(_BACKGROUND_TASKS.discard)
 
-    async def _notify(self, verdict_id: int, content: str, recipients: list[dict]) -> None:
+    async def _send_alert_notifications(self, verdict_id: int, content: str, recipients: list[dict]) -> None:
         for recipient in recipients:
             user_id = recipient["user_id"]
             # 合成身份只用于演示与测试,永不触发真实微信推送。
             if recipient["openid"].startswith(("demo:", "test:")):
                 continue
-            context = self.repos.alert.push_context(verdict_id,user_id)
+            context = self.repos.alert.get_push_context_for_user(verdict_id,user_id)
             if context is None:
                 continue
             if context["active_group_count"] == 1:

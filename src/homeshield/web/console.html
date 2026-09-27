@@ -194,7 +194,7 @@ function renderMembers(data) {
     const title=el("div",`${m.name}${m.is_me?"（我）":""} · ${m.bound?"已加入":"等待绑定"}${m.trusted?" · 信任成员":""}`);
     card.append(title);
     if (m.is_me) { card.dataset.me="true"; card.dataset.memberId=m.id; }
-    if(data.viewer_trusted && !m.bound) card.append(action("生成/重发邀请",()=>reissue(m.id)));
+    if(data.viewer_trusted && !m.bound) card.append(action("生成/重发邀请",()=>reissue_member_bind_code(m.id)));
     if(m.is_me) card.append(action("修改我的群内称呼",async()=>{
       const name=prompt("新的群内称呼",m.name); if(!name || !name.trim()) return;
       await request(`/api/groups/${current.id}/members/${m.id}`,{method:"PATCH",body:{name:name.trim()}}); await loadCurrentGroup();
@@ -217,7 +217,7 @@ async function addMember() {
   const invite=await request(`/api/groups/${current.id}/members`,{method:"POST",body:{name}});
   byId("newName").value=""; showCode(invite); await loadCurrentGroup();
 }
-async function reissue(memberId) { showCode(await request(`/api/groups/${current.id}/members/${memberId}/bind-code`,{method:"POST",body:{}})); }
+async function reissue_member_bind_code(memberId) { showCode(await request(`/api/groups/${current.id}/members/${memberId}/bind-code`,{method:"POST",body:{}})); }
 function showCode(d) {
   const box=byId("codeBox"); box.replaceChildren(); box.classList.remove("hidden");
   box.append(el("div",`邀请码：${d.bind_code}`),el("div",`让家人关注公众号后回复：绑定 ${d.bind_code}`,"muted"));

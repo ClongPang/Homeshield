@@ -11,7 +11,7 @@ from homeshield.core.knowledge.mechanics import (
     Function,
     REGISTRY,
 )
-from homeshield.eval.contrast import annotate, check, render
+from homeshield.eval.contrast import infer_mechanics_from_markers, check_contrast_dataset_coverage, render_contrast_report
 
 
 # ---- 注册表完整性 -------------------------------------------------------
@@ -72,13 +72,13 @@ def mini_contrast(tmp_path: Path) -> Path:
     return p
 
 
-def test_annotate_by_markers():
-    assert "money" in annotate("请立即转账到安全账户")
-    assert annotate("今天天气不错") == []
+def test_infer_mechanics_from_markers():
+    assert "money" in infer_mechanics_from_markers("请立即转账到安全账户")
+    assert infer_mechanics_from_markers("今天天气不错") == []
 
 
 def test_check_zones_and_auto_annotate(mini_contrast: Path):
-    report = check(mini_contrast)
+    report = check_contrast_dataset_coverage(mini_contrast)
     assert report["rows"] == 3
     # T3 缺标注被自动推导:control+sensitive+money
     assert "control" in report["per_mechanic"]
@@ -88,7 +88,7 @@ def test_check_zones_and_auto_annotate(mini_contrast: Path):
 
 
 def test_render_mentions_gaps(mini_contrast: Path):
-    text = render(check(mini_contrast))
+    text = render_contrast_report(check_contrast_dataset_coverage(mini_contrast))
     assert "对照缺口" in text
 
 

@@ -3,7 +3,7 @@ import asyncio
 import json
 
 from homeshield.core.deps import make_pipeline
-from homeshield.core.features import FeatureSpec, escalation_feature
+from homeshield.core.features import FeatureSpec, detect_escalation_feature
 from conftest import ingest_member
 from homeshield.core.models import Conversation
 from homeshield.core.pipeline import _to_conversation
@@ -11,9 +11,9 @@ from homeshield.core.pipeline import _to_conversation
 
 def test_from_marked_and_single():
     c = Conversation.from_marked("【第1轮】你好\n【第2轮·对方】转账")
-    assert c.multi and c.turns[1].speaker == "对方"
+    assert c.is_multi_turn and c.turns[1].speaker == "对方"
     c2 = Conversation.from_marked("普通消息")
-    assert not c2.multi and c2.render() == "普通消息"
+    assert not c2.is_multi_turn and c2.render() == "普通消息"
 
 
 def test_render_round_trip():
@@ -23,13 +23,13 @@ def test_render_round_trip():
 
 def test_to_conversation_image_speaker_lines():
     c = _to_conversation("对方:你好\n我:有事?\n对方:急用钱", "image")
-    assert c.multi and len(c.turns) == 3 and c.turns[0].speaker == "对方"
+    assert c.is_multi_turn and len(c.turns) == 3 and c.turns[0].speaker == "对方"
     # 单行通知 → 单轮兜底
-    assert not _to_conversation("这是一条单行通知", "image").multi
+    assert not _to_conversation("这是一条单行通知", "image").is_multi_turn
 
 
 def test_escalation_detects_trust_then_ask():
-    esc = escalation_feature([
+    esc = detect_escalation_feature([
         FeatureSpec(type="identity_claim", value="我是你领导", turn=1),
         FeatureSpec(type="transfer", value="转账", turn=2),
     ])
@@ -39,14 +39,14 @@ def test_escalation_detects_trust_then_ask():
 
 def test_escalation_absent_cases():
     # 同轮不构成升级
-    assert escalation_feature([
+    assert detect_escalation_feature([
         FeatureSpec(type="identity_claim", value="x", turn=1),
         FeatureSpec(type="transfer", value="y", turn=1),
     ]) is None
     # 单轮
-    assert escalation_feature([FeatureSpec(type="transfer", value="y", turn=1)]) is None
+    assert detect_escalation_feature([FeatureSpec(type="transfer", value="y", turn=1)]) is None
     # 索取先于信任铺垫(先要钱后自证身份)——非渐进式
-    assert escalation_feature([
+    assert detect_escalation_feature([
         FeatureSpec(type="transfer", value="y", turn=1),
         FeatureSpec(type="identity_claim", value="x", turn=2),
     ]) is None
@@ -77,4 +77,4 @@ def test_sample_turns_feed_conversation():
     assert s.turns and len(s.turns) == 4
     content = "\n".join(f"【第{i}轮】{t}" for i, t in enumerate(s.turns, 1))
     c = Conversation.from_marked(content)
-    assert len(c.turns) == 4 and c.multi
+    assert len(c.turns) == 4 and c.is_multi_turn

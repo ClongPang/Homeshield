@@ -66,7 +66,7 @@ def main() -> None:
             deps.groups.add_member(args.group_id, args.name, args.trusted, openid),
         )
     elif args.cmd == "set-trust":
-        deps.groups.set_trust_by_operator(args.member_id, bool(args.trusted))
+        deps.groups.set_member_trust_by_operator(args.member_id, bool(args.trusted))
         m = deps.repos.member.get(args.member_id)
         print(f"member_id={m.id} {m.name} trusted={m.trusted}")
     elif args.cmd == "link":
@@ -79,9 +79,9 @@ def main() -> None:
         user = deps.repos.users.get(member.user_id)
         print(user.entry_url(args.base_url)) # 返回一个网页URL，是一个控制台网址
     elif args.cmd == "expire-corrections":
-        print("expired", CorrectionService(deps.repos).expire_pending()) # 凡是普通成员提交、还没被信任成员确认、且已经放了超过 7 天的纠正，一律自动变为 rejected
+        print("expired", CorrectionService(deps.repos).expire_pending_corrections()) # 凡是普通成员提交、还没被信任成员确认、且已经放了超过 7 天的纠正，一律自动变为 rejected
     elif args.cmd == "disband":
-        deps.groups.disband_by_operator(args.group_id)
+        deps.groups.disband_group_by_operator(args.group_id)
         print(f"group_id={args.group_id} disbanded")
 
 

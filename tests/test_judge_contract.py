@@ -4,7 +4,7 @@ import asyncio
 import pytest
 
 from homeshield.core.errors import DegradeError
-from homeshield.core.features import assign_ids, extract_rules
+from homeshield.core.features import assign_feature_ids, extract_rule_features
 from homeshield.core.judge import (
     LLMJudge,
     MockJudge,
@@ -18,7 +18,7 @@ TEXT = "别告诉家人,立即转账5万元到安全账户"
 
 
 def _input() -> JudgeInput:
-    return JudgeInput(text=TEXT, features=assign_ids(extract_rules(TEXT)), cases=[])
+    return JudgeInput(text=TEXT, features=assign_feature_ids(extract_rule_features(TEXT)), cases=[])
 
 
 JUDGES = [MockJudge(), LLMJudge(MockLLM())]

@@ -21,7 +21,7 @@
   <h1>小盾 · 帮你看看</h1>
   <textarea id="input" placeholder="把可疑消息粘贴到这里…"></textarea>
   <input type="file" id="pic" accept="image/*" class="file" />
-  <button onclick="ask()">帮我看看</button>
+  <button onclick="submit_text_query()">帮我看看</button>
   <div class="tip">你查证的内容,家人可以看到。</div>
   <div class="card" id="out" hidden></div>
 </div>
@@ -31,7 +31,7 @@ const out = document.getElementById("out");
 
 function show(text) { out.hidden = false; out.textContent = text; }
 
-async function query(payload) {
+async function submit_risk_query(payload) {
   show("小盾正在看…");
   try {
     const resp = await fetch("/api/query", {
@@ -49,10 +49,10 @@ async function query(payload) {
   }
 }
 
-function ask() {
+function submit_text_query() {
   const text = document.getElementById("input").value.trim();
   if (!text) return show("请先输入要检查的消息");
-  query({ content: text });
+  submit_risk_query({ content: text });
 }
 
 document.getElementById("pic").addEventListener("change", (e) => {
@@ -61,7 +61,7 @@ document.getElementById("pic").addEventListener("change", (e) => {
   const reader = new FileReader();
   reader.onload = () => {
     const base64 = String(reader.result).split(",")[1] || "";
-    if (base64) query({ content: base64, content_type: "image" });
+    if (base64) submit_risk_query({ content: base64, content_type: "image" });
   };
   reader.readAsDataURL(file);
 });

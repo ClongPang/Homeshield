@@ -39,19 +39,19 @@ class FeatureSpec(BaseModel):
     turn: int = 0  # 所在会话轮次(1 起);0=单轮/全局
 
 
-def _word_hits(text: str, words: tuple[str, ...], ftype: str) -> list[FeatureSpec]:
+def _match_feature_keywords(text: str, words: tuple[str, ...], ftype: str) -> list[FeatureSpec]:
     return [
         FeatureSpec(type=ftype, value=w, evidence_span=w) for w in words if w in text
     ]
 
 
-def extract_rules(text: str) -> list[FeatureSpec]:
+def extract_rule_features(text: str) -> list[FeatureSpec]:
     specs: list[FeatureSpec] = []
-    specs += _word_hits(text, ISOLATION_WORDS, FeatureType.ISOLATION.value)
-    specs += _word_hits(text, TRANSFER_WORDS, FeatureType.TRANSFER.value)
-    specs += _word_hits(text, URGENCY_WORDS, FeatureType.URGENCY.value)
-    specs += _word_hits(text, IDENTITY_WORDS, FeatureType.IDENTITY_CLAIM.value)
-    specs += _word_hits(text, FEE_WORDS, FeatureType.FEE.value)
+    specs += _match_feature_keywords(text, ISOLATION_WORDS, FeatureType.ISOLATION.value)
+    specs += _match_feature_keywords(text, TRANSFER_WORDS, FeatureType.TRANSFER.value)
+    specs += _match_feature_keywords(text, URGENCY_WORDS, FeatureType.URGENCY.value)
+    specs += _match_feature_keywords(text, IDENTITY_WORDS, FeatureType.IDENTITY_CLAIM.value)
+    specs += _match_feature_keywords(text, FEE_WORDS, FeatureType.FEE.value)
     for pat, ftype in (
         (AMOUNT_RE, FeatureType.AMOUNT.value),
         (URL_RE, FeatureType.URL.value),
@@ -64,7 +64,7 @@ def extract_rules(text: str) -> list[FeatureSpec]:
     return specs
 
 
-def rule_floor(specs: list[FeatureSpec]) -> Level:
+def get_rule_risk_floor(specs: list[FeatureSpec]) -> Level:
     """规则结果为下限。"""
     types = {s.type for s in specs}
     if FeatureType.ISOLATION.value in types and FeatureType.TRANSFER.value in types:
@@ -78,7 +78,7 @@ _ASK_MECHANICS = ("money", "sensitive", "control")
 _TRUST_MECHANICS = ("identity", "bait", "fear", "emotion")
 
 
-def escalation_feature(specs: list[FeatureSpec]) -> FeatureSpec | None:
+def detect_escalation_feature(specs: list[FeatureSpec]) -> FeatureSpec | None:
     """跨轮升级信号(重构四):前轮建立信任、后轮出现索取——多轮欺诈的典型结构。
 
     仅多轮会话计算(存在 ≥2 个不同轮次);单轮返回 None。
@@ -103,7 +103,7 @@ def escalation_feature(specs: list[FeatureSpec]) -> FeatureSpec | None:
     )
 
 
-def assign_ids(specs: list[FeatureSpec]) -> list[Feature]:
+def assign_feature_ids(specs: list[FeatureSpec]) -> list[Feature]:
     return [
         Feature(
             id=f"F{i + 1:02d}",
@@ -136,7 +136,7 @@ MECHANIC_EXTRACTION_PROMPT = (
 )
 
 
-async def supplement_llm(llm: LLMPort, text: str) -> list[FeatureSpec]:
+async def supplement_features_with_llm(llm: LLMPort, text: str) -> list[FeatureSpec]:
     """LLM 按机制封闭集合补抽(重构三):type=机制 id,附 confidence。
 
     失败/机制外/空值一律丢弃,返回空列表由管线降级为纯规则。

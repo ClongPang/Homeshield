@@ -3,7 +3,7 @@ import asyncio
 import json
 
 from homeshield.core.pipeline import PIPELINE_VERSION, PipelineConfig
-from homeshield.eval.ablation import run_matrix
+from homeshield.eval.ablation import run_ablation_matrix
 from homeshield.eval.dataset import Sample
 
 
@@ -30,7 +30,7 @@ def test_checkpoint_version_stamp(tmp_path):
                     "level": "safe", "score": 1, "latency": 1}) + "\n",
         encoding="utf-8",
     )
-    asyncio.run(run_matrix(factory, _samples(), names=["A_zero_shot"], checkpoint=str(ckpt)))
+    asyncio.run(run_ablation_matrix(factory, _samples(), names=["A_zero_shot"], checkpoint=str(ckpt)))
     assert calls["n"] == 2  # 旧版本断点被忽略,T1/T2 均重新执行
     rows = [json.loads(l) for l in ckpt.read_text(encoding="utf-8").splitlines() if l.strip()]
     current = [r for r in rows if r["v"] == PIPELINE_VERSION]
@@ -38,5 +38,5 @@ def test_checkpoint_version_stamp(tmp_path):
     # 旧行仍留在追加式日志里,但恢复时被版本校验跳过
 
     # 二次运行:同版本断点全量回放,零执行
-    asyncio.run(run_matrix(factory, _samples(), names=["A_zero_shot"], checkpoint=str(ckpt)))
+    asyncio.run(run_ablation_matrix(factory, _samples(), names=["A_zero_shot"], checkpoint=str(ckpt)))
     assert calls["n"] == 2

@@ -1,6 +1,6 @@
 """防护群管理与退群生命周期。"""
 from homeshield.core.errors import ValidationError
-from homeshield.core.models import utcnow
+from homeshield.core.models import utc_timestamp
 from homeshield.core.repo import Repos, WRITE_LOCK
 
 
@@ -34,11 +34,11 @@ class GroupService:
                 raise ValidationError("an unbound invitation cannot be trusted")
             cur = conn.execute(
                 "INSERT INTO member(group_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
-                (group_id, user_id, name, int(trusted), utcnow()),
+                (group_id, user_id, name, int(trusted), utc_timestamp()),
             )
             return int(cur.lastrowid)
 
-    def rename(self, group_id: int, name: str) -> None:
+    def rename_group(self, group_id: int, name: str) -> None:
         name = name.strip()
         if not name:
             raise ValidationError("name is empty")
@@ -49,7 +49,7 @@ class GroupService:
             if cur.rowcount != 1:
                 raise ValidationError("group not found")
 
-    def set_trust(self, group_id: int, target_id: int, trusted: bool, actor_id: int) -> None:
+    def set_member_trust(self, group_id: int, target_id: int, trusted: bool, actor_id: int) -> None:
         with WRITE_LOCK:
             actor = self.repos.member.get(actor_id)
             if actor is None or actor.group_id != group_id or actor.ended_at is not None or not actor.trusted:
@@ -64,7 +64,7 @@ class GroupService:
             elif target.trusted and not self.repos.member.demote_with_guard(target_id,group_id):
                 raise ValidationError("cannot demote the last trusted member")
 
-    def set_trust_by_operator(self, member_id: int, trusted: bool) -> None:
+    def set_member_trust_by_operator(self, member_id: int, trusted: bool) -> None:
         with WRITE_LOCK:
             target = self.repos.member.get(member_id)
             if target is None or target.user_id is None or target.ended_at is not None:
@@ -74,27 +74,27 @@ class GroupService:
             elif target.trusted and not self.repos.member.demote_with_guard(member_id,target.group_id):
                 raise ValidationError("cannot demote the last trusted member")
 
-    def set_mute(self, group_id: int, user_id: int, mute: bool) -> None:
+    def set_member_mute(self, group_id: int, user_id: int, mute: bool) -> None:
         with WRITE_LOCK:
             member = next((m for m in self.repos.member.list_for_user(user_id) if m.group_id == group_id),None)
             if member is None:
                 raise ValidationError("group not found")
             self.repos.member.set_mute(member.id,mute)
 
-    def leave(self, user_id: int, group_id: int) -> str:
+    def leave_group(self, user_id: int, group_id: int) -> str:
         member = next((m for m in self.repos.member.list_for_user(user_id) if m.group_id==group_id),None)
         if member is None:
             raise ValidationError("not a member")
-        return self._terminate(group_id,member.id,"left")
+        return self._end_membership(group_id,member.id,"left")
 
-    def remove(self, group_id: int, member_id: int) -> str:
+    def remove_member(self, group_id: int, member_id: int) -> str:
         target = self.repos.member.get(member_id)
         if target is None or target.group_id != group_id or target.ended_at is not None:
             raise ValidationError("member not found")
-        return self._terminate(group_id,member_id,"removed")
+        return self._end_membership(group_id,member_id,"removed")
 
-    def _terminate(self, group_id: int, member_id: int, reason: str) -> str:
-        now = utcnow()
+    def _end_membership(self, group_id: int, member_id: int, reason: str) -> str:
+        now = utc_timestamp()
         conn = self.repos.conn
         with WRITE_LOCK, conn:
             group = conn.execute("SELECT * FROM protection_group WHERE id=?",(group_id,)).fetchone()
@@ -127,8 +127,8 @@ class GroupService:
                 return "disbanded"
             return "left"
 
-    def disband(self, user_id: int, group_id: int) -> None:
-        now = utcnow()
+    def disband_group(self, user_id: int, group_id: int) -> None:
+        now = utc_timestamp()
         conn = self.repos.conn
         with WRITE_LOCK, conn:
             group = conn.execute("SELECT * FROM protection_group WHERE id=?",(group_id,)).fetchone()
@@ -150,9 +150,9 @@ class GroupService:
                 "(SELECT id FROM member WHERE group_id=?)",(now,group_id),
             )
 
-    def disband_by_operator(self, group_id: int) -> None:
+    def disband_group_by_operator(self, group_id: int) -> None:
         """CLI 运维解散无创建者的群,与用户解散共用历史保留口径。"""
-        now = utcnow()
+        now = utc_timestamp()
         conn = self.repos.conn
         with WRITE_LOCK, conn:
             group = conn.execute("SELECT disbanded_at FROM protection_group WHERE id=?", (group_id,)).fetchone()

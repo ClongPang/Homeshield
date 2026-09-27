@@ -1,5 +1,5 @@
 """评测报告渲染。"""
-from homeshield.core.models import utcnow
+from homeshield.core.models import utc_timestamp
 
 
 def render_report(
@@ -13,7 +13,7 @@ def render_report(
     lines = [
         "# Homeshield 评测报告",
         "",
-        f"- 模式:{mode} | 数据集:{dataset} | 样本数:{n} | 生成时间:{utcnow()}",
+        f"- 模式:{mode} | 数据集:{dataset} | 样本数:{n} | 生成时间:{utc_timestamp()}",
     ]
     if data_profile:
         profile = " / ".join(f"{k}:{v}" for k, v in sorted(data_profile.items()))

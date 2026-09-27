@@ -43,8 +43,8 @@ def build_wechat_router(deps: Deps, verification: VerificationService) -> APIRou
         p = dict(request.query_params)
         if not ch.verify_signature(p.get("signature", ""), p.get("timestamp", ""), p.get("nonce", "")):
             raise HTTPException(403, "bad signature")
-        data = ch.parse_callback(body)
-        kind = ch.classify(data)
+        data = ch.parse_wechat_callback_xml(body)
+        kind = ch.classify_callback_message(data)
 
         if kind == "subscribe":
             background.add_task(_welcome_wechat, deps, ch, data)
@@ -58,7 +58,7 @@ def build_wechat_router(deps: Deps, verification: VerificationService) -> APIRou
         openid = data.get("FromUserName", "")
         user = deps.repos.users.get_by_openid(openid)
         memberships = deps.repos.member.list_for_user(user.id) if user else []
-        command_reply = _binding_reply(deps, user, openid, kind, data.get("Content", ""))
+        command_reply = _handle_membership_command(deps, user, openid, kind, data.get("Content", ""))
         if command_reply is not None:
             return PlainTextResponse(ch.passive_text_reply(data, command_reply))
         if user is None:
@@ -73,7 +73,7 @@ def build_wechat_router(deps: Deps, verification: VerificationService) -> APIRou
     return router
 
 
-def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str | None:
+def _handle_membership_command(deps: Deps, user, openid: str, kind: str, text: str) -> str | None:
     """开通/绑定命令的同步回复;非命令消息返回 None 交回判定链路。
 
     查询消息不选群;命令以当前用户的活跃群列表解析。
@@ -89,7 +89,7 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
         return None
     if code is not None:
         try:
-            bound = deps.binding.bind(openid, code)
+            bound = deps.binding.bind_member_with_invite_code(openid, code)
         except BindingError as exc:
             if exc.reason == "already_in_group":
                 return messages.BIND_ALREADY
@@ -107,7 +107,7 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
     if list_groups:
         if user is None:
             return messages.BIND_GUIDE
-        groups = deps.repos.group.list_for_user(user.id)
+        groups = deps.repos.group.list_active_groups_for_user(user.id)
         if not groups:
             return messages.BIND_GUIDE_OUTSIDE_GROUP
         return "你加入的防护群：\n" + "\n".join(
@@ -116,17 +116,17 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
     if open_name is not None:
         if user is None:
             try:
-                admin = deps.binding.open_group(openid,open_name or None)
+                admin = deps.binding.create_initial_group(openid,open_name or None)
             except BindingError as e:
                 return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else messages.BIND_ALREADY
         elif not open_name:
-            groups = deps.repos.group.list_for_user(user.id)
+            groups = deps.repos.group.list_active_groups_for_user(user.id)
             if groups:
                 return "你已加入这些防护群：\n" + "\n".join(
                     f"{i}. {g['name']}" for i,g in enumerate(groups,1)
                 ) + "\n新建群请回复：开通 群名"
             try:
-                admin = deps.binding.open_group(openid)
+                admin = deps.binding.create_initial_group(openid)
             except BindingError as e:
                 return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else messages.BIND_ALREADY
         else:
@@ -138,14 +138,14 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
         if user is None:
             return messages.BIND_GUIDE
         group_name = exit_name or disband_name
-        target = _resolve_group(deps,user.id,group_name)
+        target = _resolve_group_selector(deps,user.id,group_name)
         if isinstance(target,str):
             return target
         try:
             if disband_name is not None:
-                deps.groups.disband(user.id,target["id"])
+                deps.groups.disband_group(user.id,target["id"])
                 return f"「{target['name']}」已解散，群内成员将无法再查看历史提醒。"
-            result = deps.groups.leave(user.id,target["id"])
+            result = deps.groups.leave_group(user.id,target["id"])
             return f"已退出「{target['name']}」。" + ("群内最后一名成员已退出，防护群已自动解散。" if result=="disbanded" else "")
         except Exception as e:
             reason = getattr(e,"message",None) or str(e)
@@ -218,8 +218,8 @@ async def _handle_wechat_message(
         logger.warning("wechat reply failed openid=%s", openid, exc_info=True)
 
 
-def _resolve_group(deps: Deps, user_id: int, selector: str):
-    groups = deps.repos.group.list_for_user(user_id)
+def _resolve_group_selector(deps: Deps, user_id: int, selector: str):
+    groups = deps.repos.group.list_active_groups_for_user(user_id)
     matches = [g for g in groups if g["name"] == selector]
     if not matches and selector.isdigit():
         index = int(selector)

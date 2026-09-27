@@ -14,14 +14,14 @@ from pathlib import Path
 from homeshield.kbbuild.db import LICENSE_NOTE, PROVENANCE
 
 
-def _load(path: str | Path) -> list[dict]:
+def _load_json_array(path: str | Path) -> list[dict]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError(f"{path}: 期望 JSON 数组,得到 {type(data).__name__}")
     return data
 
 
-def _role_bg(value: object) -> str:
+def _serialize_role_background(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, str):
@@ -29,7 +29,7 @@ def _role_bg(value: object) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def import_official(
+def import_fraud_r1_dataset(
     conn: sqlite3.Connection,
     base_path: str | Path,
     levelup_path: str | Path,
@@ -38,12 +38,12 @@ def import_official(
     """导入 base 与 levelup 两个文件,返回统计。幂等,可重复执行。"""
     now = int(time.time())
     stats: dict = {"base": 0, "levelup": 0, "skipped": 0, "round1_duplicated": 0}
-    base_items = _load(base_path)
-    levelup_items = _load(levelup_path)
+    base_items = _load_json_array(base_path)
+    levelup_items = _load_json_array(levelup_path)
 
     by_fr_id = {item["id"]: item for item in base_items}
 
-    def _insert(item: dict, split: str, level: int, text: str) -> None:
+    def _insert_case_row(item: dict, split: str, level: int, text: str) -> None:
         cur = conn.execute(
             "INSERT OR IGNORE INTO fr_case(fr_id, split, level, lang, category,"
             " subcategory, data_type, role_bg, text, raw_seed, provenance,"
@@ -53,7 +53,7 @@ def import_official(
                 str(item.get("category", "")).strip(),
                 str(item.get("subcategory", "")).strip(),
                 str(item.get("data_type", "")).strip(),
-                _role_bg(item.get("role_bg")),
+                _serialize_role_background(item.get("role_bg")),
                 text,
                 str(item.get("raw_data", "") or ""),
                 PROVENANCE, LICENSE_NOTE, now,
@@ -65,7 +65,7 @@ def import_official(
             stats["skipped"] += 1
 
     for item in base_items:
-        _insert(item, "base", 0, str(item.get("generated text", "") or ""))
+        _insert_case_row(item, "base", 0, str(item.get("generated text", "") or ""))
 
     for item in levelup_items:
         for rnd in item.get("multi-rounds fraud", []):
@@ -74,7 +74,7 @@ def import_official(
                 base_text = str(by_fr_id.get(item["id"], {}).get("generated text", "") or "")
                 if base_text and rnd["generated_data"].strip() == base_text.strip():
                     stats["round1_duplicated"] += 1
-            _insert(item, "levelup", level, str(rnd.get("generated_data", "") or ""))
+            _insert_case_row(item, "levelup", level, str(rnd.get("generated_data", "") or ""))
 
     for split, file in (("base", base_path), ("levelup", levelup_path)):
         conn.execute(

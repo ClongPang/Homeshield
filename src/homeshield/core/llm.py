@@ -86,14 +86,14 @@ class OpenAICompatLLM:
     """按任务路由到不同供应商的 OpenAI 兼容端点。"""
 
     def __init__(self, settings: Settings):
-        self._chat = settings.chat_endpoint()
+        self._chat = settings.get_chat_provider()
         if self._chat is None:
             raise ValueError("MODE=llm 需要至少一个供应商(<NAME>_API_KEY / <NAME>_BASE_URL)")
-        self._transcribe = settings.transcribe_endpoint()
-        self._embed = settings.embed_endpoint()
+        self._transcribe = settings.get_transcription_provider()
+        self._embed = settings.get_embedding_provider()
         self._clients: dict[str, Any] = {}
 
-    def endpoint_for(self, task: str) -> Provider:
+    def get_provider_for_task(self, task: str) -> Provider:
         if task == "embed":
             if self._embed is None:
                 raise RuntimeError("未配置 EMBED_PROVIDER,无法做向量检索")
@@ -102,7 +102,7 @@ class OpenAICompatLLM:
             return self._transcribe or self._chat
         return self._chat
 
-    def _client(self, provider: Provider):
+    def _get_client_and_model(self, provider: Provider):
         if provider.name not in self._clients:
             from openai import AsyncOpenAI  # 延迟导入:mock 模式零外部依赖
 
@@ -115,7 +115,7 @@ class OpenAICompatLLM:
         return self._clients[provider.name], provider.model
 
     async def chat_json(self, task: str, system: str, user: str, schema: dict) -> dict:
-        client, model = self._client(self.endpoint_for(task))
+        client, model = self._get_client_and_model(self.get_provider_for_task(task))
         resp = await client.chat.completions.create(
             model=model,
             messages=[
@@ -127,7 +127,7 @@ class OpenAICompatLLM:
         return _loads_json(resp.choices[0].message.content or "{}")
 
     async def chat_text(self, task: str, system: str, user: str) -> str:
-        client, model = self._client(self.endpoint_for(task))
+        client, model = self._get_client_and_model(self.get_provider_for_task(task))
         resp = await client.chat.completions.create(
             model=model,
             messages=[
@@ -138,7 +138,7 @@ class OpenAICompatLLM:
         return resp.choices[0].message.content or ""
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        client, model = self._client(self.endpoint_for("embed"))
+        client, model = self._get_client_and_model(self.get_provider_for_task("embed"))
         out: list[list[float]] = []
         for i in range(0, len(texts), _EMBED_BATCH):  # 部分供应商单批限 25,分批兜底
             batch = texts[i : i + _EMBED_BATCH] or texts
@@ -147,7 +147,7 @@ class OpenAICompatLLM:
         return out
 
     async def transcribe_image(self, image_b64: str, hint: str) -> str:
-        client, model = self._client(self.endpoint_for("transcribe"))
+        client, model = self._get_client_and_model(self.get_provider_for_task("transcribe"))
         resp = await client.chat.completions.create(
             model=model,
             messages=[
@@ -168,4 +168,4 @@ class OpenAICompatLLM:
 
 def make_llm(settings: Settings) -> LLMPort:
     """按 MODE 切换双模式。"""
-    return OpenAICompatLLM(settings) if settings.use_llm else MockLLM()
+    return OpenAICompatLLM(settings) if settings.llm_enabled else MockLLM()

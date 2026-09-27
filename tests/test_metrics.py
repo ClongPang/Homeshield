@@ -1,5 +1,5 @@
 """指标公式对拍与阈值扫描。"""
-from homeshield.eval.metrics import confusion3x3, fpr, fpr_strict, latency_percentiles, recall, threshold_sweep
+from homeshield.eval.metrics import confusion3x3, fpr, user_visible_false_positive_rate, latency_percentiles, recall, threshold_sweep
 
 
 def test_confusion_recall_fpr():
@@ -7,7 +7,7 @@ def test_confusion_recall_fpr():
     p = ["dangerous", "safe", "suspicious", "safe"]
     assert recall(y, p) == 0.5
     assert fpr(y, p) == 0.0  # edge→suspicious 不算规格口径 FP
-    assert fpr_strict(y, p) == 0.5  # 用户感知口径
+    assert user_visible_false_positive_rate(y, p) == 0.5  # 用户感知口径
     m = confusion3x3(y, p)
     assert m["scam"]["dangerous"] == 1 and m["scam"]["safe"] == 1
     assert m["edge"]["suspicious"] == 1 and m["benign"]["safe"] == 1

@@ -40,10 +40,10 @@ class BindingService:
         self.max_groups = max_groups or max_total_groups
         self.code_ttl_days = code_ttl_days
 
-    def open_group(self, openid: str, name: str | None = None) -> Member:
+    def create_initial_group(self, openid: str, name: str | None = None) -> Member:
         user = self.repos.users.get_or_create(openid)
         with WRITE_LOCK:
-            if self.repos.group.list_for_user(user.id):
+            if self.repos.group.list_active_groups_for_user(user.id):
                 raise BindingError("already_has_groups")
             return self.create_group(user.id, name or OPEN_GROUP_NAME, openid=openid)
 
@@ -52,15 +52,15 @@ class BindingService:
         if not name:
             raise BindingError("invalid_name")
         with WRITE_LOCK:
-            if self.repos.group.count() >= self.max_total_groups:
+            if self.repos.group.count_active_groups() >= self.max_total_groups:
                 raise BindingError("limit")
-            if len(self.repos.group.list_for_user(user_id)) >= self.max_groups:
+            if len(self.repos.group.list_active_groups_for_user(user_id)) >= self.max_groups:
                 raise BindingError("group_limit")
             group_id = self.repos.group.create_with_creator(name, CREATOR_NAME, user_id)
             member = next(m for m in self.repos.member.list_for_user(user_id) if m.group_id == group_id)
             return member
 
-    def issue_code(self, target: Member, created_by: int) -> dict:
+    def issue_bind_code(self, target: Member, created_by: int) -> dict:
         with WRITE_LOCK:
             current = self.repos.member.get(target.id)
             if current is None or current.user_id is not None or current.ended_at is not None:
@@ -68,9 +68,9 @@ class BindingService:
             self.repos.bind_code.invalidate_for_member(target.id)
             return self.repos.bind_code.create(target.id, created_by, self.code_ttl_days)
 
-    def bind(self, openid: str, code: str) -> Member:
+    def bind_member_with_invite_code(self, openid: str, code: str) -> Member:
         with WRITE_LOCK:
-            row = self.repos.bind_code.peek(code)
+            row = self.repos.bind_code.get_valid_bind_code(code)
             if row is None:
                 raise BindingError("invalid")
             target = self.repos.member.get(int(row["member_id"]))
@@ -87,6 +87,6 @@ class BindingService:
                 raise BindingError("invalid")
             return self.repos.member.get(target.id)
 
-    def ensure_member_capacity(self, group_id: int) -> None:
+    def require_member_capacity(self, group_id: int) -> None:
         if len(self.repos.member.list_members(group_id)) >= self.max_members:
             raise BindingError("limit")

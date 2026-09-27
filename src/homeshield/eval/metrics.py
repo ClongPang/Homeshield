@@ -1,7 +1,7 @@
 """指标定义与阈值扫描。
 
 fpr:FP = benign/edge 且判为 dangerous。
-fpr_strict 为用户感知口径,suspicious 亦计入。
+user_visible_false_positive_rate 为用户感知口径,suspicious 亦计入;报告字段名保留为 fpr_strict。
 """
 
 def confusion3x3(y_true: list[str], y_pred: list[str]) -> dict:
@@ -27,7 +27,7 @@ def fpr(y_true: list[str], y_pred: list[str]) -> float:
     return fp / (fp + tn) if fp + tn else 0.0
 
 
-def fpr_strict(y_true: list[str], y_pred: list[str]) -> float:
+def user_visible_false_positive_rate(y_true: list[str], y_pred: list[str]) -> float:
     fp = sum(1 for t, p in zip(y_true, y_pred) if t in ("edge", "benign") and p != "safe")
     tn = sum(1 for t, p in zip(y_true, y_pred) if t in ("edge", "benign") and p == "safe")
     return fp / (fp + tn) if fp + tn else 0.0

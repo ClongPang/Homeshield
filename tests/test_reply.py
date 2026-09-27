@@ -2,7 +2,7 @@
 import asyncio
 
 from homeshield.core.models import Feature, JudgeOutput, Level
-from homeshield.core.reply import LLMReply, TemplateReply, add_delivery_notice, validate_reply
+from homeshield.core.reply import LLMReply, TemplateReply, add_delivery_notice, is_valid_reply
 
 
 class FakeLLM:
@@ -35,7 +35,7 @@ def test_llm_cannot_override_conclusion():
     reply = asyncio.run(LLMReply(llm).generate(_verdict(Level.DANGEROUS), _features(), []))
     assert reply.startswith("【结论】⚠️ 这是典型骗术，千万别转钱")
     assert "看起来没什么问题" not in reply
-    assert validate_reply(reply)
+    assert is_valid_reply(reply)
 
 
 def test_dangerous_reply_no_identity_claim_and_official_fallback():
@@ -44,7 +44,7 @@ def test_dangerous_reply_no_identity_claim_and_official_fallback():
     reply = asyncio.run(LLMReply(llm).generate(_verdict(Level.DANGEROUS), _features(), []))
     assert "是骗子" not in reply
     assert "紧急可拨反诈专线96110" in reply
-    assert validate_reply(reply)
+    assert is_valid_reply(reply)
 
 
 def test_delivery_notice_is_added_only_by_alert_coordinator():
@@ -62,7 +62,7 @@ def test_fallback_to_template_on_garbage():
     assert reply.startswith("【结论】⚠️ 这条消息有问题，多留个心眼")
     assert "要求转账：转账" in reply  # 模板兜底的依据取自特征,类型以中文标签呈现
     assert "transfer" not in reply  # 机器 id 不出用户面
-    assert validate_reply(reply)
+    assert is_valid_reply(reply)
 
 
 def test_unknown_feature_type_falls_back_to_chinese_label():
@@ -79,14 +79,14 @@ def test_delivery_notice_survives_truncation():
     reply = add_delivery_notice(asyncio.run(TemplateReply().generate(verdict, features, [])),"已向妈妈家发出高危提醒")
     assert len(reply) <= 150
     assert reply.endswith("已向妈妈家发出高危提醒")
-    assert validate_reply(reply)
+    assert is_valid_reply(reply)
 
 
 def test_template_reply_safe_no_suffix():
     reply = asyncio.run(TemplateReply().generate(_verdict(Level.SAFE), _features(), []))
     assert reply.startswith("【结论】没发现已知骗术的特征")
     assert "已为防护群发出高危提醒" not in reply
-    assert validate_reply(reply)
+    assert is_valid_reply(reply)
 
 
 def test_safe_advice_code_owned():
@@ -97,4 +97,4 @@ def test_safe_advice_code_owned():
     assert "涉及转账、验证码" in reply
     assert "随便花" not in reply
     assert "看起来没什么问题" not in reply
-    assert validate_reply(reply)
+    assert is_valid_reply(reply)

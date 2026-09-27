@@ -14,7 +14,7 @@ from pathlib import Path
 
 from homeshield.kbbuild.db import OFFLINE_DB_PATH, connect, init_schema
 from homeshield.kbbuild.export import export_conversations, export_eval
-from homeshield.kbbuild.importer import import_official
+from homeshield.kbbuild.importer import import_fraud_r1_dataset
 
 _LANG_FILE = {"zh": "Chinese", "en": "English"}
 
@@ -35,7 +35,7 @@ def _cmd_import(args) -> None:
             raise SystemExit(f"缺少源文件 {p},请先将 Fraud-R1 JSON 放入 {raw}/")
     conn = connect(args.db)
     init_schema(conn)
-    stats = import_official(conn, base_path, levelup_path, lang=args.lang)
+    stats = import_fraud_r1_dataset(conn, base_path, levelup_path, lang=args.lang)
     print(f"import[{args.lang}]:", json.dumps(stats, ensure_ascii=False))
 
 

@@ -62,11 +62,11 @@ def build_deps(settings: Settings) -> Deps:
     llm = make_llm(settings) # 模型对象实例
     # EMBED 供应商未配置时传 None,检索退化为纯关键词
     retriever = Retriever(
-        load_cases(), llm if (settings.use_llm and settings.embed_endpoint()) else None
+        load_cases(), llm if (settings.llm_enabled and settings.get_embedding_provider()) else None
     )
-    judge: Judge = LLMJudge(llm) if settings.use_llm else MockJudge()
+    judge: Judge = LLMJudge(llm) if settings.llm_enabled else MockJudge()
     reply = (
-        LLMReply(llm) if settings.use_llm else TemplateReply()
+        LLMReply(llm) if settings.llm_enabled else TemplateReply()
     )
     router = wire_alerts(
         bus,broker,repos,base_url=settings.public_base_url,
@@ -86,7 +86,7 @@ def build_deps(settings: Settings) -> Deps:
         bus=bus,
         judge_retries=settings.judge_retries,
         # mock 的置信分是合成值,不参与 safe 门槛;门槛针对 LLM 校准不准
-        safe_confidence_floor=settings.safe_confidence_floor if settings.use_llm else 0,
+        safe_confidence_floor=settings.safe_confidence_floor if settings.llm_enabled else 0,
     )
     verification = VerificationService(repos, pipeline)
     binding = BindingService(
@@ -124,6 +124,6 @@ def make_pipeline(deps: Deps, config: PipelineConfig | None = None) -> Pipeline:
         reply_gen=deps.reply,
         bus=deps.bus,
         judge_retries=deps.settings.judge_retries,
-        safe_confidence_floor=deps.settings.safe_confidence_floor if deps.settings.use_llm else 0,
+        safe_confidence_floor=deps.settings.safe_confidence_floor if deps.settings.llm_enabled else 0,
         config=config or PipelineConfig.product_default(),
     )

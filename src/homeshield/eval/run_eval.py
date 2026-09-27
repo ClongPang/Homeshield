@@ -11,7 +11,7 @@ from collections import Counter
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps, make_pipeline
 from homeshield.core.intake import ingest
-from homeshield.eval.ablation import run_matrix
+from homeshield.eval.ablation import run_ablation_matrix
 from homeshield.eval.dataset import load_dataset
 from homeshield.eval.metrics import threshold_sweep
 from homeshield.eval.report import render_report
@@ -70,7 +70,7 @@ def main() -> None:
         Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
 
     async def _evaluate():
-        matrix = await run_matrix(
+        matrix = await run_ablation_matrix(
             lambda cfg: _make_runner(deps, mid, cfg), samples, names,
             checkpoint=args.checkpoint or None,
         )

@@ -33,7 +33,7 @@ def test_membership_ended_before_snapshot_is_a_normal_no_group_result(deps, grou
     group_id, elder, _ = group
     member = deps.repos.member.get(elder)
     memberships = deps.repos.member.list_for_user(member.user_id)
-    deps.groups.leave(member.user_id, group_id)
+    deps.groups.leave_group(member.user_id, group_id)
 
     with pytest.raises(ValueError, match="user has no active group"):
         ingest(deps.repos, user_id=member.user_id, memberships=memberships,

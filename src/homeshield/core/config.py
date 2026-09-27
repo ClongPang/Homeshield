@@ -83,19 +83,19 @@ class Settings:
     def provider(self, name: str) -> Provider | None:
         return self.providers.get(name.upper()) if name else None
 
-    def chat_endpoint(self) -> Provider | None:
+    def get_chat_provider(self) -> Provider | None:
         """判定 / 特征补抽 / 回复使用的供应商;未指名时取已配置的第一个。"""
         if self.chat_provider_name:
             return self._required("CHAT_PROVIDER", self.chat_provider_name)
-        return self._first()
+        return self._get_first_configured_provider()
 
-    def transcribe_endpoint(self) -> Provider | None:
+    def get_transcription_provider(self) -> Provider | None:
         """图片转写供应商;未指名时回落到 chat。"""
         if self.transcribe_provider_name:
             return self._required("TRANSCRIBE_PROVIDER", self.transcribe_provider_name)
-        return self.chat_endpoint()
+        return self.get_chat_provider()
 
-    def embed_endpoint(self) -> Provider | None:
+    def get_embedding_provider(self) -> Provider | None:
         """向量检索供应商;未指名则检索退化为纯关键词。"""
         if not self.embed_provider_name:
             return None
@@ -107,9 +107,9 @@ class Settings:
             raise ValueError(f"{env_name}={name} 未找到对应供应商(检查 <NAME>_API_KEY 拼写)")
         return found
 
-    def _first(self) -> Provider | None:
+    def _get_first_configured_provider(self) -> Provider | None:
         return min(self.providers.values(), key=lambda p: p.name) if self.providers else None
 
     @property
-    def use_llm(self) -> bool:
+    def llm_enabled(self) -> bool:
         return self.mode == "llm"

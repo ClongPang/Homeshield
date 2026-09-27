@@ -78,7 +78,7 @@ def test_query_membership_ended_during_intake_returns_400(client, group, monkeyp
         memberships = original(user_id, active_only)
         if user_id == mom.user_id:
             monkeypatch.setattr(deps.repos.member, "list_for_user", original)
-            deps.groups.leave(user_id, group_id)
+            deps.groups.leave_group(user_id, group_id)
             monkeypatch.setattr(deps.repos.member, "list_for_user", return_snapshot_then_leave)
         return memberships
 
@@ -144,7 +144,7 @@ def test_alert_access_revoked_on_leave_and_restored_on_rejoin(client, group):
     assert client.get("/api/alerts",params={"token":trusted.token,"group_id":group_id}).status_code == 200
 
     deps.repos.member.set_trust(mom.id,True)
-    assert deps.groups.leave(trusted.user_id,group_id)=="left"
+    assert deps.groups.leave_group(trusted.user_id,group_id)=="left"
     assert deps.repos.users.get_by_token(trusted.token).id == trusted.user_id
     assert client.get("/api/alerts",params={"token":trusted.token,"group_id":group_id}).status_code == 404
     denied=client.get(f"/api/alerts/{vid}",params={"token":trusted.token})
@@ -153,15 +153,15 @@ def test_alert_access_revoked_on_leave_and_restored_on_rejoin(client, group):
     assert old.user_id == trusted.user_id and old.ended_at is not None
 
     slot=deps.repos.member.add(group_id,"儿子")
-    code=deps.binding.issue_code(deps.repos.member.get(slot),created_by=mom.id)
-    joined=deps.binding.bind(trusted.openid,code["code"])
+    code=deps.binding.issue_bind_code(deps.repos.member.get(slot),created_by=mom.id)
+    joined=deps.binding.bind_member_with_invite_code(trusted.openid,code["code"])
     assert joined.id != trusted.id and deps.repos.users.get(joined.user_id).token == trusted.token
     assert len(client.get("/api/alerts",params={"token":trusted.token,"group_id":group_id}).json()["alerts"]) == 1
 
 
 def test_creator_disband_retains_rows_and_returns_410(client):
     deps=client.app.state.deps
-    creator_member=deps.binding.open_group("o_creator","父母家")
+    creator_member=deps.binding.create_initial_group("o_creator","父母家")
     creator=_actor(deps,creator_member)
     member_row=deps.repos.member.get(deps.repos.member.add(creator.group_id,"家人",True,"test:group"))
     member=_actor(deps,member_row)
@@ -179,13 +179,13 @@ def test_creator_disband_retains_rows_and_returns_410(client):
 
 def test_last_bound_member_exit_auto_disbands_but_invite_removal_does_not(client):
     deps=client.app.state.deps
-    solo=deps.binding.open_group("o_solo","独居群")
+    solo=deps.binding.create_initial_group("o_solo","独居群")
     slot=deps.repos.member.add(solo.group_id,"未绑定邀请")
-    code=deps.binding.issue_code(deps.repos.member.get(slot),created_by=solo.id)
-    assert deps.groups.remove(solo.group_id,slot)=="left"
-    assert deps.repos.bind_code.peek(code["code"]) is None
+    code=deps.binding.issue_bind_code(deps.repos.member.get(slot),created_by=solo.id)
+    assert deps.groups.remove_member(solo.group_id,slot)=="left"
+    assert deps.repos.bind_code.get_valid_bind_code(code["code"]) is None
     assert deps.repos.group.get(solo.group_id)["disbanded_at"] is None
-    assert deps.groups.leave(solo.user_id,solo.group_id)=="disbanded"
+    assert deps.groups.leave_group(solo.user_id,solo.group_id)=="disbanded"
     assert deps.repos.group.get(solo.group_id)["disbanded_at"] is not None
 
 
@@ -259,7 +259,7 @@ def test_concurrent_trust_changes_preserve_a_trusted_member(client, group):
     def demote(actor, target):
         barrier.wait()
         try:
-            deps.groups.set_trust(group_id,target.id,False,actor.id)
+            deps.groups.set_member_trust(group_id,target.id,False,actor.id)
             return "updated"
         except ValidationError:
             return "rejected"
@@ -282,8 +282,8 @@ def test_parallel_reads_share_sqlite_connection_safely(client, group):
     def read_views(_):
         user=deps.repos.users.get_by_token(mom.token)
         memberships=deps.repos.member.list_for_user(user.id)
-        groups=deps.repos.group.list_for_user(user.id)
-        alerts=deps.repos.alert.list_for_user_group(user.id,group_id)
+        groups=deps.repos.group.list_active_groups_for_user(user.id)
+        alerts=deps.repos.alert.list_alerts_for_user_in_group(user.id,group_id)
         return user.id,len(memberships),len(groups),len(alerts)
 
     with ThreadPoolExecutor(max_workers=12) as pool:

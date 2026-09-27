@@ -21,7 +21,7 @@ from homeshield.kbbuild.mapping import map_scam_type
 MIN_TEXT_CHARS = 30  # 过滤空壳/占位文本
 
 
-def _mapped_pool(conn: sqlite3.Connection, lang: str) -> tuple[list[dict], dict[str, int]]:
+def _build_mapped_case_pool(conn: sqlite3.Connection, lang: str) -> tuple[list[dict], dict[str, int]]:
     rows = conn.execute(
         "SELECT fr_id, category, subcategory, text FROM fr_case"
         " WHERE lang=? AND level=0 ORDER BY fr_id",
@@ -42,12 +42,12 @@ def _mapped_pool(conn: sqlite3.Connection, lang: str) -> tuple[list[dict], dict[
     return pool, unmapped
 
 
-def sample_pool(pool: list[dict], per_class: int, seed: int) -> list[dict]:
+def sample_cases_by_type(pool: list[dict], per_class: int, seed: int) -> list[dict]:
     """按类均衡确定性抽样(export-eval 与 export-conversations 共用,保证案例集一致)。"""
-    return _sample(pool, per_class, seed)
+    return _sample_cases_by_scam_type(pool, per_class, seed)
 
 
-def _sample(pool: list[dict], per_class: int, seed: int) -> list[dict]:
+def _sample_cases_by_scam_type(pool: list[dict], per_class: int, seed: int) -> list[dict]:
     by_type: dict[str, list[dict]] = {}
     for item in pool:
         by_type.setdefault(item["scam_type"], []).append(item)
@@ -67,8 +67,8 @@ def export_eval(
     per_class: int = 4,
     seed: int = 42,
 ) -> dict:
-    pool, unmapped = _mapped_pool(conn, lang)
-    picked = _sample(pool, per_class, seed)
+    pool, unmapped = _build_mapped_case_pool(conn, lang)
+    picked = _sample_cases_by_scam_type(pool, per_class, seed)
     source = "synthetic:llm:deepseek-r1"
 
     base_rows = [
@@ -125,8 +125,8 @@ def export_conversations(
     seed: int = 42,
 ) -> dict:
     """导出会话体样本(重构四):每案例 level0~3 各为一轮, Fraud-R1 levelup 同构。"""
-    pool, unmapped = _mapped_pool(conn, lang)
-    picked = _sample(pool, per_class, seed)
+    pool, unmapped = _build_mapped_case_pool(conn, lang)
+    picked = _sample_cases_by_scam_type(pool, per_class, seed)
     source = "synthetic:llm:deepseek-r1"
     conv_rows = []
     for p_ in picked:

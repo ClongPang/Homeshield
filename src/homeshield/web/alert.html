@@ -20,7 +20,7 @@ const vid = location.pathname.split("/").pop();
 const app = document.getElementById("app");
 const el = (tag, text, cls) => { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; };
 function show(text) { app.replaceChildren(el("div",text,"card")); }
-async function load() {
+async function load_alert_detail() {
   try {
     const response=await fetch(`/api/alerts/${encodeURIComponent(vid)}?token=${encodeURIComponent(token)}`);
     if(response.status===401) return show("链接已失效，请让家人重新发送控制台链接。");
@@ -47,20 +47,20 @@ function renderDetail(d) {
   } else {
     const box=el("div",undefined,"card"); box.append(el("b","核实之后，这条预警准吗？"));
     box.append(el("div","提交后，你所在防护群的信任成员会看到这条消息，用来确认这条反馈。","muted"));
-    box.append(button("是误报",()=>feedback("false_positive")));
-    box.append(button("是真骗局",()=>feedback("real"),"danger")); app.append(box);
+    box.append(button("是误报",()=>submit_correction("false_positive")));
+    box.append(button("是真骗局",()=>submit_correction("real"),"danger")); app.append(box);
   }
 }
 function button(text,run,cls="") { const b=el("button",text,cls); b.onclick=run; return b; }
-async function feedback(label) {
+async function submit_correction(label) {
   try {
     const response=await fetch("/api/corrections",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({token,verdict_id:Number(vid),label})});
     if(response.status===401) return show("链接已失效，请让家人重新发送控制台链接。");
     if(!response.ok) return show("提交失败，请确认你仍在相关防护群中后重试。");
-    await load();
+    await load_alert_detail();
   } catch { show("网络出了点问题，请稍后再试。"); }
 }
-load();
+load_alert_detail();
 </script></body>
 </html>

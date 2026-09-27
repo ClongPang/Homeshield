@@ -9,7 +9,7 @@ from homeshield.api.schemas import (
 )
 from homeshield.core.deps import Deps
 from homeshield.core.errors import DuplicateMessage, HomeshieldError, ValidationError
-from homeshield.core.feedback import CorrectionService, weekly_report
+from homeshield.core.feedback import CorrectionService, build_group_weekly_report
 from homeshield.core.models import CorrectionLabel, Member, User
 from homeshield.core.repo import WRITE_LOCK
 from homeshield.core.verification import VerificationService
@@ -20,7 +20,7 @@ def build_group_router(
 ) -> APIRouter:
     router = APIRouter()
 
-    def user_by_token(token: str) -> User:
+    def require_user_by_token(token: str) -> User:
         user = deps.repos.users.get_by_token(token or "")
         if user is None:
             raise HTTPException(401, "invalid token")
@@ -31,7 +31,7 @@ def build_group_router(
         在用户加入的群里找到目标群，返回群信息。
         没传群 ID 时，只有用户只加入一个群才会自动选中；加入多个群就必须指定。它用于确定“操作哪个群”
         """
-        groups = deps.repos.group.list_for_user(user.id)
+        groups = deps.repos.group.list_active_groups_for_user(user.id)
         if group_id is None:
             if len(groups) != 1:
                 if not groups:
@@ -58,9 +58,17 @@ def build_group_router(
             raise HTTPException(403, "only trusted member can manage group")
         return member
 
-    @router.get("/api/join/{code}")
-    def api_join_info(code: str):
-        row = deps.repos.bind_code.peek(code)
+    @router.get(
+
+        "/api/join/{code}",
+
+        operation_id="api_join_info_api_join__code__get",
+
+        summary="Api Join Info",
+
+    )
+    def api_get_join_invite_details(code: str):
+        row = deps.repos.bind_code.get_valid_bind_code(code)
         if row is None:
             raise HTTPException(404, "invitation unavailable")
         target = deps.repos.member.get(int(row["member_id"]))
@@ -70,25 +78,33 @@ def build_group_router(
         return {"group_name": group["name"], "member_name": target.name,
                 "expires_at": row["expires_at"], "command": f"绑定 {row['code']}"}
 
-    def translate_validation(fn, *args):
+    def translate_domain_error_to_http_400(fn, *args):
         try:
             return fn(*args)
         except (HomeshieldError, ValueError) as e:
             raise HTTPException(400, str(e)) from e
 
-    @router.get("/api/groups")
-    def api_groups(token: str = Query("")):
-        user = user_by_token(token)
+    @router.get(
+
+        "/api/groups",
+
+        operation_id="api_groups_api_groups_get",
+
+        summary="Api Groups",
+
+    )
+    def api_list_user_groups(token: str = Query("")):
+        user = require_user_by_token(token)
         return {"groups": [
             {"id": g["id"], "name": g["name"], "trusted": bool(g["trusted"]),
              "mute": bool(g["mute"]), "member_count": g["member_count"],
              "is_creator": deps.repos.group.get(g["id"])["created_by_user_id"] == user.id}
-            for g in deps.repos.group.list_for_user(user.id)
+            for g in deps.repos.group.list_active_groups_for_user(user.id)
         ]}
 
     @router.post("/api/groups")
     def api_create_group(body: GroupIn):
-        user = user_by_token(body.token)
+        user = require_user_by_token(body.token)
         try:
             admin = deps.binding.create_group(user.id, body.name)
         except HomeshieldError as e:
@@ -98,21 +114,29 @@ def build_group_router(
 
     @router.patch("/api/groups/{gid}")
     def api_rename_group(gid: int, body: GroupIn):
-        user = user_by_token(body.token)
+        user = require_user_by_token(body.token)
         with WRITE_LOCK:
             require_trusted(user, gid)
-            translate_validation(deps.groups.rename, gid, body.name)
+            translate_domain_error_to_http_400(deps.groups.rename_group, gid, body.name)
         return {"id": gid, "name": body.name.strip()}
 
     @router.delete("/api/groups/{gid}")
     def api_disband_group(gid: int, body: TokenIn):
-        user = user_by_token(body.token)
-        translate_validation(deps.groups.disband, user.id, gid)
+        user = require_user_by_token(body.token)
+        translate_domain_error_to_http_400(deps.groups.disband_group, user.id, gid)
         return {"disbanded": True, "group_id": gid}
 
-    @router.post("/api/query")
-    async def api_query(body: QueryIn):
-        user = user_by_token(body.token)
+    @router.post(
+
+        "/api/query",
+
+        operation_id="api_query_api_query_post",
+
+        summary="Api Query",
+
+    )
+    async def api_verify_message(body: QueryIn):
+        user = require_user_by_token(body.token)
         memberships = deps.repos.member.list_for_user(user.id)
         if not memberships:
             raise HTTPException(400, "no active group; join or create a group before querying")
@@ -135,12 +159,20 @@ def build_group_router(
             "reply": result.reply, "latency_ms": result.latency_ms,
         }
 
-    @router.get("/api/stream")
-    async def api_stream(token: str = Query("")):
-        user = user_by_token(token)
+    @router.get(
+
+        "/api/stream",
+
+        operation_id="api_stream_api_stream_get",
+
+        summary="Api Stream",
+
+    )
+    async def api_stream_alert_events(token: str = Query("")):
+        user = require_user_by_token(token)
         q = deps.broker.subscribe(user.id)
 
-        async def gen():
+        async def stream_authorized_alert_events():
             try:
                 while True:
                     payload = await q.get()
@@ -155,14 +187,22 @@ def build_group_router(
             finally:
                 deps.broker.unsubscribe(user.id, q)
 
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(stream_authorized_alert_events(), media_type="text/event-stream")
 
-    @router.get("/api/alerts")
-    def api_alerts(token: str = Query(""), group_id: int | None = Query(None)):
-        user = user_by_token(token)
+    @router.get(
+
+        "/api/alerts",
+
+        operation_id="api_alerts_api_alerts_get",
+
+        summary="Api Alerts",
+
+    )
+    def api_list_group_alerts(token: str = Query(""), group_id: int | None = Query(None)):
+        user = require_user_by_token(token)
         with WRITE_LOCK:
             group = resolve_user_group(user, group_id)
-            rows = deps.repos.alert.list_for_user_group(user.id, group["id"])
+            rows = deps.repos.alert.list_alerts_for_user_in_group(user.id, group["id"])
         return {"group_id": group["id"], "alerts": [
             {"verdict_id": r["verdict_id"], "level": r["level"],
              "summary": r["content"][:50], "delivered_at": r["delivered_at"],
@@ -172,8 +212,8 @@ def build_group_router(
 
     @router.get("/api/alerts/{verdict_id}")
     def api_alert_detail(verdict_id: int, token: str = Query("")):
-        user = user_by_token(token)
-        detail, denial = deps.repos.alert.access_detail(user.id, verdict_id)
+        user = require_user_by_token(token)
+        detail, denial = deps.repos.alert.get_alert_detail_for_user(user.id, verdict_id)
         if denial:
             raise HTTPException(410, {"reason": denial})
         if detail is None:
@@ -186,31 +226,55 @@ def build_group_router(
             "my_feedback": ({"label": mine.label.value, "status": mine.status.value} if mine else None),
         }
 
-    @router.get("/api/corrections")
-    def api_corrections_list(token: str = Query(""), group_id: int | None = Query(None)):
-        user = user_by_token(token)
+    @router.get(
+
+        "/api/corrections",
+
+        operation_id="api_corrections_list_api_corrections_get",
+
+        summary="Api Corrections List",
+
+    )
+    def api_list_pending_group_corrections(token: str = Query(""), group_id: int | None = Query(None)):
+        user = require_user_by_token(token)
         with WRITE_LOCK:
             group = resolve_user_group(user, group_id)
             viewer = require_active_membership(user, group["id"])
-            rows = deps.repos.correction.list_pending_with_context(group["id"]) if viewer.trusted else []
+            rows = deps.repos.correction.list_pending_corrections_with_context(group["id"]) if viewer.trusted else []
         return {"group_id": group["id"], "viewer_trusted": viewer.trusted, "pending": rows}
 
-    @router.post("/api/corrections")
-    def api_corrections(body: CorrectionIn):
-        user = user_by_token(body.token)
+    @router.post(
+
+        "/api/corrections",
+
+        operation_id="api_corrections_api_corrections_post",
+
+        summary="Api Corrections",
+
+    )
+    def api_submit_correction(body: CorrectionIn):
+        user = require_user_by_token(body.token)
         try:
-            cid, status = corrections.submit(
+            cid, status = corrections.submit_correction(
                 body.verdict_id, user.id, CorrectionLabel(body.label), body.note
             )
         except (HomeshieldError, ValueError) as e:
             raise HTTPException(400, str(e)) from e
         return {"correction_id": cid, "status": status.value}
 
-    @router.post("/api/corrections/{cid}/confirm")
-    def api_confirm(cid: int, body: DecideIn):
-        user = user_by_token(body.token)
+    @router.post(
+
+        "/api/corrections/{cid}/confirm",
+
+        operation_id="api_confirm_api_corrections__cid__confirm_post",
+
+        summary="Api Confirm",
+
+    )
+    def api_decide_correction(cid: int, body: DecideIn):
+        user = require_user_by_token(body.token)
         with WRITE_LOCK:
-            record, groups = deps.repos.correction.get_with_groups(cid)
+            record, groups = deps.repos.correction.get_correction_with_related_groups(cid)
             if record is None:
                 raise HTTPException(404, "correction not found")
             active = {m.group_id: m for m in deps.repos.member.list_for_user(user.id)}
@@ -219,21 +283,37 @@ def build_group_router(
             if actor is None:
                 raise HTTPException(400, "correction not in a related group")
             try:
-                status = corrections.decide(cid, actor.id, body.decision)
+                status = corrections.decide_correction(cid, actor.id, body.decision)
             except HomeshieldError as e:
                 raise HTTPException(400, str(e)) from e
         return {"status": status.value}
 
-    @router.get("/api/weekly")
-    def api_weekly(token: str = Query(""), group_id: int | None = Query(None)):
-        user = user_by_token(token)
+    @router.get(
+
+        "/api/weekly",
+
+        operation_id="api_weekly_api_weekly_get",
+
+        summary="Api Weekly",
+
+    )
+    def api_get_group_weekly_report(token: str = Query(""), group_id: int | None = Query(None)):
+        user = require_user_by_token(token)
         with WRITE_LOCK:
             group = resolve_user_group(user, group_id)
-            return weekly_report(deps.repos, group["id"])
+            return build_group_weekly_report(deps.repos, group["id"])
 
-    @router.get("/api/groups/{gid}/members")
-    def api_members(gid: int, token: str = Query("")):
-        user = user_by_token(token)
+    @router.get(
+
+        "/api/groups/{gid}/members",
+
+        operation_id="api_members_api_groups__gid__members_get",
+
+        summary="Api Members",
+
+    )
+    def api_list_group_members(gid: int, token: str = Query("")):
+        user = require_user_by_token(token)
         with WRITE_LOCK:
             viewer = require_active_membership(user, gid)
             return {
@@ -246,9 +326,17 @@ def build_group_router(
                 ],
             }
 
-    @router.post("/api/groups/{gid}/members")
-    def api_add_member(gid: int, body: MemberIn):
-        user = user_by_token(body.token)
+    @router.post(
+
+        "/api/groups/{gid}/members",
+
+        operation_id="api_add_member_api_groups__gid__members_post",
+
+        summary="Api Add Member",
+
+    )
+    def api_create_member_slot_and_issue_bind_code(gid: int, body: MemberIn):
+        user = require_user_by_token(body.token)
         name = body.name.strip()
         if not name:
             raise HTTPException(400, "name is empty")
@@ -257,7 +345,7 @@ def build_group_router(
             try:
                 target_id = deps.groups.create_member_slot(gid, name)
                 target = deps.repos.member.get(target_id)
-                code = deps.binding.issue_code(target, created_by=actor.id)
+                code = deps.binding.issue_bind_code(target, created_by=actor.id)
             except HomeshieldError as e:
                 raise HTTPException(400, str(e)) from e
         return {
@@ -269,41 +357,49 @@ def build_group_router(
 
     @router.post("/api/groups/{gid}/members/{member_id}/bind-code")
     def api_reissue_bind_code(gid: int, member_id: int, body: TokenIn):
-        user = user_by_token(body.token)
+        user = require_user_by_token(body.token)
         with WRITE_LOCK:
             actor = require_trusted(user, gid)
             target = deps.repos.member.get(member_id)
             if target is None or target.group_id != gid or target.ended_at is not None:
                 raise HTTPException(404, "member not found")
             try:
-                code = deps.binding.issue_code(target, created_by=actor.id)
+                code = deps.binding.issue_bind_code(target, created_by=actor.id)
             except HomeshieldError as e:
                 raise HTTPException(400, str(e)) from e
         return {"bind_code": code["code"], "bind_expires_at": code["expires_at"]}
 
     @router.post("/api/groups/{gid}/members/{member_id}/trust")
     def api_set_trust(gid: int, member_id: int, body: TrustIn):
-        user = user_by_token(body.token)
+        user = require_user_by_token(body.token)
         with WRITE_LOCK:
             actor = require_trusted(user, gid)
-            translate_validation(deps.groups.set_trust, gid, member_id, body.trusted, actor.id)
+            translate_domain_error_to_http_400(deps.groups.set_member_trust, gid, member_id, body.trusted, actor.id)
         return {"member_id": member_id, "trusted": body.trusted}
 
-    @router.delete("/api/groups/{gid}/members/{member_id}")
-    def api_remove_member(gid: int, member_id: int, body: TokenIn):
-        user = user_by_token(body.token)
+    @router.delete(
+
+        "/api/groups/{gid}/members/{member_id}",
+
+        operation_id="api_remove_member_api_groups__gid__members__member_id__delete",
+
+        summary="Api Remove Member",
+
+    )
+    def api_end_group_membership(gid: int, member_id: int, body: TokenIn):
+        user = require_user_by_token(body.token)
         with WRITE_LOCK:
             actor = require_active_membership(user, gid)
             if actor.id == member_id:
-                result = translate_validation(deps.groups.leave, user.id, gid)
+                result = translate_domain_error_to_http_400(deps.groups.leave_group, user.id, gid)
             else:
                 require_trusted(user, gid)
-                result = translate_validation(deps.groups.remove, gid, member_id)
+                result = translate_domain_error_to_http_400(deps.groups.remove_member, gid, member_id)
         return {"status": result}
 
     @router.patch("/api/groups/{gid}/members/{member_id}")
     def api_rename_member(gid: int, member_id: int, body: MemberPatchIn):
-        user = user_by_token(body.token)
+        user = require_user_by_token(body.token)
         name = body.name.strip()
         if not name:
             raise HTTPException(400, "name is empty")
@@ -314,14 +410,22 @@ def build_group_router(
                 raise HTTPException(404, "member not found")
             if target.user_id != user.id and not actor.trusted:
                 raise HTTPException(403, "only member or trusted member can rename")
-            deps.repos.member.rename(member_id, name)
+            deps.repos.member.rename_member(member_id, name)
         return {"member_id": member_id, "name": name}
 
-    @router.post("/api/groups/{gid}/mute")
-    def api_mute(gid: int, body: MuteIn):
-        user = user_by_token(body.token)
+    @router.post(
+
+        "/api/groups/{gid}/mute",
+
+        operation_id="api_mute_api_groups__gid__mute_post",
+
+        summary="Api Mute",
+
+    )
+    def api_set_group_mute_for_user(gid: int, body: MuteIn):
+        user = require_user_by_token(body.token)
         with WRITE_LOCK:
-            translate_validation(deps.groups.set_mute, gid, user.id, body.mute)
+            translate_domain_error_to_http_400(deps.groups.set_member_mute, gid, user.id, body.mute)
         return {"group_id": gid, "mute": body.mute}
 
     return router

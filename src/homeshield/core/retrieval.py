@@ -27,7 +27,7 @@ class Retriever:
         t = "".join(ch for ch in text if not ch.isspace())
         return Counter(t[i : i + 2] for i in range(len(t) - 1))
 
-    def _kw_score(self, query: str, case: KbCase) -> float:
+    def _keyword_similarity_score(self, query: str, case: KbCase) -> float:
         q = self._bigrams(query)
         if not q:
             return 0.0
@@ -35,18 +35,18 @@ class Retriever:
         inter = sum((q & c).values())
         return inter / min(sum(q.values()), 80)
 
-    async def _ensure_vecs(self) -> None:
+    async def _ensure_case_embeddings(self) -> None:
         if self._case_vecs is None and self.llm is not None:
             self._case_vecs = await self.llm.embed(
                 [c.tactic + "".join(c.markers) for c in self.cases]
             )
 
     @staticmethod
-    def _cos(a: list[float], b: list[float]) -> float:
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
         return sum(x * y for x, y in zip(a, b))  # 向量已归一化
 
-    async def search(self, query: str) -> list[KbCase]:
-        await self._ensure_vecs()
+    async def search_cases(self, query: str) -> list[KbCase]:
+        await self._ensure_case_embeddings()
         qv = (
             (await self.llm.embed([query]))[0]
             if (self.llm is not None and self._case_vecs)
@@ -54,9 +54,9 @@ class Retriever:
         )
         scored: list[tuple[float, int]] = []
         for i, case in enumerate(self.cases):
-            s = self.keyword_weight * self._kw_score(query, case)
+            s = self.keyword_weight * self._keyword_similarity_score(query, case)
             if qv is not None:
-                s += (1 - self.keyword_weight) * self._cos(qv, self._case_vecs[i])
+                s += (1 - self.keyword_weight) * self._cosine_similarity(qv, self._case_vecs[i])
             scored.append((s, i))
         scored.sort(key=lambda x: x[0], reverse=True)
         return [self.cases[i] for _, i in scored[: self.top_k]]

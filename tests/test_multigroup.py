@@ -32,7 +32,7 @@ def test_alert_fanout_snapshot_user_dedupe_mute_and_template_choice(deps):
     third=repo.group.create("新加入的群")
     target_c=repo.member.get(repo.member.add(third,"女儿",openid="live:target"))
     # 查询者在判定前退出 A 并加入 C。快照仍是 A/B，但退出者不再是 A 的接收者。
-    deps.groups.leave(queryer_a.user_id,first)
+    deps.groups.leave_group(queryer_a.user_id,first)
     repo.member.add(third,"查询者",openid="test:queryer")
 
     fake=FakeTemplates()
@@ -66,9 +66,9 @@ def test_alert_fanout_snapshot_user_dedupe_mute_and_template_choice(deps):
         (result.verdict_id,),
     )}
     assert alert_groups=={first,second} and third not in alert_groups
-    assert repo.alert.list_for_user_group(target_a.user_id,third)==[]
-    assert repo.alert.list_for_user_group(queryer_a.user_id,first)==[]
-    assert len(repo.alert.list_for_user_group(queryer_a.user_id,second))==1
+    assert repo.alert.list_alerts_for_user_in_group(target_a.user_id,third)==[]
+    assert repo.alert.list_alerts_for_user_in_group(queryer_a.user_id,first)==[]
+    assert len(repo.alert.list_alerts_for_user_in_group(queryer_a.user_id,second))==1
     assert target_c.user_id==target_a.user_id and queryer_b.user_id==queryer_a.user_id
 
     # 缺少多群模板时跳过多群接收者,不把 thing2 塞进旧模板。
@@ -88,18 +88,18 @@ def test_alert_fanout_snapshot_user_dedupe_mute_and_template_choice(deps):
                       content="别告诉家人,马上转账救急")
     asyncio.run(make_pipeline(deps).run(both_muted.message,both_muted.query_id))
     assert len([item for item in fake.sent if item["openid"]=="live:target"])==1
-    assert len(repo.alert.list_for_user_group(target_a.user_id,first))==2
-    assert len(repo.alert.list_for_user_group(target_a.user_id,second))==3
+    assert len(repo.alert.list_alerts_for_user_in_group(target_a.user_id,first))==2
+    assert len(repo.alert.list_alerts_for_user_in_group(target_a.user_id,second))==3
     second_payload=stream.get_nowait()
     assert second_payload["group_ids"]==[first,second]
 
 
 def test_disband_before_verdict_creates_no_alert_and_says_so(deps):
-    owner=deps.binding.open_group("test:owner","临时群")
+    owner=deps.binding.create_initial_group("test:owner","临时群")
     memberships=deps.repos.member.list_for_user(owner.user_id)
     intake=ingest(deps.repos,user_id=owner.user_id,memberships=memberships,
                   content="别告诉家人,立即转账")
-    deps.groups.disband(owner.user_id,owner.group_id)
+    deps.groups.disband_group(owner.user_id,owner.group_id)
     result=asyncio.run(make_pipeline(deps).run(intake.message,intake.query_id))
     assert result.verdict.level.value=="dangerous"
     assert "本次未通知群成员" in result.reply
@@ -118,7 +118,7 @@ def test_demo_and_test_identities_never_receive_wechat_templates(deps):
                   content="别告诉家人,立即转账")
     asyncio.run(make_pipeline(deps).run(intake.message,intake.query_id))
     assert fake.sent==[]
-    assert deps.repos.alert.list_for_user_group(demo.user_id,group)
+    assert deps.repos.alert.list_alerts_for_user_in_group(demo.user_id,group)
 
 
 def test_sse_subscribers_receive_independent_payloads(deps):
@@ -127,7 +127,7 @@ def test_sse_subscribers_receive_independent_payloads(deps):
     second = deps.broker.subscribe(user_id)
     payload = {"group_ids": [10, 20], "group_names": ["A", "B"]}
 
-    deps.broker.publish(user_id, payload)
+    deps.broker.publish_alert(user_id, payload)
     first_payload = first.get_nowait()
     first_payload["group_ids"].remove(10)
     first_payload["group_names"].remove("A")

@@ -28,12 +28,12 @@ class WeChatChannel:
         return hashlib.sha1(raw.encode()).hexdigest() == signature
 
     @staticmethod
-    def parse_callback(xml_bytes: bytes) -> dict:
+    def parse_wechat_callback_xml(xml_bytes: bytes) -> dict:
         root = ET.fromstring(xml_bytes)
         return {child.tag: (child.text or "") for child in root}
 
     @staticmethod
-    def classify(data: dict) -> str:
+    def classify_callback_message(data: dict) -> str:
         """回调分类:subscribe / text / image / unsupported / ignore。"""
         msg_type = data.get("MsgType", "")
         if msg_type == "event":
@@ -56,7 +56,7 @@ class WeChatChannel:
         )
 
     # ---- 发送侧 -------------------------------------------------------
-    async def access_token(self) -> str:
+    async def get_access_token(self) -> str:
         if self._token and time.time() < self._token_exp - 60:
             return self._token
         resp = await self._client.get(
@@ -73,7 +73,7 @@ class WeChatChannel:
         return self._token
 
     async def send_customer_service(self, openid: str, text: str) -> None:
-        token = await self.access_token()
+        token = await self.get_access_token()
         await self._client.post(
             f"{self.API}/cgi-bin/message/custom/send",
             params={"access_token": token},
@@ -82,7 +82,7 @@ class WeChatChannel:
 
     async def send_template(self, openid: str, data: dict, url: str | None = None,
                             template_id: str | None = None) -> None:
-        token = await self.access_token()
+        token = await self.get_access_token()
         payload = {"touser": openid, "template_id": template_id or self.s.wechat_template_id, "data": data}
         if url:
             payload["url"] = url  # 点击通知直达控制台

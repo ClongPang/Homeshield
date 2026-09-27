@@ -5,7 +5,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 
-def utcnow() -> int:
+def utc_timestamp() -> int:
     return int(datetime.now(timezone.utc).timestamp())
 
 
@@ -61,7 +61,7 @@ class Message(BaseModel):
     content: str
     channel: str = "web"  # wechat | web
     msg_id: str | None = None  # 幂等键(微信 MsgId / 网页客户端生成)
-    created_at: int = Field(default_factory=utcnow)
+    created_at: int = Field(default_factory=utc_timestamp)
 
 
 class Turn(BaseModel):
@@ -111,7 +111,7 @@ class Conversation(BaseModel):
         return "\n".join(lines)
 
     @property
-    def multi(self) -> bool:
+    def is_multi_turn(self) -> bool:
         return len(self.turns) > 1
 
 

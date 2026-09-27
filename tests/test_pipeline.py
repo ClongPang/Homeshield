@@ -4,7 +4,7 @@ import asyncio
 from homeshield.core.deps import make_pipeline
 from homeshield.core.intake import ingest
 from homeshield.core.models import Level
-from homeshield.core.reply import validate_reply
+from homeshield.core.reply import is_valid_reply
 from conftest import ingest_member
 
 
@@ -18,7 +18,7 @@ def test_end_to_end_dangerous(deps, group):
     assert result.verdict is not None and result.verdict_id is not None
     assert result.verdict.level is Level.DANGEROUS
     assert result.rule_floor_level is Level.DANGEROUS  # isolation+transfer 共现
-    assert validate_reply(result.reply)
+    assert is_valid_reply(result.reply)
     assert "高危提醒" in result.reply  # 通知说明只在实际生成告警后追加
     # dangerous → alert 表留痕,覆盖全体成员(群模型告警面)
     n = deps.conn.execute("SELECT COUNT(*) c FROM alert").fetchone()["c"]

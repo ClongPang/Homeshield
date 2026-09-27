@@ -62,7 +62,7 @@ pyproject.toml uv.lock .env.example
 | 仓储模式 | `repo.py`(SQL 只在此文件) | 领域层只见领域对象;SQLite 可换而不动业务 |
 | 显式状态机 | `feedback.LEGAL_TRANSITIONS` | 纠正流转(§3.3)非法转移直接拒绝,防投毒规则可测 |
 | 防腐层 | `channels/wechat.py` | 微信签名/XML/客服接口/模板消息不渗入领域 |
-| 确定性兜底 | `TemplateReply` + `validate_reply`;`judge_with_validation` 重试→降级 | FR-4/FR-5 的格式正确性不赌 LLM |
+| 确定性兜底 | `TemplateReply` + `is_valid_reply`;`judge_with_validation` 重试→降级 | FR-4/FR-5 的格式正确性不赌 LLM |
 | 组合根 | `deps.build_deps`(唯一 new 具体实现的地方) | server/cli/eval 共用装配;测试注入假实现 |
 | 日志约定 | `core/logsetup.py` + 各模块 `logger.warning(exc_info=True)` | 降级与外部调用失败不静默:留排查痕迹,不打断主链路 |
 
@@ -72,7 +72,7 @@ pyproject.toml uv.lock .env.example
 
 1. **身份与成员关系分离**:`user` 持有 `openid/token`;`member` 仅描述用户在某群的关系。查询保存 `query_group` 快照,退群/移除/解散保留成员历史。
 2. **查询不选群,群页显式选群**:查询触发相关群广播;单群沿用旧模板,多群接收者使用带群名模板。控制台按群展示告警、纠正队列和周报;首次多群访问先要求选择群。公众号命令包括`开通 [群名]`、`我的群`、`退出 <群名/序号>`与创建者`解散 <群名/序号>`。
-3. **`fpr_strict` 指标**:在规格 FPR(dangerous 级)之外补充用户感知口径(suspicious 亦计入),用于工作点选择;报告两者都出。
+3. **`user_visible_false_positive_rate` 指标(报告字段仍叫 `fpr_strict`)**:在规格 FPR(dangerous 级)之外补充用户感知口径(suspicious 亦计入),用于工作点选择;报告两者都出。
 4. **降级语义**:转写失败/引用校验耗尽 → 不落 verdict、不触发告警,回复走人工兜底文案(FR-2/FR-4 的"需人工判断")。
 5. **评测隔离**:`run_eval` 用 `:memory:` 库,不污染主库。
 6. **超时用惰性触发,不建定时器**:`CorrectionService.decide()` 前先清算过期 pending——规则在唯一需要它的现场自执行(经评审否决了"server 内每日清扫"的过度设计);真实使用量起来后再评估是否升级为定时任务。

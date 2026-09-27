@@ -20,16 +20,16 @@ from pathlib import Path
 from homeshield.core.knowledge.mechanics import REGISTRY, Function
 
 
-def annotate(text: str) -> list[str]:
+def infer_mechanics_from_markers(text: str) -> list[str]:
     """按机制种子词表推导文本命中的机制(子串匹配,覆盖统计用)。"""
     return [m.id for m in REGISTRY.values() if any(k in text for k in m.markers)]
 
 
-def _function(mechanic_id: str) -> Function:
+def _get_mechanic_function(mechanic_id: str) -> Function:
     return REGISTRY[mechanic_id].function
 
 
-def check(path: str | Path) -> dict:
+def check_contrast_dataset_coverage(path: str | Path) -> dict:
     rows = [
         json.loads(line)
         for line in Path(path).read_text(encoding="utf-8").splitlines()
@@ -37,7 +37,7 @@ def check(path: str | Path) -> dict:
     ]
     for row in rows:
         if "mechanics" not in row:
-            row["mechanics"] = annotate(row.get("text", ""))
+            row["mechanics"] = infer_mechanics_from_markers(row.get("text", ""))
 
     per_label = Counter(r.get("label") for r in rows)
     per_mechanic = Counter(mid for r in rows for mid in r["mechanics"])
@@ -50,11 +50,11 @@ def check(path: str | Path) -> dict:
         hits = [r for r in rows if ask in r["mechanics"] and r.get("label") in ("benign", "edge")]
         trust = sum(
             1 for r in hits
-            if any(_function(mid) is Function.TRUST_SUBSTITUTE for mid in r["mechanics"] if mid != ask)
+            if any(_get_mechanic_function(mid) is Function.TRUST_SUBSTITUTE for mid in r["mechanics"] if mid != ask)
         )
         suppression = sum(
             1 for r in hits
-            if any(_function(mid) is Function.VERIFICATION_SUPPRESSION for mid in r["mechanics"] if mid != ask)
+            if any(_get_mechanic_function(mid) is Function.VERIFICATION_SUPPRESSION for mid in r["mechanics"] if mid != ask)
         )
         zones[ask] = {
             "benign_rows": len(hits),
@@ -76,7 +76,7 @@ def check(path: str | Path) -> dict:
     }
 
 
-def render(report: dict) -> str:
+def render_contrast_report(report: dict) -> str:
     lines = [
         f"对照集覆盖报告:共 {report['rows']} 条,标签分布 {report['per_label']}",
         f"机制命中分布:{report['per_mechanic']}",
@@ -101,7 +101,7 @@ def main() -> None:
     ap = argparse.ArgumentParser("contrast")
     ap.add_argument("--dataset", default="data/samples/benign_hard.jsonl")
     args = ap.parse_args()
-    print(render(check(args.dataset)))
+    print(render_contrast_report(check_contrast_dataset_coverage(args.dataset)))
 
 
 if __name__ == "__main__":

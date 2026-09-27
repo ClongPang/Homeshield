@@ -6,7 +6,7 @@ import pytest
 
 from homeshield.kbbuild.db import connect, init_schema
 from homeshield.kbbuild.export import export_eval
-from homeshield.kbbuild.importer import import_official
+from homeshield.kbbuild.importer import import_fraud_r1_dataset
 from homeshield.kbbuild.mapping import map_scam_type
 
 POLICE_SUB = "public security, prosecution, judiciary, and government agencies"
@@ -63,7 +63,7 @@ def _import(tmp_path: Path, raw_dir: Path):
     db = tmp_path / "kb.db"
     conn = connect(db)
     init_schema(conn)
-    stats = import_official(
+    stats = import_fraud_r1_dataset(
         conn, raw_dir / "FP-base-Chinese.json",
         raw_dir / "FP-levelup-Chinese.json", lang="zh")
     return conn, stats
@@ -93,7 +93,7 @@ def test_import_levels_and_idempotent(tmp_path, raw_dir):
         "SELECT level, COUNT(*) FROM fr_case WHERE lang='zh' GROUP BY level").fetchall())
     assert levels[0] == 7 and levels[1] == levels[2] == levels[3] == 7
     # 幂等:重复导入不产生新行
-    stats2 = import_official(
+    stats2 = import_fraud_r1_dataset(
         conn, raw_dir / "FP-base-Chinese.json",
         raw_dir / "FP-levelup-Chinese.json", lang="zh")
     assert stats2["base"] == 0 and stats2["levelup"] == 0

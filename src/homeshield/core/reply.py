@@ -51,24 +51,24 @@ _FULL_RE = re.compile(r"【结论】[\s\S]*【依据】[\s\S]*【建议】")
 _SECTIONS_RE = re.compile(r"【依据】(?P<basis>[^【]{1,60})【建议】(?P<advice>[^【]{1,60})")
 
 
-def validate_reply(text: str) -> bool:
+def is_valid_reply(text: str) -> bool:
     return bool(_FULL_RE.search(text)) and 10 <= len(text) <= _REPLY_BUDGET
 
 
-def _basis(features: list[Feature], cited: list[str]) -> str:
+def _build_evidence_summary(features: list[Feature], cited: list[str]) -> str:
     cited_set = set(cited)
     ordered = [f for f in features if f.id in cited_set] or features[:2]
     return "；".join(f"{_type_label(f.type)}：{f.value}" for f in ordered[:2]) or "无明显特征"
 
 
-def _clip(text: str, limit: int) -> str:
+def _truncate_text(text: str, limit: int) -> str:
     text = text.strip()
     if len(text) <= limit:
         return text
     return text[: max(limit - 1, 1)].rstrip() + "…"
 
 
-def _assemble(level: Level, basis: str, advice: str) -> str:
+def _assemble_reply(level: Level, basis: str, advice: str) -> str:
     """拼装三段式:结论行、safe 兜底建议与 dangerous 96110 后缀代码所有;
     超长时按预算截两段正文(截断补省略号),三段式结构完整。"""
     if level is Level.SAFE:
@@ -77,8 +77,8 @@ def _assemble(level: Level, basis: str, advice: str) -> str:
     head = f"【结论】{_HEADS[level.value]}"
     budget = _REPLY_BUDGET - len(head) - 10  # 10 = 两个换行 + 【依据】【建议】段标记
     half = max(budget, 10) // 2
-    basis = _clip(basis, half)
-    advice = _clip(advice, max(budget - half, 10) - len(tail)) + tail
+    basis = _truncate_text(basis, half)
+    advice = _truncate_text(advice, max(budget - half, 10) - len(tail)) + tail
     return f"{head}\n【依据】{basis}\n【建议】{advice}"
 
 
@@ -119,7 +119,7 @@ class TemplateReply:
         cases: list[KbCase],
     ) -> str:
         advice = (cases[0].advice if cases else "先别转钱，和家人商量一下")[:60]
-        return _assemble(verdict.level, _basis(features, verdict.cited_ids), advice)
+        return _assemble_reply(verdict.level, _build_evidence_summary(features, verdict.cited_ids), advice)
 
 
 class LLMReply:
@@ -146,13 +146,13 @@ class LLMReply:
         )
         fallback = TemplateReply()
         for _ in range(2):
-            parsed = _parse_sections(await self.llm.chat_text("reply", system, user))
+            parsed = _parse_reply_sections(await self.llm.chat_text("reply", system, user))
             if parsed:
-                return _assemble(verdict.level, *parsed)
+                return _assemble_reply(verdict.level, *parsed)
         return await fallback.generate(verdict, features, cases)
 
 
-def _parse_sections(text: str) -> tuple[str, str] | None:
+def _parse_reply_sections(text: str) -> tuple[str, str] | None:
     m = _SECTIONS_RE.search(text)
     if not m:
         return None
@@ -162,5 +162,5 @@ def _parse_sections(text: str) -> tuple[str, str] | None:
     return basis, advice
 
 
-def make_reply(settings, llm: LLMPort) -> ReplyGenerator:
-    return LLMReply(llm) if settings.use_llm else TemplateReply()
+def create_reply_generator(settings, llm: LLMPort) -> ReplyGenerator:
+    return LLMReply(llm) if settings.llm_enabled else TemplateReply()

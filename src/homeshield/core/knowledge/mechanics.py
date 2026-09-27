@@ -2,7 +2,7 @@
 
 三功能×十一机制:识别靠机制,定级靠核实结构。机制是**表示层**
 (抽取词表种子、内联标注标签、引用证据的组织方式),不是判定引擎——
-分级语义的唯一确定性约束是 features.rule_floor,其余分级由 LLM 在
+分级语义的唯一确定性约束是 features.get_rule_risk_floor,其余分级由 LLM 在
 机制标注后的原文上判断(重构二+五落地)。
 
 字段约定:
@@ -97,9 +97,9 @@ REGISTRY: dict[str, Mechanic] = {
 MECHANIC_LIST: list[Mechanic] = list(REGISTRY.values())
 
 
-def by_function(function: Function) -> list[Mechanic]:
+def list_mechanics_by_function(function: Function) -> list[Mechanic]:
     return [m for m in MECHANIC_LIST if m.function is function]
 
 
-def get(mechanic_id: str) -> Mechanic | None:
+def get_mechanic(mechanic_id: str) -> Mechanic | None:
     return REGISTRY.get(mechanic_id)

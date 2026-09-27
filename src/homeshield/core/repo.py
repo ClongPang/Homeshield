@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from homeshield.core.errors import DuplicateMessage, ValidationError
 from homeshield.core.models import (
-    CorrectionLabel, CorrectionRecord, CorrectionStatus, Level, Member, Mode, User, utcnow,
+    CorrectionLabel, CorrectionRecord, CorrectionStatus, Level, Member, Mode, User, utc_timestamp,
 )
 
 WRITE_LOCK = threading.RLock()
@@ -58,7 +58,7 @@ class UserRepo:
                 return User(**dict(row))
             cur = self.conn.execute(
                 "INSERT INTO user(openid,token,created_at) VALUES(?,?,?)",
-                (openid, _token(), utcnow()),
+                (openid, _token(), utc_timestamp()),
             )
             row = self.conn.execute("SELECT * FROM user WHERE id=?", (cur.lastrowid,)).fetchone()
         return User(**dict(row))
@@ -73,7 +73,7 @@ class GroupRepo:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
                 "INSERT INTO protection_group(name,created_by_user_id,created_at) VALUES(?,?,?)",
-                (name, created_by_user_id, utcnow()),
+                (name, created_by_user_id, utc_timestamp()),
             )
         return int(cur.lastrowid)
 
@@ -81,12 +81,12 @@ class GroupRepo:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
                 "INSERT INTO protection_group(name,created_by_user_id,created_at) VALUES(?,?,?)",
-                (name, user_id, utcnow()),
+                (name, user_id, utc_timestamp()),
             )
             group_id = int(cur.lastrowid)
             self.conn.execute(
                 "INSERT INTO member(group_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
-                (group_id, user_id, creator_name, 1, utcnow()),
+                (group_id, user_id, creator_name, 1, utc_timestamp()),
             )
         return group_id
 
@@ -94,11 +94,11 @@ class GroupRepo:
         row = self.conn.execute("SELECT * FROM protection_group WHERE id=?", (group_id,)).fetchone()
         return dict(row) if row else None
 
-    def count(self) -> int:
+    def count_active_groups(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) c FROM protection_group WHERE disbanded_at IS NULL").fetchone()
         return int(row["c"])
 
-    def list_for_user(self, user_id: int) -> list[dict]:
+    def list_active_groups_for_user(self, user_id: int) -> list[dict]:
         rows = self.conn.execute(
             "SELECT g.id,g.name,m.id AS membership_id,m.trusted,m.mute,"
             "(SELECT COUNT(*) FROM member x WHERE x.group_id=g.id AND x.ended_at IS NULL) member_count "
@@ -123,7 +123,7 @@ class MemberRepo:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
                 "INSERT INTO member(group_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
-                (group_id, user_id, name, int(trusted and user_id is not None), utcnow()),
+                (group_id, user_id, name, int(trusted and user_id is not None), utc_timestamp()),
             )
         return int(cur.lastrowid)
 
@@ -159,7 +159,7 @@ class MemberRepo:
               "AND m.user_id IS NOT NULL AND m.ended_at IS NULL AND g.disbanded_at IS NULL ORDER BY g.id,m.id"
         return [self._model(r) for r in self.conn.execute(sql, group_ids).fetchall()]
 
-    def set_openid(self, member_id: int, openid: str) -> User:
+    def bind_member_to_user_by_openid(self, member_id: int, openid: str) -> User:
         user = self.users.get_or_create(openid)
         try:
             with WRITE_LOCK, self.conn:
@@ -194,7 +194,7 @@ class MemberRepo:
         with WRITE_LOCK, self.conn:
             self.conn.execute("UPDATE member SET mute=? WHERE id=? AND ended_at IS NULL", (int(mute), member_id))
 
-    def rename(self, member_id: int, name: str) -> None:
+    def rename_member(self, member_id: int, name: str) -> None:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
                 "UPDATE member SET name=? WHERE id=? AND ended_at IS NULL", (name, member_id)
@@ -202,7 +202,7 @@ class MemberRepo:
             if cur.rowcount != 1:
                 raise ValidationError("member not found")
 
-    def trusted_count(self, group_id: int, exclude_id: int | None = None) -> int:
+    def count_trusted_members(self, group_id: int, exclude_id: int | None = None) -> int:
         sql = "SELECT COUNT(*) c FROM member WHERE group_id=? AND trusted=1 AND user_id IS NOT NULL AND ended_at IS NULL"
         params: list = [group_id]
         if exclude_id is not None:
@@ -210,7 +210,7 @@ class MemberRepo:
             params.append(exclude_id)
         return int(self.conn.execute(sql, params).fetchone()["c"])
 
-    def bound_count(self, group_id: int, exclude_id: int | None = None) -> int:
+    def count_bound_members(self, group_id: int, exclude_id: int | None = None) -> int:
         sql = "SELECT COUNT(*) c FROM member WHERE group_id=? AND user_id IS NOT NULL AND ended_at IS NULL"
         params: list = [group_id]
         if exclude_id is not None:
@@ -238,7 +238,7 @@ class QueryRepo:
                 memberships = [m for m in memberships if (m.id, m.group_id) in allowed]
                 if not memberships:
                     raise ValidationError("user has no active group")
-                now = utcnow()
+                now = utc_timestamp()
                 cur = self.conn.execute(
                     "INSERT INTO query(user_id,content_type,content,msg_id,created_at) VALUES(?,?,?,?,?)",
                     (user_id, content_type, content, msg_id, now),
@@ -253,7 +253,7 @@ class QueryRepo:
             raise DuplicateMessage(msg_id or "") from e
         return qid
 
-    def exists_by_msg_id(self, msg_id: str) -> dict | None:
+    def find_by_msg_id(self, msg_id: str) -> dict | None:
         row = self.conn.execute("SELECT id,user_id FROM query WHERE msg_id=?", (msg_id,)).fetchone()
         return dict(row) if row else None
 
@@ -261,7 +261,7 @@ class QueryRepo:
         row = self.conn.execute("SELECT * FROM query WHERE id=?", (query_id,)).fetchone()
         return dict(row) if row else None
 
-    def groups(self, query_id: int) -> list[dict]:
+    def list_groups_for_query(self, query_id: int) -> list[dict]:
         rows = self.conn.execute(
             "SELECT qg.group_id,qg.query_member_id,g.name,g.disbanded_at FROM query_group qg "
             "JOIN protection_group g ON g.id=qg.group_id WHERE qg.query_id=? ORDER BY qg.group_id",
@@ -269,7 +269,7 @@ class QueryRepo:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def count(self, group_id: int, since: int) -> int:
+    def count_queries_for_group_since(self, group_id: int, since: int) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) c FROM query_group qg JOIN query q ON q.id=qg.query_id "
             "WHERE qg.group_id=? AND q.created_at>=?", (group_id, since),
@@ -289,7 +289,7 @@ class VerdictRepo:
                 "INSERT INTO verdict(query_id,level,cited_ids,features,reason,reply,latency_ms,mode,created_at)"
                 " VALUES(?,?,?,?,?,?,?,?,?)",
                 (query_id, level.value, json.dumps(cited_ids), json.dumps(features_snapshot, ensure_ascii=False),
-                 reason, reply, latency_ms, mode.value, utcnow()),
+                 reason, reply, latency_ms, mode.value, utc_timestamp()),
             )
         return int(cur.lastrowid)
 
@@ -304,7 +304,7 @@ class VerdictRepo:
         ).fetchone()
         return dict(row) if row else None
 
-    def count_dangerous(self, group_id: int, since: int) -> int:
+    def count_dangerous_verdicts_for_group(self, group_id: int, since: int) -> int:
         row = self.conn.execute(
             "SELECT COUNT(DISTINCT a.verdict_id) c FROM alert a JOIN member m ON m.id=a.membership_id "
             "JOIN verdict v ON v.id=a.verdict_id WHERE m.group_id=? AND a.delivered_at>=? "
@@ -318,7 +318,7 @@ class AlertRepo:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
 
-    def create_for_verdict(self, verdict_id: int, query_id: int) -> dict:
+    def record_alerts_for_verdict(self, verdict_id: int, query_id: int) -> dict:
         """写入判定时仍活跃的接收关系,并按 user 聚合收件人。"""
         recipients: dict[int, dict] = {}
         generated_groups: dict[int, str] = {}
@@ -333,7 +333,7 @@ class AlertRepo:
                 "JOIN user u ON u.id=m.user_id WHERE qg.query_id=? ORDER BY m.user_id,g.id,m.id",
                 (query_id,),
             ).fetchall()
-            now = utcnow()
+            now = utc_timestamp()
             for r in rows:
                 self.conn.execute(
                     "INSERT OR IGNORE INTO alert(verdict_id,membership_id,group_name_at_alert,delivered_at)"
@@ -352,7 +352,7 @@ class AlertRepo:
         return {"queryer_id":queryer_id,"query_group_count":len(query_groups),
                 "generated_group_names":names,"recipients":list(recipients.values())}
 
-    def push_context(self, verdict_id: int, user_id: int) -> dict | None:
+    def get_push_context_for_user(self, verdict_id: int, user_id: int) -> dict | None:
         rows = self.conn.execute(
             "SELECT a.membership_id,m.group_id,m.mute,a.group_name_at_alert name,u.openid,u.token "
             "FROM alert a JOIN member old ON old.id=a.membership_id "
@@ -370,7 +370,7 @@ class AlertRepo:
         return {"openid":rows[0]["openid"],"token":rows[0]["token"],"active_group_count":int(active),
                 "groups":[{"group_id":r["group_id"],"membership_id":r["membership_id"],"name":r["name"]} for r in rows]}
 
-    def list_for_user_group(self, user_id: int, group_id: int, limit: int = 50) -> list[dict]:
+    def list_alerts_for_user_in_group(self, user_id: int, group_id: int, limit: int = 50) -> list[dict]:
         rows = self.conn.execute(
             "SELECT v.id verdict_id,v.level,q.content,MAX(a.delivered_at) delivered_at,"
             "MAX(a.group_name_at_alert) group_name_at_alert FROM alert a "
@@ -383,7 +383,7 @@ class AlertRepo:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def access_detail(self, user_id: int, verdict_id: int) -> tuple[dict | None, str | None]:
+    def get_alert_detail_for_user(self, user_id: int, verdict_id: int) -> tuple[dict | None, str | None]:
         detail = self.conn.execute(
             "SELECT v.id verdict_id,v.level,v.reply,v.created_at,q.content FROM verdict v "
             "JOIN query q ON q.id=v.query_id WHERE v.id=? AND v.level='dangerous'", (verdict_id,),
@@ -429,9 +429,9 @@ class CorrectionRepo:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
 
-    def insert(self, verdict_id: int, user_id: int, memberships: list[Member], label: CorrectionLabel,
+    def create_or_get_correction(self, verdict_id: int, user_id: int, memberships: list[Member], label: CorrectionLabel,
                note: str, status: CorrectionStatus, decided_by: int | None) -> int:
-        now = utcnow()
+        now = utc_timestamp()
         with WRITE_LOCK, self.conn:
             existing = self.conn.execute(
                 "SELECT id FROM correction WHERE verdict_id=? AND by_user_id=?", (verdict_id,user_id),
@@ -467,7 +467,7 @@ class CorrectionRepo:
         row = self.conn.execute("SELECT * FROM correction WHERE verdict_id=? AND by_user_id=?",(verdict_id,user_id)).fetchone()
         return self._to_record(row) if row else None
 
-    def get_with_groups(self, correction_id: int) -> tuple[dict | None,list[dict]]:
+    def get_correction_with_related_groups(self, correction_id: int) -> tuple[dict | None,list[dict]]:
         row = self.conn.execute("SELECT * FROM correction WHERE id=?",(correction_id,)).fetchone()
         groups = self.conn.execute(
             "SELECT cg.group_id,cg.by_membership_id,m.user_id,g.disbanded_at FROM correction_group cg "
@@ -476,17 +476,17 @@ class CorrectionRepo:
         ).fetchall()
         return (dict(row) if row else None,[dict(g) for g in groups])
 
-    def decide(self, correction_id: int, status: CorrectionStatus, decided_by: int) -> None:
+    def decide_correction(self, correction_id: int, status: CorrectionStatus, decided_by: int) -> None:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
                 "UPDATE correction SET status=?,decided_by_membership_id=?,decided_at=? "
                 "WHERE id=? AND status='pending'",
-                (status.value,decided_by,utcnow(),correction_id),
+                (status.value,decided_by,utc_timestamp(),correction_id),
             )
             if cur.rowcount != 1:
                 raise ValidationError("correction already decided")
 
-    def count_group(self, group_id: int, since: int, status: str | None = None, label: str | None = None) -> int:
+    def count_corrections_for_group(self, group_id: int, since: int, status: str | None = None, label: str | None = None) -> int:
         sql = ("SELECT COUNT(*) c FROM correction_group cg JOIN correction c ON c.id=cg.correction_id "
                "WHERE cg.group_id=? AND c.decided_at>=?")
         params: list = [group_id,since]
@@ -498,7 +498,7 @@ class CorrectionRepo:
             params.append(label)
         return int(self.conn.execute(sql,params).fetchone()["c"])
 
-    def list_pending_with_context(self, group_id: int) -> list[dict]:
+    def list_pending_corrections_with_context(self, group_id: int) -> list[dict]:
         rows = self.conn.execute(
             "SELECT c.id,c.label,c.note,c.created_at,submit.name by_name,q.content "
             "FROM correction_group cg JOIN correction c ON c.id=cg.correction_id "
@@ -509,11 +509,11 @@ class CorrectionRepo:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def expire_older_than(self, cutoff: int) -> int:
+    def reject_pending_corrections_before(self, cutoff: int) -> int:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
                 "UPDATE correction SET status='rejected',decided_at=? WHERE status='pending' AND created_at<?",
-                (utcnow(),cutoff),
+                (utc_timestamp(),cutoff),
             )
         return max(0,cur.rowcount)
 
@@ -527,7 +527,7 @@ class BindCodeRepo:
         self.conn = conn
 
     def create(self, member_id: int, created_by: int | None, ttl_days: int) -> dict:
-        now = utcnow()
+        now = utc_timestamp()
         code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
         with WRITE_LOCK, self.conn:
             self.conn.execute(
@@ -538,7 +538,7 @@ class BindCodeRepo:
 
     def claim_and_bind(self, code: str, member_id: int, user_id: int) -> bool:
         """在一个事务内消费邀请码并绑定成员位,任一步失败都保留邀请码。"""
-        now = utcnow()
+        now = utc_timestamp()
         try:
             with WRITE_LOCK, self.conn:
                 row = self.conn.execute(
@@ -569,28 +569,28 @@ class BindCodeRepo:
 
     def invalidate_for_member(self, member_id: int) -> None:
         with WRITE_LOCK, self.conn:
-            self.conn.execute("UPDATE bind_code SET used_at=? WHERE member_id=? AND used_at IS NULL",(utcnow(),member_id))
+            self.conn.execute("UPDATE bind_code SET used_at=? WHERE member_id=? AND used_at IS NULL",(utc_timestamp(),member_id))
 
     def invalidate_group(self, group_id: int) -> None:
         with WRITE_LOCK, self.conn:
             self.conn.execute(
                 "UPDATE bind_code SET used_at=? WHERE used_at IS NULL AND member_id IN "
-                "(SELECT id FROM member WHERE group_id=?)", (utcnow(),group_id),
+                "(SELECT id FROM member WHERE group_id=?)", (utc_timestamp(),group_id),
             )
 
-    def peek(self, code: str) -> dict | None:
+    def get_valid_bind_code(self, code: str) -> dict | None:
         row = self.conn.execute(
             "SELECT bc.* FROM bind_code bc JOIN member m ON m.id=bc.member_id "
             "JOIN protection_group g ON g.id=m.group_id WHERE UPPER(bc.code)=UPPER(?) "
             "AND bc.used_at IS NULL AND bc.expires_at>? AND m.ended_at IS NULL AND g.disbanded_at IS NULL",
-            (code,utcnow()),
+            (code,utc_timestamp()),
         ).fetchone()
         return dict(row) if row else None
 
-    def latest_active(self, member_id: int) -> dict | None:
+    def get_latest_active_bind_code(self, member_id: int) -> dict | None:
         row = self.conn.execute(
             "SELECT code,expires_at FROM bind_code WHERE member_id=? AND used_at IS NULL AND expires_at>? ORDER BY id DESC LIMIT 1",
-            (member_id,utcnow()),
+            (member_id,utc_timestamp()),
         ).fetchone()
         return dict(row) if row else None
 

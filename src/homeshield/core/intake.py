@@ -42,7 +42,7 @@ def ingest(
     if not memberships:
         raise ValueError("user has no active group")
     if msg_id:
-        existed = repos.query.exists_by_msg_id(msg_id)
+        existed = repos.query.find_by_msg_id(msg_id)
         if existed:
             return IntakeResult(message=None, duplicate=True, query_id=int(existed["id"]))
     ctype = detect_content_type(content, content_type)
@@ -54,7 +54,7 @@ def ingest(
         if str(exc) == "user has no active group":
             raise ValueError("user has no active group") from exc
         raise
-    snapshot = repos.query.groups(query_id)
+    snapshot = repos.query.list_groups_for_query(query_id)
     message = Message(
         user_id=user_id,
         group_ids=[g["group_id"] for g in snapshot],

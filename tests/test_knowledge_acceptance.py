@@ -12,7 +12,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from homeshield.core.features import extract_rules
+from homeshield.core.features import extract_rule_features
 from homeshield.core.knowledge.taxonomy import REGISTRY
 from homeshield.core.models import KbCase
 from homeshield.core.retrieval import Retriever
@@ -26,8 +26,8 @@ def _cases() -> list[KbCase]:
 
 
 def _runtime_query(text: str) -> str:
-    """与 pipeline._extract 完全一致的检索 query 构造。"""
-    specs = extract_rules(text)
+    """与 pipeline._extract_features_and_cases 完全一致的检索 query 构造。"""
+    specs = extract_rule_features(text)
     return (" ".join(s.value for s in specs) + " " + text[:80]).strip()
 
 
@@ -35,7 +35,7 @@ def _hit_rate(samples: list) -> tuple[float, list[str]]:
     retr = Retriever(_cases(), None, top_k=3)
     hits, misses = 0, []
     for s in samples:
-        got = asyncio.run(retr.search(_runtime_query(s.text)))
+        got = asyncio.run(retr.search_cases(_runtime_query(s.text)))
         if any(c.scam_type == s.scam_type for c in got):
             hits += 1
         else:
@@ -87,7 +87,7 @@ def test_fr3_hit_rate_on_benign_hard_not_scam_biased():
     retr = Retriever(_cases(), None, top_k=3)
     uniform = 0
     for s in labeled:
-        got = asyncio.run(retr.search(_runtime_query(s.text)))
+        got = asyncio.run(retr.search_cases(_runtime_query(s.text)))
         if len({c.scam_type for c in got}) == 1:
             uniform += 1
     assert uniform <= len(labeled), "检索行为异常"

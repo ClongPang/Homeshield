@@ -5,7 +5,7 @@ from pathlib import Path
 
 from homeshield.core.pipeline import PIPELINE_VERSION, PipelineConfig
 from homeshield.eval.dataset import Sample
-from homeshield.eval.metrics import confusion3x3, fpr, fpr_strict, latency_percentiles, recall
+from homeshield.eval.metrics import confusion3x3, fpr, user_visible_false_positive_rate, latency_percentiles, recall
 
 ABLATION_CONFIGS: dict[str, PipelineConfig] = {
     "A_zero_shot": PipelineConfig.ablation_a(),
@@ -18,7 +18,7 @@ ABLATION_CONFIGS: dict[str, PipelineConfig] = {
 RunFn = Callable[[Sample], Awaitable[tuple[str, int, int]]]  # -> (pred_level, score, latency_ms)
 
 
-async def run_matrix(
+async def run_ablation_matrix(
     factory: Callable[[PipelineConfig], RunFn], samples: list[Sample],
     names: list[str] | None = None, checkpoint: str | None = None,
 ) -> dict[str, dict]:
@@ -58,7 +58,7 @@ async def run_matrix(
                 "confusion": confusion3x3(y_true, y_pred),
                 "recall": round(recall(y_true, y_pred), 3),
                 "fpr": round(fpr(y_true, y_pred), 3),
-                "fpr_strict": round(fpr_strict(y_true, y_pred), 3),
+                "fpr_strict": round(user_visible_false_positive_rate(y_true, y_pred), 3),
                 "latency": latency_percentiles([r[2] for r in rows]),
             }
     finally:

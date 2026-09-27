@@ -1,10 +1,10 @@
 """判定管线编排。
 
 run() 只做编排,四个阶段各司其职:
-    _normalize_text  图片转写,失败降级"请粘贴文字"
-    _extract         规则特征 + LLM 补抽与检索并行,补抽结果只喂 judge
-    _judge           分级判定 + 引用校验/safe 置信门槛重试,耗尽降级"需人工判断"
-    _deliver         规则下限、回复生成、落库、事件发布
+    _extract_message_text                图片转写,失败降级"请粘贴文字"
+    _extract_features_and_cases          规则特征 + LLM 补抽与检索并行,补抽结果只喂 judge
+    _judge_conversation                  分级判定 + 引用校验/safe 置信门槛重试,耗尽降级"需人工判断"
+    _persist_verdict_and_publish_event   规则下限、回复生成、落库、事件发布
 
 阶段开关收敛在 PipelineConfig:产品默认与消融 C 相同,
 A/B 是开关组合,评测与产品共用同一条代码路径。
@@ -20,11 +20,11 @@ from homeshield.core.annotate import FEATURE_MECHANIC, annotate_text
 from homeshield.core.errors import DegradeError
 from homeshield.core.events import EventBus, VerdictCompleted
 from homeshield.core.features import (
-    assign_ids,
-    escalation_feature,
-    extract_rules,
-    rule_floor,
-    supplement_llm,
+    assign_feature_ids,
+    detect_escalation_feature,
+    extract_rule_features,
+    get_rule_risk_floor,
+    supplement_features_with_llm,
 )
 from homeshield.core.judge import Judge, judge_with_validation
 from homeshield.core.llm import LLMPort
@@ -154,18 +154,18 @@ class Pipeline:
     async def run(self, message: Message, query_id: int) -> PipelineResult:
         t0 = time.monotonic()
         try:
-            text = await self._normalize_text(message)
+            text = await self._extract_message_text(message)
             conversation = _to_conversation(text, message.content_type.value)
-            extraction = await self._extract(conversation)
-            verdict = await self._judge(conversation, extraction)
+            extraction = await self._extract_features_and_cases(conversation)
+            verdict = await self._judge_conversation(conversation, extraction)
         except DegradeError as de:
-            return self._degraded(query_id, de.user_message, t0)
-        return await self._deliver(
+            return self._build_degraded_result(query_id, de.user_message, t0)
+        return await self._persist_verdict_and_publish_event(
             message, query_id, conversation.render(), extraction, verdict, t0
         )
 
     # ---- 阶段 1:归一化 ------------------------------------------------
-    async def _normalize_text(self, message: Message) -> str:
+    async def _extract_message_text(self, message: Message) -> str:
         if message.content_type.value != "image":
             return message.content
         try:
@@ -177,25 +177,25 @@ class Pipeline:
             raise DegradeError("图片看不清，请把内容打成文字发我", f"transcribe failed: {e}") from e
 
     # ---- 阶段 2:特征抽取 + 检索 ----------------------------------------
-    async def _extract(self, conversation: Conversation) -> Extraction:
+    async def _extract_features_and_cases(self, conversation: Conversation) -> Extraction:
         rendered = conversation.render()
         rule_specs: list[Feature] = []
         for idx, turn in enumerate(conversation.turns, 1):
-            for spec in extract_rules(turn.text):
+            for spec in extract_rule_features(turn.text):
                 spec.turn = idx  # 逐轮归属:升级检测与证据定位依赖轮次
                 rule_specs.append(spec)
-        escalation = escalation_feature(rule_specs)
+        escalation = detect_escalation_feature(rule_specs)
         if escalation is not None:
             rule_specs.append(escalation)
         # 检索 query:特征值 + 原文片段——纯特征值在弱特征消息(如仅卡号)下失效
         retrieval_query = (" ".join(s.value for s in rule_specs) + " " + rendered[:80]).strip()
         sup_task = (
-            asyncio.ensure_future(supplement_llm(self.llm, rendered))
+            asyncio.ensure_future(supplement_features_with_llm(self.llm, rendered))
             if self.config.llm_features
             else None
         )
         ret_task = (
-            asyncio.ensure_future(self.retriever.search(retrieval_query))
+            asyncio.ensure_future(self.retriever.search_cases(retrieval_query))
             if self.config.retrieval
             else None
         )
@@ -212,16 +212,16 @@ class Pipeline:
         except Exception:
             logger.warning("retrieval failed, judge without cases", exc_info=True)
         return Extraction(
-            features=assign_ids(rule_specs + sup),
+            features=assign_feature_ids(rule_specs + sup),
             cases=cases,
-            rule_floor=rule_floor(rule_specs),
+            rule_floor=get_rule_risk_floor(rule_specs),
             conversation=conversation,
         )
 
     # ---- 阶段 3:判定 ----------------------------------------------------
-    async def _judge(self, conversation: Conversation, extraction: Extraction) -> JudgeOutput:
+    async def _judge_conversation(self, conversation: Conversation, extraction: Extraction) -> JudgeOutput:
         rendered = conversation.render()
-        cap = 4000 if conversation.multi else 2000
+        cap = 4000 if conversation.is_multi_turn else 2000
         annotated = (
             annotate_text(rendered, extraction.features)
             if self.config.inline_annotation
@@ -243,7 +243,7 @@ class Pipeline:
         )
 
     # ---- 阶段 4:交付 ----------------------------------------------------
-    async def _deliver(
+    async def _persist_verdict_and_publish_event(
         self,
         message: Message,
         query_id: int,
@@ -288,7 +288,7 @@ class Pipeline:
             rule_floor_level=extraction.rule_floor,
         )
 
-    def _degraded(self, query_id: int, reply: str, t0: float, floor: Level = Level.SAFE) -> PipelineResult:
+    def _build_degraded_result(self, query_id: int, reply: str, t0: float, floor: Level = Level.SAFE) -> PipelineResult:
         return PipelineResult(
             query_id=query_id,
             reply=reply,

@@ -27,11 +27,11 @@ class FakeChannel:
 
 
 def test_classify():
-    assert WeChatChannel.classify({"MsgType": "event", "Event": "subscribe"}) == "subscribe"
-    assert WeChatChannel.classify({"MsgType": "event", "Event": "unsubscribe"}) == "ignore"
-    assert WeChatChannel.classify({"MsgType": "text", "Content": "x"}) == "text"
-    assert WeChatChannel.classify({"MsgType": "image"}) == "image"
-    assert WeChatChannel.classify({"MsgType": "voice"}) == "unsupported"
+    assert WeChatChannel.classify_callback_message({"MsgType": "event", "Event": "subscribe"}) == "subscribe"
+    assert WeChatChannel.classify_callback_message({"MsgType": "event", "Event": "unsubscribe"}) == "ignore"
+    assert WeChatChannel.classify_callback_message({"MsgType": "text", "Content": "x"}) == "text"
+    assert WeChatChannel.classify_callback_message({"MsgType": "image"}) == "image"
+    assert WeChatChannel.classify_callback_message({"MsgType": "voice"}) == "unsupported"
 
 
 def test_wechat_wiring_off_without_creds(deps):
@@ -217,7 +217,7 @@ def test_bind_command_joins_group(tmp_path):
     group_id = deps.repos.group.create("测试家庭")
     trusted_id = deps.repos.member.add(group_id, "儿子", trusted=True)
     elder_id = deps.repos.member.add(group_id, "妈妈")
-    code = deps.binding.issue_code(deps.repos.member.get(elder_id), created_by=trusted_id)
+    code = deps.binding.issue_bind_code(deps.repos.member.get(elder_id), created_by=trusted_id)
 
     r = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code'].lower()}]]></Content>"))
     assert "绑定成功" in r.text and "测试家庭" in r.text and "妈妈" in r.text  # 家庭名+成员名
@@ -242,14 +242,14 @@ def test_bind_already_in_group_gets_correct_reply(tmp_path):
     existing = deps.repos.member.add(group_id, "妈妈", openid="o_user")
     trusted = deps.repos.member.add(group_id, "儿子", trusted=True, openid="o_son")
     slot = deps.repos.member.add(group_id, "妈妈的新邀请位")
-    code = deps.binding.issue_code(deps.repos.member.get(slot), created_by=trusted)
+    code = deps.binding.issue_bind_code(deps.repos.member.get(slot), created_by=trusted)
 
     response = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code']}]]></Content>"))
 
     assert messages.BIND_ALREADY in response.text
     assert messages.BIND_INVALID not in response.text
     assert deps.repos.member.get(slot).user_id is None
-    assert deps.repos.bind_code.peek(code["code"]) is not None
+    assert deps.repos.bind_code.get_valid_bind_code(code["code"]) is not None
 
 
 def test_unbound_text_gets_guide_not_judged(tmp_path):
@@ -259,7 +259,7 @@ def test_unbound_text_gets_guide_not_judged(tmp_path):
     assert messages.BIND_GUIDE in r.text
     deps = client.app.state.deps
     assert deps.repos.users.get_by_openid("o_user") is None
-    assert deps.repos.query.count(1, 0) == 0  # 无判定落库
+    assert deps.repos.query.count_queries_for_group_since(1, 0) == 0  # 无判定落库
 
 
 def test_bound_member_text_still_ack_and_judged(tmp_path):
