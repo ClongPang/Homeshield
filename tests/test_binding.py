@@ -11,9 +11,9 @@ def service(deps):
     s = deps.settings
     return BindingService(
         deps.repos,
-        max_total_groups=s.max_total_groups,
         max_members=s.max_members,
         code_ttl_days=s.bind_code_ttl_days,
+        max_groups=s.max_groups,
     )
 
 
@@ -35,7 +35,6 @@ def test_identity_can_create_multiple_groups_atomically(deps):
 
     with pytest.raises(sqlite3.IntegrityError):
         deps.repos.group.create_with_creator("坏群", "群主", 999999)
-    assert deps.repos.group.count_active_groups() == 2
     assert len(deps.repos.member.list_for_user(creator.id)) == 2
 
 
@@ -46,12 +45,16 @@ def test_create_initial_group_twice_rejected(service):
     assert e.value.reason == "already_has_groups"
 
 
-def test_create_initial_group_stops_at_max_total_groups(service, deps):
-    for i in range(deps.settings.max_total_groups):
-        deps.repos.group.create(f"f{i}")
-    with pytest.raises(BindingError) as e:
-        service.create_initial_group("o_a")
-    assert e.value.reason == "limit"
+def test_service_has_no_global_group_count_limit(service, deps):
+    group_ids = []
+    for i in range(101):
+        user = deps.repos.users.get_or_create(f"openid:{i}")
+        group_ids.append(service.create_group(user.id, f"群{i}").group_id)
+
+    assert len(set(group_ids)) == 101
+    assert deps.conn.execute(
+        "SELECT COUNT(*) FROM protection_group WHERE disbanded_at IS NULL"
+    ).fetchone()[0] == 101
 
 
 def test_issue_and_bind_flow(service, deps, group):
@@ -136,6 +139,29 @@ def test_bind_openid_taken_maps_to_already_bound(service, deps, group):
         service.bind_member_with_invite_code("test:mom", code["code"])
     assert e.value.reason == "already_in_group"
     assert deps.repos.member.get(target).user_id is None
+
+
+def test_bind_rejects_user_at_active_group_limit(deps):
+    user = deps.repos.users.get_or_create("o_mom")
+    for name in ("已有群A", "已有群B"):
+        deps.repos.group.create_with_creator(name, "群主", user.id)
+
+    target_group = deps.repos.group.create("待加入群")
+    target_id = deps.repos.member.add(target_group, "妈妈")
+    service = BindingService(
+        deps.repos,
+        max_members=deps.settings.max_members,
+        code_ttl_days=deps.settings.bind_code_ttl_days,
+        max_groups=2,
+    )
+    code = service.issue_bind_code(deps.repos.member.get(target_id), created_by=1)
+
+    with pytest.raises(BindingError) as exc:
+        service.bind_member_with_invite_code("o_mom", code["code"])
+
+    assert exc.value.reason == "group_limit"
+    assert deps.repos.member.get(target_id).user_id is None
+    assert deps.repos.bind_code.get_valid_bind_code(code["code"]) is not None
 
 
 def test_failed_binding_transaction_keeps_invitation_reusable(service, deps, group):

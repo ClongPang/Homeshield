@@ -31,8 +31,8 @@ class MemberIn(PayloadModel):
 
 
 class GroupIn(PayloadModel):
-    token: str
-    name: str
+    token: str                  # 识别当前用户，用于鉴权
+    name: str                   # 群名称
 
 
 class MemberPatchIn(PayloadModel):

@@ -23,7 +23,7 @@ uv run homeshield-cli link --member-id <成员ID> --base-url http://localhost:80
 
 演示身份不触发微信推送;不带 `--demo-user`/`--openid` 的 `add-member` 只建未绑定成员位。配置:复制 `.env.example` 为 `.env`,`MODE=llm` 时填 OpenAI 兼容接口与微信参数。
 
-命名更新：部署配置 `MAX_FAMILIES` 改为 `MAX_TOTAL_GROUPS`，CLI `add-family/--family-id` 改为 `add-group/--group-id`；旧 Python 名称 `api.family`、`repos.family`、`FamilyRepo` 已移除。SQLite 只按当前 `protection_group/group_id` 结构建库，不包含旧库迁移；HTTP 路径本来就是 `/api/groups`。
+命名更新：CLI `add-family/--family-id` 改为 `add-group/--group-id`；旧 Python 名称 `api.family`、`repos.family`、`FamilyRepo` 已移除。SQLite 只按当前 `protection_group/group_id` 结构建库，不包含旧库迁移；HTTP 路径本来就是 `/api/groups`。
 
 ## 目录
 
@@ -118,9 +118,9 @@ mock、种子样例、合成数据只有两个合法用途:**CI 管道回归**�
 3. 加入:家人关注公众号回复`绑定 <码>`即加入该群,同一微信号可加入多个群;
 4. 用户退出全部群后仍保留个人身份,可裸回复`开通`新建群;未绑定者的其他消息只收到引导,不判定、不落库。
 
-护栏:`MAX_TOTAL_GROUPS`(部署内活跃群总数,默认 100)、`MAX_GROUPS`(每个用户的活跃群数,默认 10)、`MAX_MEMBERS`(每群活跃成员位数,默认 10)、`BIND_CODE_TTL_DAYS`(邀请码有效期,默认 7 天)。CLI 的 `add-group/add-member/link/disband` 保留为运维与演示工具。
+服务级活跃群数不设上限。护栏配置见 `.env.example`:`MAX_GROUPS`(每个用户可创建或加入的活跃群数,默认 10)、`MAX_MEMBERS`(每群活跃成员位数,默认 10)、`BIND_CODE_TTL_DAYS`(邀请码有效期,默认 7 天)。CLI 的 `add-group/add-member/link/disband` 保留为运维与演示工具。
 
 ## 安全状态
 
 - 已完成:家人 API 以 user 级不可枚举 token 鉴权;`/wechat/callback` 平台签名校验;多群告警/历史授权/纠正队列按成员关系隔离;信任成员护栏与历史保留;绑定码一次性原子认领,过期/重发即失效。实施与验收记录见多群实施规格 §8.1。
-- 待办:前端渲染统一转义(防 XSS);生产微信加密模式与 IP 白名单;按群的 LLM 用量配额(当前滥用边界 = MAX_TOTAL_GROUPS × MAX_MEMBERS × 查询频次)。
+- 待办:前端渲染统一转义(防 XSS);生产微信加密模式与 IP 白名单;按群的 LLM 用量配额。`MAX_GROUPS` 与 `MAX_MEMBERS` 限制单用户和单群规模,不构成服务级总量配额。

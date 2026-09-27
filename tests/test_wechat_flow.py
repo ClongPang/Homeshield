@@ -210,6 +210,16 @@ def test_open_twice_rejected(tmp_path):
     assert "我的防护群" in listed.text and "岳父家" in listed.text
 
 
+def test_open_user_group_limit_shows_current_limit(tmp_path):
+    client = _client(tmp_path, max_groups=1)
+    _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[开通 第一群]]></Content>"))
+
+    response = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[开通 第二群]]></Content>"))
+
+    assert "一个用户最多可加入1个防护群" in response.text
+    assert client.app.state.deps.repos.group.get(2) is None
+
+
 def test_bind_command_joins_group(tmp_path):
     """家人回复「绑定 码」:openid 落到成员位,回绑定成功。"""
     client = _client(tmp_path)
@@ -249,6 +259,22 @@ def test_bind_already_in_group_gets_correct_reply(tmp_path):
     assert messages.BIND_ALREADY in response.text
     assert messages.BIND_INVALID not in response.text
     assert deps.repos.member.get(slot).user_id is None
+    assert deps.repos.bind_code.get_valid_bind_code(code["code"]) is not None
+
+
+def test_bind_group_limit_gets_correct_reply(tmp_path):
+    client = _client(tmp_path, max_groups=1)
+    deps = client.app.state.deps
+    user = deps.repos.users.get_or_create("o_user")
+    deps.repos.group.create_with_creator("已有群", "群主", user.id)
+    target_group = deps.repos.group.create("待加入群")
+    target_id = deps.repos.member.add(target_group, "妈妈")
+    code = deps.binding.issue_bind_code(deps.repos.member.get(target_id), created_by=1)
+
+    response = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code']}]]></Content>"))
+
+    assert messages.BIND_GROUP_LIMIT in response.text
+    assert deps.repos.member.get(target_id).user_id is None
     assert deps.repos.bind_code.get_valid_bind_code(code["code"]) is not None
 
 

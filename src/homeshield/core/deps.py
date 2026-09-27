@@ -91,7 +91,6 @@ def build_deps(settings: Settings) -> Deps:
     verification = VerificationService(repos, pipeline)
     binding = BindingService(
         repos,
-        max_total_groups=settings.max_total_groups,
         max_members=settings.max_members,
         code_ttl_days=settings.bind_code_ttl_days,
         max_groups=settings.max_groups,

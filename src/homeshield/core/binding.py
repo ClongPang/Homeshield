@@ -32,12 +32,11 @@ class BindingError(HomeshieldError):
 
 
 class BindingService:
-    def __init__(self, repos: Repos, max_total_groups: int, max_members: int,
-                 code_ttl_days: int, max_groups: int | None = None):
+    def __init__(self, repos: Repos, max_members: int, code_ttl_days: int,
+                 max_groups: int):
         self.repos = repos
-        self.max_total_groups = max_total_groups
         self.max_members = max_members
-        self.max_groups = max_groups or max_total_groups
+        self.max_groups = max_groups
         self.code_ttl_days = code_ttl_days
 
     def create_initial_group(self, openid: str, name: str | None = None) -> Member:
@@ -52,10 +51,8 @@ class BindingService:
         if not name:
             raise BindingError("invalid_name")
         with WRITE_LOCK:
-            if self.repos.group.count_active_groups() >= self.max_total_groups:
-                raise BindingError("limit")
             if len(self.repos.group.list_active_groups_for_user(user_id)) >= self.max_groups:
-                raise BindingError("group_limit")
+                raise BindingError(f"一个用户最多可加入{self.max_groups}个防护群，你当前已达上限")
             group_id = self.repos.group.create_with_creator(name, CREATOR_NAME, user_id)
             member = next(m for m in self.repos.member.list_for_user(user_id) if m.group_id == group_id)
             return member
@@ -77,8 +74,11 @@ class BindingService:
             if target is None or target.user_id is not None or target.ended_at is not None:
                 raise BindingError("member_bound")
             user = self.repos.users.get_or_create(openid)
-            if any(m.group_id == target.group_id for m in self.repos.member.list_for_user(user.id)):
+            memberships = self.repos.member.list_for_user(user.id)
+            if any(m.group_id == target.group_id for m in memberships):
                 raise BindingError("already_in_group")
+            if len(memberships) >= self.max_groups:
+                raise BindingError("group_limit")
             try:
                 claimed = self.repos.bind_code.claim_and_bind(code,target.id,user.id)
             except HomeshieldError as exc:

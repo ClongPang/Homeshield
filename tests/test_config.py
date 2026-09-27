@@ -49,6 +49,24 @@ def test_load_scans_env(monkeypatch, tmp_path):
     assert s.get_embedding_provider() is None
 
 
+def test_load_reads_group_capacity_limits_from_env_file(monkeypatch, tmp_path):
+    names = ("MAX_GROUPS", "MAX_MEMBERS")
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    env_file = tmp_path / "limits.env"
+    env_file.write_text(
+        "MAX_GROUPS=4\nMAX_MEMBERS=7\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(env_file=str(env_file))
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+
+    assert settings.max_groups == 4
+    assert settings.max_members == 7
+
+
 def test_llm_routes_tasks_to_providers():
     from homeshield.core.llm import OpenAICompatLLM
 

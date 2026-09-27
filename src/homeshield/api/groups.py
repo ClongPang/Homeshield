@@ -59,15 +59,14 @@ def build_group_router(
         return member
 
     @router.get(
-
         "/api/join/{code}",
-
         operation_id="api_join_info_api_join__code__get",
-
         summary="Api Join Info",
-
     )
     def api_get_join_invite_details(code: str):
+        """
+            根据绑定码查询绑定信息，绑定码--绑定member--绑定群组
+        """
         row = deps.repos.bind_code.get_valid_bind_code(code)
         if row is None:
             raise HTTPException(404, "invitation unavailable")
@@ -85,15 +84,14 @@ def build_group_router(
             raise HTTPException(400, str(e)) from e
 
     @router.get(
-
         "/api/groups",
-
         operation_id="api_groups_api_groups_get",
-
         summary="Api Groups",
-
     )
     def api_list_user_groups(token: str = Query("")):
+        """
+            查询输出全局用户加入的每个群组信息
+        """
         user = require_user_by_token(token)
         return {"groups": [
             {"id": g["id"], "name": g["name"], "trusted": bool(g["trusted"]),
@@ -104,6 +102,9 @@ def build_group_router(
 
     @router.post("/api/groups")
     def api_create_group(body: GroupIn):
+        """
+            创建群组（创建者 iD 和群组名称），并返回信息
+        """
         user = require_user_by_token(body.token)
         try:
             admin = deps.binding.create_group(user.id, body.name)
@@ -127,13 +128,9 @@ def build_group_router(
         return {"disbanded": True, "group_id": gid}
 
     @router.post(
-
         "/api/query",
-
         operation_id="api_query_api_query_post",
-
         summary="Api Query",
-
     )
     async def api_verify_message(body: QueryIn):
         user = require_user_by_token(body.token)
@@ -160,13 +157,9 @@ def build_group_router(
         }
 
     @router.get(
-
         "/api/stream",
-
         operation_id="api_stream_api_stream_get",
-
         summary="Api Stream",
-
     )
     async def api_stream_alert_events(token: str = Query("")):
         user = require_user_by_token(token)
@@ -190,13 +183,9 @@ def build_group_router(
         return StreamingResponse(stream_authorized_alert_events(), media_type="text/event-stream")
 
     @router.get(
-
         "/api/alerts",
-
         operation_id="api_alerts_api_alerts_get",
-
         summary="Api Alerts",
-
     )
     def api_list_group_alerts(token: str = Query(""), group_id: int | None = Query(None)):
         user = require_user_by_token(token)
@@ -227,13 +216,9 @@ def build_group_router(
         }
 
     @router.get(
-
         "/api/corrections",
-
         operation_id="api_corrections_list_api_corrections_get",
-
         summary="Api Corrections List",
-
     )
     def api_list_pending_group_corrections(token: str = Query(""), group_id: int | None = Query(None)):
         user = require_user_by_token(token)
@@ -244,13 +229,9 @@ def build_group_router(
         return {"group_id": group["id"], "viewer_trusted": viewer.trusted, "pending": rows}
 
     @router.post(
-
         "/api/corrections",
-
         operation_id="api_corrections_api_corrections_post",
-
         summary="Api Corrections",
-
     )
     def api_submit_correction(body: CorrectionIn):
         user = require_user_by_token(body.token)
@@ -263,13 +244,9 @@ def build_group_router(
         return {"correction_id": cid, "status": status.value}
 
     @router.post(
-
         "/api/corrections/{cid}/confirm",
-
         operation_id="api_confirm_api_corrections__cid__confirm_post",
-
         summary="Api Confirm",
-
     )
     def api_decide_correction(cid: int, body: DecideIn):
         user = require_user_by_token(body.token)
@@ -289,13 +266,9 @@ def build_group_router(
         return {"status": status.value}
 
     @router.get(
-
         "/api/weekly",
-
         operation_id="api_weekly_api_weekly_get",
-
         summary="Api Weekly",
-
     )
     def api_get_group_weekly_report(token: str = Query(""), group_id: int | None = Query(None)):
         user = require_user_by_token(token)
@@ -304,13 +277,9 @@ def build_group_router(
             return build_group_weekly_report(deps.repos, group["id"])
 
     @router.get(
-
         "/api/groups/{gid}/members",
-
         operation_id="api_members_api_groups__gid__members_get",
-
         summary="Api Members",
-
     )
     def api_list_group_members(gid: int, token: str = Query("")):
         user = require_user_by_token(token)
@@ -327,13 +296,9 @@ def build_group_router(
             }
 
     @router.post(
-
         "/api/groups/{gid}/members",
-
         operation_id="api_add_member_api_groups__gid__members_post",
-
         summary="Api Add Member",
-
     )
     def api_create_member_slot_and_issue_bind_code(gid: int, body: MemberIn):
         user = require_user_by_token(body.token)
@@ -378,13 +343,9 @@ def build_group_router(
         return {"member_id": member_id, "trusted": body.trusted}
 
     @router.delete(
-
         "/api/groups/{gid}/members/{member_id}",
-
         operation_id="api_remove_member_api_groups__gid__members__member_id__delete",
-
         summary="Api Remove Member",
-
     )
     def api_end_group_membership(gid: int, member_id: int, body: TokenIn):
         user = require_user_by_token(body.token)
@@ -414,13 +375,9 @@ def build_group_router(
         return {"member_id": member_id, "name": name}
 
     @router.post(
-
         "/api/groups/{gid}/mute",
-
         operation_id="api_mute_api_groups__gid__mute_post",
-
         summary="Api Mute",
-
     )
     def api_set_group_mute_for_user(gid: int, body: MuteIn):
         user = require_user_by_token(body.token)

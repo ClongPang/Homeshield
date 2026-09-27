@@ -94,10 +94,6 @@ class GroupRepo:
         row = self.conn.execute("SELECT * FROM protection_group WHERE id=?", (group_id,)).fetchone()
         return dict(row) if row else None
 
-    def count_active_groups(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) c FROM protection_group WHERE disbanded_at IS NULL").fetchone()
-        return int(row["c"])
-
     def list_active_groups_for_user(self, user_id: int) -> list[dict]:
         rows = self.conn.execute(
             "SELECT g.id,g.name,m.id AS membership_id,m.trusted,m.mute,"

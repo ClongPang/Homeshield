@@ -93,6 +93,8 @@ def _handle_membership_command(deps: Deps, user, openid: str, kind: str, text: s
         except BindingError as exc:
             if exc.reason == "already_in_group":
                 return messages.BIND_ALREADY
+            if exc.reason == "group_limit":
+                return messages.BIND_GROUP_LIMIT
             if exc.reason == "retry":
                 return messages.BIND_RETRY
             return messages.BIND_INVALID
@@ -118,7 +120,7 @@ def _handle_membership_command(deps: Deps, user, openid: str, kind: str, text: s
             try:
                 admin = deps.binding.create_initial_group(openid,open_name or None)
             except BindingError as e:
-                return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else messages.BIND_ALREADY
+                return messages.BIND_ALREADY if e.reason == "already_has_groups" else e.reason
         elif not open_name:
             groups = deps.repos.group.list_active_groups_for_user(user.id)
             if groups:
@@ -128,12 +130,12 @@ def _handle_membership_command(deps: Deps, user, openid: str, kind: str, text: s
             try:
                 admin = deps.binding.create_initial_group(openid)
             except BindingError as e:
-                return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else messages.BIND_ALREADY
+                return messages.BIND_ALREADY if e.reason == "already_has_groups" else e.reason
         else:
             try:
                 admin = deps.binding.create_group(user.id,open_name)
             except BindingError as e:
-                return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else "群名不能为空。"
+                return "群名不能为空。" if e.reason == "invalid_name" else e.reason
     elif exit_name is not None or disband_name is not None:
         if user is None:
             return messages.BIND_GUIDE
