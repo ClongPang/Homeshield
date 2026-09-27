@@ -74,8 +74,8 @@ def test_welcome_sends_guide_only_no_autobind(deps):
     assert deps.repos.users.get_by_openid("o_new") is None
 
 
-def test_pipeline_crash_becomes_fallback_reply(deps, family, monkeypatch):
-    fid, elder_id, _ = family
+def test_pipeline_crash_becomes_fallback_reply(deps, group, monkeypatch):
+    group_id, elder_id, _ = group
 
     async def boom(message, query_id):
         raise RuntimeError("llm down")
@@ -86,10 +86,10 @@ def test_pipeline_crash_becomes_fallback_reply(deps, family, monkeypatch):
     assert outcome.result.degraded and outcome.result.reply == messages.LOOK_FAILED
 
 
-def test_template_message_carries_console_link(deps, family):
-    fid, elder_id, _ = family
+def test_template_message_carries_console_link(deps, group):
+    group_id, elder_id, _ = group
     elder = deps.repos.member.get(elder_id)
-    adult_member = deps.repos.member.get(deps.repos.member.add(fid, "女儿", openid="o_adult"))
+    adult_member = deps.repos.member.get(deps.repos.member.add(group_id, "女儿", openid="o_adult"))
     adult = deps.repos.users.get(adult_member.user_id)
     fake = FakeChannel()
     router = deps.alert_router
@@ -145,7 +145,7 @@ def _qs():
     return f"signature={_sign('t', ts, nonce)}&timestamp={ts}&nonce={nonce}"
 
 
-def test_open_command_creates_family_and_admin(tmp_path):
+def test_open_command_creates_group_and_admin(tmp_path):
     """「开通」自助建群:同步回控制台链接,创建者在群内拥有信任权限。"""
     client = _client(tmp_path, public_base_url="http://shield.test")
     r = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[开通]]></Content>"))
@@ -155,8 +155,8 @@ def test_open_command_creates_family_and_admin(tmp_path):
     admin = deps.repos.users.get_by_openid("o_user")
     member = deps.repos.member.list_for_user(admin.id)[0]
     assert admin is not None and member.trusted is True
-    fam = deps.repos.family.get(member.family_id)
-    assert fam is not None
+    group_row = deps.repos.group.get(member.group_id)
+    assert group_row is not None
     assert admin.token in r.text and f"/console?token={admin.token}" in r.text
 
 
@@ -166,7 +166,7 @@ def test_exit_preserves_identity_and_bare_open_reuses_it(tmp_path):
     deps=client.app.state.deps
     user=deps.repos.users.get_by_openid("o_user")
     creator=deps.repos.member.list_for_user(user.id)[0]
-    second_id=deps.repos.member.add(creator.family_id,"女儿",openid="o_daughter")
+    second_id=deps.repos.member.add(creator.group_id,"女儿",openid="o_daughter")
     deps.repos.member.set_trust(second_id,True)
 
     exited=_post_callback(client,_qs(),_xml("text","<Content><![CDATA[退出 妈妈家]]></Content>"))
@@ -190,7 +190,7 @@ def test_creator_can_disband_by_group_name(tmp_path):
     creator=deps.repos.member.list_for_user(user.id)[0]
     response=_post_callback(client,_qs(),_xml("text","<Content><![CDATA[解散 妈妈家]]></Content>"))
     assert "已解散" in response.text
-    assert deps.repos.family.get(creator.family_id)["disbanded_at"] is not None
+    assert deps.repos.group.get(creator.group_id)["disbanded_at"] is not None
     assert deps.repos.member.get(creator.id).end_reason=="disbanded"
 
 
@@ -210,13 +210,13 @@ def test_open_twice_rejected(tmp_path):
     assert "我的防护群" in listed.text and "岳父家" in listed.text
 
 
-def test_bind_command_joins_family(tmp_path):
+def test_bind_command_joins_group(tmp_path):
     """家人回复「绑定 码」:openid 落到成员位,回绑定成功。"""
     client = _client(tmp_path)
     deps = client.app.state.deps
-    fid = deps.repos.family.create("测试家庭")
-    trusted_id = deps.repos.member.add(fid, "儿子", trusted=True)
-    elder_id = deps.repos.member.add(fid, "妈妈")
+    group_id = deps.repos.group.create("测试家庭")
+    trusted_id = deps.repos.member.add(group_id, "儿子", trusted=True)
+    elder_id = deps.repos.member.add(group_id, "妈妈")
     code = deps.binding.issue_code(deps.repos.member.get(elder_id), created_by=trusted_id)
 
     r = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code'].lower()}]]></Content>"))
@@ -238,10 +238,10 @@ def test_bind_invalid_code_replies_hint(tmp_path):
 def test_bind_already_in_group_gets_correct_reply(tmp_path):
     client = _client(tmp_path)
     deps = client.app.state.deps
-    fid = deps.repos.family.create("测试家庭")
-    existing = deps.repos.member.add(fid, "妈妈", openid="o_user")
-    trusted = deps.repos.member.add(fid, "儿子", trusted=True, openid="o_son")
-    slot = deps.repos.member.add(fid, "妈妈的新邀请位")
+    group_id = deps.repos.group.create("测试家庭")
+    existing = deps.repos.member.add(group_id, "妈妈", openid="o_user")
+    trusted = deps.repos.member.add(group_id, "儿子", trusted=True, openid="o_son")
+    slot = deps.repos.member.add(group_id, "妈妈的新邀请位")
     code = deps.binding.issue_code(deps.repos.member.get(slot), created_by=trusted)
 
     response = _post_callback(client, _qs(), _xml("text", f"<Content><![CDATA[绑定 {code['code']}]]></Content>"))
@@ -266,8 +266,8 @@ def test_bound_member_text_still_ack_and_judged(tmp_path):
     """已绑定成员的普通消息走既有链路:5s 回执 + 异步判定。"""
     client = _client(tmp_path)
     deps = client.app.state.deps
-    fid = deps.repos.family.create("测试家庭")
-    deps.repos.member.add(fid, "妈妈", openid="o_user")
+    group_id = deps.repos.group.create("测试家庭")
+    deps.repos.member.add(group_id, "妈妈", openid="o_user")
 
     r = _post_callback(client, _qs(), _xml("text", "<Content><![CDATA[这是骗子吗]]></Content>"))
     assert messages.RECEIVED_ACK in r.text

@@ -18,12 +18,12 @@ class CorrectionService:
                 raise ValidationError("verdict not found")
             active = self.repos.member.list_for_user(user_id)
             if detail["level"] == Level.DANGEROUS.value:
-                eligible = [m for m in active if self.repos.alert.family_was_recipient(verdict_id,user_id,m.family_id)]
+                eligible = [m for m in active if self.repos.alert.group_was_recipient(verdict_id,user_id,m.group_id)]
             else:
                 if detail["user_id"] != user_id:
                     raise ValidationError("only queryer can correct a private verdict")
-                qgroups = {g["family_id"] for g in self.repos.query.groups(detail["query_id"])}
-                eligible = [m for m in active if m.family_id in qgroups]
+                qgroups = {g["group_id"] for g in self.repos.query.groups(detail["query_id"])}
+                eligible = [m for m in active if m.group_id in qgroups]
             if not eligible:
                 raise ValidationError("no active related group for correction")
             existing = self.repos.correction.get_by_verdict_and_user(verdict_id,user_id)
@@ -45,7 +45,7 @@ class CorrectionService:
             record, groups = self.repos.correction.get_with_groups(correction_id)
             if record is None:
                 raise ValidationError("correction not found")
-            allowed = any(g["family_id"]==actor.family_id and g["disbanded_at"] is None for g in groups)
+            allowed = any(g["group_id"]==actor.group_id and g["disbanded_at"] is None for g in groups)
             if not allowed:
                 raise ValidationError("correction not in a related group")
             rec = self.repos.correction.get(correction_id)
@@ -64,13 +64,13 @@ class CorrectionService:
         return self.repos.correction.expire_older_than(utcnow()-max_age_days*86400)
 
 
-def weekly_report(repos: Repos, family_id: int, days: int = 7) -> dict:
+def weekly_report(repos: Repos, group_id: int, days: int = 7) -> dict:
     since = utcnow()-days*86400
     return {
-        "group_id":family_id,
+        "group_id":group_id,
         "days":days,
-        "queries":repos.query.count(family_id,since),
-        "dangerous":repos.verdict.count_dangerous(family_id,since),
-        "false_positives":repos.correction.count_group(family_id,since,"confirmed","false_positive"),
-        "corrections":repos.correction.count_group(family_id,since,"confirmed"),
+        "queries":repos.query.count(group_id,since),
+        "dangerous":repos.verdict.count_dangerous(group_id,since),
+        "false_positives":repos.correction.count_group(group_id,since,"confirmed","false_positive"),
+        "corrections":repos.correction.count_group(group_id,since,"confirmed"),
     }

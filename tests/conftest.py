@@ -16,12 +16,12 @@ def deps(settings):
 
 
 @pytest.fixture()
-def family(deps):
-    """(family_id, untrusted_id, trusted_id)——纠正信任位的两端各一。"""
-    fid = deps.repos.family.create("测试家庭")
-    untrusted = deps.repos.member.add(fid, "妈妈", openid="test:mom")
-    trusted = deps.repos.member.add(fid, "儿子", trusted=True, openid="test:son")
-    return fid, untrusted, trusted
+def group(deps):
+    """(group_id, untrusted_id, trusted_id)——纠正信任位的两端各一。"""
+    group_id = deps.repos.group.create("测试家庭")
+    untrusted = deps.repos.member.add(group_id, "妈妈", openid="test:mom")
+    trusted = deps.repos.member.add(group_id, "儿子", trusted=True, openid="test:son")
+    return group_id, untrusted, trusted
 
 
 def ingest_member(repos, member_id, **kwargs):

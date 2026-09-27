@@ -15,7 +15,7 @@ from homeshield.core.repo import WRITE_LOCK
 from homeshield.core.verification import VerificationService
 
 
-def build_family_router(
+def build_group_router(
     deps: Deps, verification: VerificationService, corrections: CorrectionService
 ) -> APIRouter:
     router = APIRouter()
@@ -27,26 +27,26 @@ def build_family_router(
         return user
 
     def group_for_user(user: User, group_id: int | None) -> dict:
-        groups = deps.repos.family.list_for_user(user.id)
+        groups = deps.repos.group.list_for_user(user.id)
         if group_id is None:
             if len(groups) != 1:
                 if not groups:
                     raise HTTPException(404, "no active group")
-                raise HTTPException(400, "group_id is required")
+                raise HTTPException(400, "group_id is required") # 若用户在多个群组中，需要提供群号标识
             return groups[0]
-        group = next((g for g in groups if g["id"] == group_id), None)
+        group = next((g for g in groups if g["id"] == group_id), None)  # 多个群组，需要进行群号标识的过滤，找到对应的群组
         if group is None:
             raise HTTPException(404, "group not found")
         return group
 
-    def membership(user: User, family_id: int) -> Member:
-        row = next((m for m in deps.repos.member.list_for_user(user.id) if m.family_id == family_id), None)
+    def membership(user: User, group_id: int) -> Member:
+        row = next((m for m in deps.repos.member.list_for_user(user.id) if m.group_id == group_id), None)
         if row is None:
             raise HTTPException(404, "group not found")
         return row
 
-    def require_trusted(user: User, family_id: int) -> Member:
-        member = membership(user, family_id)
+    def require_trusted(user: User, group_id: int) -> Member:
+        member = membership(user, group_id)
         if not member.trusted:
             raise HTTPException(403, "only trusted member can manage group")
         return member
@@ -57,7 +57,7 @@ def build_family_router(
         if row is None:
             raise HTTPException(404, "invitation unavailable")
         target = deps.repos.member.get(int(row["member_id"]))
-        group = deps.repos.family.get(target.family_id) if target else None
+        group = deps.repos.group.get(target.group_id) if target else None
         if target is None or group is None:
             raise HTTPException(404, "invitation unavailable")
         return {"group_name": group["name"], "member_name": target.name,
@@ -75,8 +75,8 @@ def build_family_router(
         return {"groups": [
             {"id": g["id"], "name": g["name"], "trusted": bool(g["trusted"]),
              "mute": bool(g["mute"]), "member_count": g["member_count"],
-             "is_creator": deps.repos.family.get(g["id"])["created_by_user_id"] == user.id}
-            for g in deps.repos.family.list_for_user(user.id)
+             "is_creator": deps.repos.group.get(g["id"])["created_by_user_id"] == user.id}
+            for g in deps.repos.group.list_for_user(user.id)
         ]}
 
     @router.post("/api/groups")
@@ -86,8 +86,8 @@ def build_family_router(
             admin = deps.binding.create_group(user.id, body.name)
         except HomeshieldError as e:
             raise HTTPException(400, str(e)) from e
-        group = deps.repos.family.get(admin.family_id)
-        return {"id": admin.family_id, "name": group["name"], "trusted": True}
+        group = deps.repos.group.get(admin.group_id)
+        return {"id": admin.group_id, "name": group["name"], "trusted": True}
 
     @router.patch("/api/groups/{gid}")
     def api_rename_group(gid: int, body: GroupIn):
@@ -137,7 +137,7 @@ def build_family_router(
             try:
                 while True:
                     payload = await q.get()
-                    current = deps.repos.alert.active_family_ids_for_user(user.id)
+                    current = deps.repos.alert.active_group_ids_for_user(user.id)
                     names_by_id = dict(zip(payload["group_ids"], payload["group_names"]))
                     allowed = [gid for gid in payload["group_ids"] if gid in current]
                     if not allowed:
@@ -206,9 +206,9 @@ def build_family_router(
             record, groups = deps.repos.correction.get_with_groups(cid)
             if record is None:
                 raise HTTPException(404, "correction not found")
-            active = {m.family_id: m for m in deps.repos.member.list_for_user(user.id)}
-            actor = next((active[g["family_id"]] for g in groups
-                          if g["family_id"] in active and active[g["family_id"]].trusted), None)
+            active = {m.group_id: m for m in deps.repos.member.list_for_user(user.id)}
+            actor = next((active[g["group_id"]] for g in groups
+                          if g["group_id"] in active and active[g["group_id"]].trusted), None)
             if actor is None:
                 raise HTTPException(400, "correction not in a related group")
             try:
@@ -266,7 +266,7 @@ def build_family_router(
         with WRITE_LOCK:
             actor = require_trusted(user, gid)
             target = deps.repos.member.get(member_id)
-            if target is None or target.family_id != gid or target.ended_at is not None:
+            if target is None or target.group_id != gid or target.ended_at is not None:
                 raise HTTPException(404, "member not found")
             try:
                 code = deps.binding.issue_code(target, created_by=actor.id)
@@ -303,7 +303,7 @@ def build_family_router(
         with WRITE_LOCK:
             actor = membership(user, gid)
             target = deps.repos.member.get(member_id)
-            if target is None or target.family_id != gid or target.ended_at is not None:
+            if target is None or target.group_id != gid or target.ended_at is not None:
                 raise HTTPException(404, "member not found")
             if target.user_id != user.id and not actor.trusted:
                 raise HTTPException(403, "only member or trusted member can rename")

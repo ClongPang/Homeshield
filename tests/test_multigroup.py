@@ -15,8 +15,8 @@ class FakeTemplates:
 
 def test_alert_fanout_snapshot_user_dedupe_mute_and_template_choice(deps):
     repo=deps.repos
-    first=repo.family.create("妈妈家")
-    second=repo.family.create("岳父家")
+    first=repo.group.create("妈妈家")
+    second=repo.group.create("岳父家")
     queryer_a=repo.member.get(repo.member.add(first,"查询者",openid="test:queryer"))
     queryer_b=repo.member.get(repo.member.add(second,"查询者",openid="test:queryer"))
     target_a=repo.member.get(repo.member.add(first,"女儿",openid="live:target"))
@@ -29,7 +29,7 @@ def test_alert_fanout_snapshot_user_dedupe_mute_and_template_choice(deps):
                   content="别告诉家人,立即转账")
 
     # 查询受理后才入第三群:这条旧查询不会广播到第三群。
-    third=repo.family.create("新加入的群")
+    third=repo.group.create("新加入的群")
     target_c=repo.member.get(repo.member.add(third,"女儿",openid="live:target"))
     # 查询者在判定前退出 A 并加入 C。快照仍是 A/B，但退出者不再是 A 的接收者。
     deps.groups.leave(queryer_a.user_id,first)
@@ -62,7 +62,7 @@ def test_alert_fanout_snapshot_user_dedupe_mute_and_template_choice(deps):
     assert payload["group_ids"]==[first,second]
     assert payload["group_names"]==["妈妈家","岳父家"]
     alert_groups={r[0] for r in repo.conn.execute(
-        "SELECT DISTINCT m.family_id FROM alert a JOIN member m ON m.id=a.membership_id WHERE a.verdict_id=?",
+        "SELECT DISTINCT m.group_id FROM alert a JOIN member m ON m.id=a.membership_id WHERE a.verdict_id=?",
         (result.verdict_id,),
     )}
     assert alert_groups=={first,second} and third not in alert_groups
@@ -95,11 +95,11 @@ def test_alert_fanout_snapshot_user_dedupe_mute_and_template_choice(deps):
 
 
 def test_disband_before_verdict_creates_no_alert_and_says_so(deps):
-    owner=deps.binding.open_family("test:owner","临时群")
+    owner=deps.binding.open_group("test:owner","临时群")
     memberships=deps.repos.member.list_for_user(owner.user_id)
     intake=ingest(deps.repos,user_id=owner.user_id,memberships=memberships,
                   content="别告诉家人,立即转账")
-    deps.groups.disband(owner.user_id,owner.family_id)
+    deps.groups.disband(owner.user_id,owner.group_id)
     result=asyncio.run(make_pipeline(deps).run(intake.message,intake.query_id))
     assert result.verdict.level.value=="dangerous"
     assert "本次未通知群成员" in result.reply
@@ -107,7 +107,7 @@ def test_disband_before_verdict_creates_no_alert_and_says_so(deps):
 
 
 def test_demo_and_test_identities_never_receive_wechat_templates(deps):
-    group=deps.repos.family.create("演示群")
+    group=deps.repos.group.create("演示群")
     demo=deps.repos.member.get(deps.repos.member.add(group,"演示用户",openid="demo:sample"))
     queryer=deps.repos.member.get(deps.repos.member.add(group,"测试用户",openid="test:queryer"))
     fake=FakeTemplates()

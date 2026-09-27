@@ -52,8 +52,8 @@ def test_escalation_absent_cases():
     ]) is None
 
 
-def test_pipeline_multi_turn_assigns_turns_and_escalation(deps, family):
-    fid, elder, _ = family
+def test_pipeline_multi_turn_assigns_turns_and_escalation(deps, group):
+    group_id, elder, _ = group
     content = "【第1轮】我是你领导,这是我的新号\n【第2轮】在开会不方便接电话,帮我垫付5万合同款,马上"
     intake = ingest_member(deps.repos, elder, content=content)
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))

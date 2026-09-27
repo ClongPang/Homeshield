@@ -57,7 +57,7 @@ def ingest(
     snapshot = repos.query.groups(query_id)
     message = Message(
         user_id=user_id,
-        family_ids=[g["family_id"] for g in snapshot],
+        group_ids=[g["group_id"] for g in snapshot],
         membership_ids=[g["query_member_id"] for g in snapshot],
         content_type=ctype,
         content=content,

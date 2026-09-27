@@ -16,19 +16,21 @@ uv run homeshield-eval        # 生成 docs/reports/report.md(FR-9)
 家人入群走公众号(见下文「家人入口」);本地无微信演示可用 CLI 创建演示身份:
 
 ```bash
-uv run homeshield-cli add-family --name 演示群
-uv run homeshield-cli add-member --family-id <群ID> --name 演示用户 --trusted --demo-user
+uv run homeshield-cli add-group --name 演示群
+uv run homeshield-cli add-member --group-id <群ID> --name 演示用户 --trusted --demo-user
 uv run homeshield-cli link --member-id <成员ID> --base-url http://localhost:8000
 ```
 
 演示身份不触发微信推送;不带 `--demo-user`/`--openid` 的 `add-member` 只建未绑定成员位。配置:复制 `.env.example` 为 `.env`,`MODE=llm` 时填 OpenAI 兼容接口与微信参数。
+
+命名更新：部署配置 `MAX_FAMILIES` 改为 `MAX_TOTAL_GROUPS`，CLI `add-family/--family-id` 改为 `add-group/--group-id`；旧 Python 名称 `api.family`、`repos.family`、`FamilyRepo` 已移除。SQLite 只按当前 `protection_group/group_id` 结构建库，不包含旧库迁移；HTTP 路径本来就是 `/api/groups`。
 
 ## 目录
 
 ```
 src/homeshield/   唯一 Python 包(uv 安装,editable;标准 src 布局)
   server.py       FastAPI 装配根:依赖注入 + 路由挂载 + 静态页(uvicorn homeshield.server:app)
-  api/            HTTP 路由层:schemas.py 请求模型 · family.py 家人 API · wechat.py 公众号回调
+  api/            HTTP 路由层:schemas.py 请求模型 · groups.py 防护群 API · wechat.py 公众号回调
   cli.py          运维/演示 CLI(= homeshield-cli)
   web/            聊天页 index.html / 群控制台 console.html / 告警页 alert.html / 邀请页 join.html
   core/           领域层(纯逻辑,依赖规则见 tests/test_architecture.py)
@@ -116,9 +118,9 @@ mock、种子样例、合成数据只有两个合法用途:**CI 管道回归**�
 3. 加入:家人关注公众号回复`绑定 <码>`即加入该群,同一微信号可加入多个群;
 4. 用户退出全部群后仍保留个人身份,可裸回复`开通`新建群;未绑定者的其他消息只收到引导,不判定、不落库。
 
-护栏:`MAX_FAMILIES`(部署内活跃群总数,默认 100)、`MAX_GROUPS`(每个用户的活跃群数,默认 10)、`MAX_MEMBERS`(每群活跃成员位数,默认 10)、`BIND_CODE_TTL_DAYS`(邀请码有效期,默认 7 天)。CLI 的 `add-family/add-member/link/disband` 保留为运维与演示工具。
+护栏:`MAX_TOTAL_GROUPS`(部署内活跃群总数,默认 100)、`MAX_GROUPS`(每个用户的活跃群数,默认 10)、`MAX_MEMBERS`(每群活跃成员位数,默认 10)、`BIND_CODE_TTL_DAYS`(邀请码有效期,默认 7 天)。CLI 的 `add-group/add-member/link/disband` 保留为运维与演示工具。
 
 ## 安全状态
 
 - 已完成:家人 API 以 user 级不可枚举 token 鉴权;`/wechat/callback` 平台签名校验;多群告警/历史授权/纠正队列按成员关系隔离;信任成员护栏与历史保留;绑定码一次性原子认领,过期/重发即失效。实施与验收记录见多群实施规格 §8.1。
-- 待办:前端渲染统一转义(防 XSS);生产微信加密模式与 IP 白名单;按家庭的 LLM 用量配额(当前滥用边界 = MAX_FAMILIES × MAX_MEMBERS × 查询频次)。
+- 待办:前端渲染统一转义(防 XSS);生产微信加密模式与 IP 白名单;按群的 LLM 用量配额(当前滥用边界 = MAX_TOTAL_GROUPS × MAX_MEMBERS × 查询频次)。

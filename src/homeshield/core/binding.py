@@ -6,7 +6,7 @@ from homeshield.core.errors import HomeshieldError
 from homeshield.core.models import Member
 from homeshield.core.repo import Repos, WRITE_LOCK
 
-OPEN_FAMILY_NAME = "我的防护群"
+OPEN_GROUP_NAME = "我的防护群"
 CREATOR_NAME = "群主"
 _BIND_RE = re.compile(r"^(?:绑定|綁定)\s*[::]?\s*([0-9A-Za-z]{4,16})$")
 
@@ -17,7 +17,7 @@ def parse_bind_command(text: str) -> str | None:
 
 
 def parse_open_command(text: str) -> str | None:
-    match = re.match(r"^(?:开通|開通|开通家庭)(?:\s+(.+))?$", text.strip())
+    match = re.match(r"^(?:开通|開通)(?:\s+(.+))?$", text.strip())
     return match.group(1).strip() if match and match.group(1) else ("" if match else None)
 
 
@@ -32,32 +32,32 @@ class BindingError(HomeshieldError):
 
 
 class BindingService:
-    def __init__(self, repos: Repos, max_families: int, max_members: int,
+    def __init__(self, repos: Repos, max_total_groups: int, max_members: int,
                  code_ttl_days: int, max_groups: int | None = None):
         self.repos = repos
-        self.max_families = max_families
+        self.max_total_groups = max_total_groups
         self.max_members = max_members
-        self.max_groups = max_groups or max_families
+        self.max_groups = max_groups or max_total_groups
         self.code_ttl_days = code_ttl_days
 
-    def open_family(self, openid: str, name: str | None = None) -> Member:
+    def open_group(self, openid: str, name: str | None = None) -> Member:
         user = self.repos.users.get_or_create(openid)
         with WRITE_LOCK:
-            if self.repos.family.list_for_user(user.id):
+            if self.repos.group.list_for_user(user.id):
                 raise BindingError("already_has_groups")
-            return self.create_group(user.id, name or OPEN_FAMILY_NAME, openid=openid)
+            return self.create_group(user.id, name or OPEN_GROUP_NAME, openid=openid)
 
     def create_group(self, user_id: int, name: str, openid: str | None = None) -> Member:
         name = name.strip()
         if not name:
             raise BindingError("invalid_name")
         with WRITE_LOCK:
-            if self.repos.family.count() >= self.max_families:
+            if self.repos.group.count() >= self.max_total_groups:
                 raise BindingError("limit")
-            if len(self.repos.family.list_for_user(user_id)) >= self.max_groups:
+            if len(self.repos.group.list_for_user(user_id)) >= self.max_groups:
                 raise BindingError("group_limit")
-            fid = self.repos.family.create_with_creator(name, CREATOR_NAME, user_id)
-            member = next(m for m in self.repos.member.list_for_user(user_id) if m.family_id == fid)
+            group_id = self.repos.group.create_with_creator(name, CREATOR_NAME, user_id)
+            member = next(m for m in self.repos.member.list_for_user(user_id) if m.group_id == group_id)
             return member
 
     def issue_code(self, target: Member, created_by: int) -> dict:
@@ -77,7 +77,7 @@ class BindingService:
             if target is None or target.user_id is not None or target.ended_at is not None:
                 raise BindingError("member_bound")
             user = self.repos.users.get_or_create(openid)
-            if any(m.family_id == target.family_id for m in self.repos.member.list_for_user(user.id)):
+            if any(m.group_id == target.group_id for m in self.repos.member.list_for_user(user.id)):
                 raise BindingError("already_in_group")
             try:
                 claimed = self.repos.bind_code.claim_and_bind(code,target.id,user.id)
@@ -87,6 +87,6 @@ class BindingService:
                 raise BindingError("invalid")
             return self.repos.member.get(target.id)
 
-    def ensure_member_capacity(self, family_id: int) -> None:
-        if len(self.repos.member.list_members(family_id)) >= self.max_members:
+    def ensure_member_capacity(self, group_id: int) -> None:
+        if len(self.repos.member.list_members(group_id)) >= self.max_members:
             raise BindingError("limit")

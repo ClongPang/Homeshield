@@ -57,10 +57,10 @@ class AlertRouter:
         for recipient in fanout["recipients"]:
             user_id = recipient["user_id"]
             groups = recipient["groups"]
-            group_ids = sorted({g["family_id"] for g in groups})
+            group_ids = sorted({g["group_id"] for g in groups})
             group_names = []
             for gid in group_ids:
-                group_names.append(next(g["name"] for g in groups if g["family_id"]==gid))
+                group_names.append(next(g["name"] for g in groups if g["group_id"]==gid))
             self.broker.publish(user_id,{
                 "verdict_id":event.verdict_id,"level":"dangerous",
                 "summary":event.message.content[:50],"group_ids":group_ids,

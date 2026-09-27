@@ -5,8 +5,8 @@
 
 用法:
     uv run homeshield-cli init-db
-    uv run homeshield-cli add-family --name 我的家庭
-    uv run homeshield-cli add-member --family-id 1 --name 妈妈 --trusted
+    uv run homeshield-cli add-group --name 我的防护群
+    uv run homeshield-cli add-member --group-id 1 --name 妈妈 --trusted
     uv run homeshield-cli set-trust --member-id 2 --trusted 1
     uv run uvicorn homeshield.server:app --reload
 """
@@ -25,11 +25,11 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True) # 让程序支持子命令，就像 git add、git commit 那样
 
     sub.add_parser("init-db", help="建库建表,幂等")
-    f = sub.add_parser("add-family", help="创建家庭")
-    f.add_argument("--name", required=True)         # homeshield add-family --name "张三家"
+    f = sub.add_parser("add-group", help="创建防护群")
+    f.add_argument("--name", required=True)         # homeshield add-group --name "我的防护群"
 
     m = sub.add_parser("add-member", help="添加成员位")
-    m.add_argument("--family-id", type=int, required=True)
+    m.add_argument("--group-id", type=int, required=True)
     m.add_argument("--name", required=True)
     m.add_argument("--trusted", action="store_true", help="纠正信任位:纠正即时生效 + 可管理成员")
     m.add_argument("--openid", default=None, help="微信 openid,绑定后微信消息归属此群成员")
@@ -44,7 +44,7 @@ def main() -> None:
     l.add_argument("--base-url", default="http://localhost:8000", help="服务对外可达地址")
 
     d = sub.add_parser("disband", help="运维解散群并保留所有历史记录")
-    d.add_argument("--family-id", type=int, required=True)
+    d.add_argument("--group-id", type=int, required=True)
 
     sub.add_parser("expire-corrections", help="手动清算超时 pending")
 
@@ -53,8 +53,8 @@ def main() -> None:
 
     if args.cmd == "init-db":
         print("db ready:", deps.settings.db_path)
-    elif args.cmd == "add-family":
-        print("family_id =", deps.repos.family.create(args.name))
+    elif args.cmd == "add-group":
+        print("group_id =", deps.repos.group.create(args.name))
     elif args.cmd == "add-member":
         if args.openid and args.demo_user:
             raise SystemExit("--openid 与 --demo-user 不能同时使用")
@@ -63,7 +63,7 @@ def main() -> None:
             openid = f"demo:{secrets.token_urlsafe(10)}"
         print(
             "member_id =",
-            deps.groups.add_member(args.family_id, args.name, args.trusted, openid),
+            deps.groups.add_member(args.group_id, args.name, args.trusted, openid),
         )
     elif args.cmd == "set-trust":
         deps.groups.set_trust_by_operator(args.member_id, bool(args.trusted))
@@ -81,8 +81,8 @@ def main() -> None:
     elif args.cmd == "expire-corrections":
         print("expired", CorrectionService(deps.repos).expire_pending()) # 凡是普通成员提交、还没被信任成员确认、且已经放了超过 7 天的纠正，一律自动变为 rejected
     elif args.cmd == "disband":
-        deps.groups.disband_by_operator(args.family_id)
-        print(f"family_id={args.family_id} disbanded")
+        deps.groups.disband_by_operator(args.group_id)
+        print(f"group_id={args.group_id} disbanded")
 
 
 if __name__ == "__main__":

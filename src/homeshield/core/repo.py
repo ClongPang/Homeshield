@@ -65,14 +65,14 @@ class UserRepo:
 
 
 @_serialize_repo_access
-class FamilyRepo:
+class GroupRepo:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
 
     def create(self, name: str, created_by_user_id: int | None = None) -> int:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
-                "INSERT INTO family(name,created_by_user_id,created_at) VALUES(?,?,?)",
+                "INSERT INTO protection_group(name,created_by_user_id,created_at) VALUES(?,?,?)",
                 (name, created_by_user_id, utcnow()),
             )
         return int(cur.lastrowid)
@@ -80,30 +80,30 @@ class FamilyRepo:
     def create_with_creator(self, name: str, creator_name: str, user_id: int) -> int:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
-                "INSERT INTO family(name,created_by_user_id,created_at) VALUES(?,?,?)",
+                "INSERT INTO protection_group(name,created_by_user_id,created_at) VALUES(?,?,?)",
                 (name, user_id, utcnow()),
             )
-            fid = int(cur.lastrowid)
+            group_id = int(cur.lastrowid)
             self.conn.execute(
-                "INSERT INTO member(family_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
-                (fid, user_id, creator_name, 1, utcnow()),
+                "INSERT INTO member(group_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
+                (group_id, user_id, creator_name, 1, utcnow()),
             )
-        return fid
+        return group_id
 
-    def get(self, family_id: int) -> dict | None:
-        row = self.conn.execute("SELECT * FROM family WHERE id=?", (family_id,)).fetchone()
+    def get(self, group_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM protection_group WHERE id=?", (group_id,)).fetchone()
         return dict(row) if row else None
 
     def count(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) c FROM family WHERE disbanded_at IS NULL").fetchone()
+        row = self.conn.execute("SELECT COUNT(*) c FROM protection_group WHERE disbanded_at IS NULL").fetchone()
         return int(row["c"])
 
     def list_for_user(self, user_id: int) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT f.id,f.name,m.id AS membership_id,m.trusted,m.mute,"
-            "(SELECT COUNT(*) FROM member x WHERE x.family_id=f.id AND x.ended_at IS NULL) member_count "
-            "FROM member m JOIN family f ON f.id=m.family_id "
-            "WHERE m.user_id=? AND m.ended_at IS NULL AND f.disbanded_at IS NULL ORDER BY f.id",
+            "SELECT g.id,g.name,m.id AS membership_id,m.trusted,m.mute,"
+            "(SELECT COUNT(*) FROM member x WHERE x.group_id=g.id AND x.ended_at IS NULL) member_count "
+            "FROM member m JOIN protection_group g ON g.id=m.group_id "
+            "WHERE m.user_id=? AND m.ended_at IS NULL AND g.disbanded_at IS NULL ORDER BY g.id",
             (user_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -115,15 +115,15 @@ class MemberRepo:
         self.conn, self.users = conn, users
 
     def add(
-        self, family_id: int, name: str, trusted: bool = False,
+        self, group_id: int, name: str, trusted: bool = False,
         openid: str | None = None, user_id: int | None = None,
     ) -> int:
         if openid:
             user_id = self.users.get_or_create(openid).id
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
-                "INSERT INTO member(family_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
-                (family_id, user_id, name, int(trusted and user_id is not None), utcnow()),
+                "INSERT INTO member(group_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
+                (group_id, user_id, name, int(trusted and user_id is not None), utcnow()),
             )
         return int(cur.lastrowid)
 
@@ -136,28 +136,28 @@ class MemberRepo:
     def get(self, member_id: int) -> Member | None:
         return self._model(self.conn.execute(self._select()+" WHERE m.id=?", (member_id,)).fetchone())
 
-    def list_members(self, family_id: int, active_only: bool = True) -> list[Member]:
-        sql = self._select()+" WHERE m.family_id=?"
+    def list_members(self, group_id: int, active_only: bool = True) -> list[Member]:
+        sql = self._select()+" WHERE m.group_id=?"
         if active_only:
             sql += " AND m.ended_at IS NULL"
         sql += " ORDER BY m.id"
-        return [self._model(r) for r in self.conn.execute(sql, (family_id,)).fetchall()]
+        return [self._model(r) for r in self.conn.execute(sql, (group_id,)).fetchall()]
 
     def list_for_user(self, user_id: int, active_only: bool = True) -> list[Member]:
-        sql = self._select()+" JOIN family f ON f.id=m.family_id WHERE m.user_id=?"
+        sql = self._select()+" JOIN protection_group g ON g.id=m.group_id WHERE m.user_id=?"
         params: list = [user_id]
         if active_only:
-            sql += " AND m.ended_at IS NULL AND f.disbanded_at IS NULL"
-        sql += " ORDER BY f.id"
+            sql += " AND m.ended_at IS NULL AND g.disbanded_at IS NULL"
+        sql += " ORDER BY g.id"
         return [self._model(r) for r in self.conn.execute(sql, params).fetchall()]
 
-    def active_members_in_groups(self, family_ids: list[int]) -> list[Member]:
-        if not family_ids:
+    def active_members_in_groups(self, group_ids: list[int]) -> list[Member]:
+        if not group_ids:
             return []
-        marks = ",".join("?" for _ in family_ids)
-        sql = self._select()+f" JOIN family f ON f.id=m.family_id WHERE m.family_id IN ({marks}) " \
-              "AND m.user_id IS NOT NULL AND m.ended_at IS NULL AND f.disbanded_at IS NULL ORDER BY f.id,m.id"
-        return [self._model(r) for r in self.conn.execute(sql, family_ids).fetchall()]
+        marks = ",".join("?" for _ in group_ids)
+        sql = self._select()+f" JOIN protection_group g ON g.id=m.group_id WHERE m.group_id IN ({marks}) " \
+              "AND m.user_id IS NOT NULL AND m.ended_at IS NULL AND g.disbanded_at IS NULL ORDER BY g.id,m.id"
+        return [self._model(r) for r in self.conn.execute(sql, group_ids).fetchall()]
 
     def set_openid(self, member_id: int, openid: str) -> User:
         user = self.users.get_or_create(openid)
@@ -180,13 +180,13 @@ class MemberRepo:
                 (int(trusted), member_id),
             )
 
-    def demote_with_guard(self, member_id: int, family_id: int) -> bool:
+    def demote_with_guard(self, member_id: int, group_id: int) -> bool:
         with WRITE_LOCK, self.conn:
             cur = self.conn.execute(
-                "UPDATE member SET trusted=0 WHERE id=? AND family_id=? AND trusted=1 AND ended_at IS NULL"
-                " AND (SELECT COUNT(*) FROM member WHERE family_id=? AND trusted=1 AND user_id IS NOT NULL"
+                "UPDATE member SET trusted=0 WHERE id=? AND group_id=? AND trusted=1 AND ended_at IS NULL"
+                " AND (SELECT COUNT(*) FROM member WHERE group_id=? AND trusted=1 AND user_id IS NOT NULL"
                 " AND ended_at IS NULL AND id<>?)>=1",
-                (member_id, family_id, family_id, member_id),
+                (member_id, group_id, group_id, member_id),
             )
         return cur.rowcount > 0
 
@@ -202,17 +202,17 @@ class MemberRepo:
             if cur.rowcount != 1:
                 raise ValidationError("member not found")
 
-    def trusted_count(self, family_id: int, exclude_id: int | None = None) -> int:
-        sql = "SELECT COUNT(*) c FROM member WHERE family_id=? AND trusted=1 AND user_id IS NOT NULL AND ended_at IS NULL"
-        params: list = [family_id]
+    def trusted_count(self, group_id: int, exclude_id: int | None = None) -> int:
+        sql = "SELECT COUNT(*) c FROM member WHERE group_id=? AND trusted=1 AND user_id IS NOT NULL AND ended_at IS NULL"
+        params: list = [group_id]
         if exclude_id is not None:
             sql += " AND id<>?"
             params.append(exclude_id)
         return int(self.conn.execute(sql, params).fetchone()["c"])
 
-    def bound_count(self, family_id: int, exclude_id: int | None = None) -> int:
-        sql = "SELECT COUNT(*) c FROM member WHERE family_id=? AND user_id IS NOT NULL AND ended_at IS NULL"
-        params: list = [family_id]
+    def bound_count(self, group_id: int, exclude_id: int | None = None) -> int:
+        sql = "SELECT COUNT(*) c FROM member WHERE group_id=? AND user_id IS NOT NULL AND ended_at IS NULL"
+        params: list = [group_id]
         if exclude_id is not None:
             sql += " AND id<>?"
             params.append(exclude_id)
@@ -230,12 +230,12 @@ class QueryRepo:
             with WRITE_LOCK, self.conn:
                 # 查询群快照和成员生命周期共用写锁,不把已退群成员的旧列表写入查询。
                 active = self.conn.execute(
-                    "SELECT m.id,m.family_id FROM member m JOIN family f ON f.id=m.family_id "
-                    "WHERE m.user_id=? AND m.ended_at IS NULL AND f.disbanded_at IS NULL",
+                    "SELECT m.id,m.group_id FROM member m JOIN protection_group g ON g.id=m.group_id "
+                    "WHERE m.user_id=? AND m.ended_at IS NULL AND g.disbanded_at IS NULL",
                     (user_id,),
                 ).fetchall()
-                allowed = {(int(r["id"]), int(r["family_id"])) for r in active}
-                memberships = [m for m in memberships if (m.id, m.family_id) in allowed]
+                allowed = {(int(r["id"]), int(r["group_id"])) for r in active}
+                memberships = [m for m in memberships if (m.id, m.group_id) in allowed]
                 if not memberships:
                     raise ValidationError("user has no active group")
                 now = utcnow()
@@ -246,8 +246,8 @@ class QueryRepo:
                 qid = int(cur.lastrowid)
                 for member in memberships:
                     self.conn.execute(
-                        "INSERT INTO query_group(query_id,family_id,query_member_id) VALUES(?,?,?)",
-                        (qid, member.family_id, member.id),
+                        "INSERT INTO query_group(query_id,group_id,query_member_id) VALUES(?,?,?)",
+                        (qid, member.group_id, member.id),
                     )
         except sqlite3.IntegrityError as e:
             raise DuplicateMessage(msg_id or "") from e
@@ -263,16 +263,16 @@ class QueryRepo:
 
     def groups(self, query_id: int) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT qg.family_id,qg.query_member_id,f.name,f.disbanded_at FROM query_group qg "
-            "JOIN family f ON f.id=qg.family_id WHERE qg.query_id=? ORDER BY qg.family_id",
+            "SELECT qg.group_id,qg.query_member_id,g.name,g.disbanded_at FROM query_group qg "
+            "JOIN protection_group g ON g.id=qg.group_id WHERE qg.query_id=? ORDER BY qg.group_id",
             (query_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def count(self, family_id: int, since: int) -> int:
+    def count(self, group_id: int, since: int) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) c FROM query_group qg JOIN query q ON q.id=qg.query_id "
-            "WHERE qg.family_id=? AND q.created_at>=?", (family_id, since),
+            "WHERE qg.group_id=? AND q.created_at>=?", (group_id, since),
         ).fetchone()
         return int(row["c"])
 
@@ -304,11 +304,11 @@ class VerdictRepo:
         ).fetchone()
         return dict(row) if row else None
 
-    def count_dangerous(self, family_id: int, since: int) -> int:
+    def count_dangerous(self, group_id: int, since: int) -> int:
         row = self.conn.execute(
             "SELECT COUNT(DISTINCT a.verdict_id) c FROM alert a JOIN member m ON m.id=a.membership_id "
-            "JOIN verdict v ON v.id=a.verdict_id WHERE m.family_id=? AND a.delivered_at>=? "
-            "AND v.level='dangerous'", (family_id, since),
+            "JOIN verdict v ON v.id=a.verdict_id WHERE m.group_id=? AND a.delivered_at>=? "
+            "AND v.level='dangerous'", (group_id, since),
         ).fetchone()
         return int(row["c"])
 
@@ -327,10 +327,10 @@ class AlertRepo:
                 "SELECT user_id FROM query WHERE id=?", (query_id,)
             ).fetchone()["user_id"]
             rows = self.conn.execute(
-                "SELECT m.id membership_id,m.user_id,m.family_id,m.mute,u.openid,u.token,f.name "
-                "FROM query_group qg JOIN family f ON f.id=qg.family_id AND f.disbanded_at IS NULL "
-                "JOIN member m ON m.family_id=f.id AND m.user_id IS NOT NULL AND m.ended_at IS NULL "
-                "JOIN user u ON u.id=m.user_id WHERE qg.query_id=? ORDER BY m.user_id,f.id,m.id",
+                "SELECT m.id membership_id,m.user_id,m.group_id,m.mute,u.openid,u.token,g.name "
+                "FROM query_group qg JOIN protection_group g ON g.id=qg.group_id AND g.disbanded_at IS NULL "
+                "JOIN member m ON m.group_id=g.id AND m.user_id IS NOT NULL AND m.ended_at IS NULL "
+                "JOIN user u ON u.id=m.user_id WHERE qg.query_id=? ORDER BY m.user_id,g.id,m.id",
                 (query_id,),
             ).fetchall()
             now = utcnow()
@@ -339,14 +339,14 @@ class AlertRepo:
                     "INSERT OR IGNORE INTO alert(verdict_id,membership_id,group_name_at_alert,delivered_at)"
                     " VALUES(?,?,?,?)", (verdict_id,r["membership_id"],r["name"],now),
                 )
-                generated_groups[r["family_id"]] = r["name"]
+                generated_groups[r["group_id"]] = r["name"]
                 item = recipients.setdefault(r["user_id"], {
                     "user_id":r["user_id"],"openid":r["openid"],"token":r["token"],"groups":[]
                 })
-                item["groups"].append({"family_id":r["family_id"],"membership_id":r["membership_id"],
+                item["groups"].append({"group_id":r["group_id"],"membership_id":r["membership_id"],
                                        "name":r["name"],"mute":bool(r["mute"])})
         query_groups = self.conn.execute(
-            "SELECT family_id FROM query_group WHERE query_id=?", (query_id,),
+            "SELECT group_id FROM query_group WHERE query_id=?", (query_id,),
         ).fetchall()
         names = [generated_groups[k] for k in sorted(generated_groups)]
         return {"queryer_id":queryer_id,"query_group_count":len(query_groups),
@@ -354,32 +354,32 @@ class AlertRepo:
 
     def push_context(self, verdict_id: int, user_id: int) -> dict | None:
         rows = self.conn.execute(
-            "SELECT a.membership_id,m.family_id,m.mute,a.group_name_at_alert name,u.openid,u.token "
+            "SELECT a.membership_id,m.group_id,m.mute,a.group_name_at_alert name,u.openid,u.token "
             "FROM alert a JOIN member old ON old.id=a.membership_id "
-            "JOIN family f ON f.id=old.family_id AND f.disbanded_at IS NULL "
-            "JOIN member m ON m.family_id=f.id AND m.user_id=? AND m.ended_at IS NULL "
+            "JOIN protection_group g ON g.id=old.group_id AND g.disbanded_at IS NULL "
+            "JOIN member m ON m.group_id=g.id AND m.user_id=? AND m.ended_at IS NULL "
             "JOIN user u ON u.id=m.user_id WHERE a.verdict_id=? AND old.user_id=? AND m.mute=0 "
-            "ORDER BY f.id,m.id", (user_id,verdict_id,user_id),
+            "ORDER BY g.id,m.id", (user_id,verdict_id,user_id),
         ).fetchall()
         if not rows:
             return None
         active = self.conn.execute(
-            "SELECT COUNT(*) c FROM member m JOIN family f ON f.id=m.family_id "
-            "WHERE m.user_id=? AND m.ended_at IS NULL AND f.disbanded_at IS NULL", (user_id,),
+            "SELECT COUNT(*) c FROM member m JOIN protection_group g ON g.id=m.group_id "
+            "WHERE m.user_id=? AND m.ended_at IS NULL AND g.disbanded_at IS NULL", (user_id,),
         ).fetchone()["c"]
         return {"openid":rows[0]["openid"],"token":rows[0]["token"],"active_group_count":int(active),
-                "groups":[{"family_id":r["family_id"],"membership_id":r["membership_id"],"name":r["name"]} for r in rows]}
+                "groups":[{"group_id":r["group_id"],"membership_id":r["membership_id"],"name":r["name"]} for r in rows]}
 
-    def list_for_user_group(self, user_id: int, family_id: int, limit: int = 50) -> list[dict]:
+    def list_for_user_group(self, user_id: int, group_id: int, limit: int = 50) -> list[dict]:
         rows = self.conn.execute(
             "SELECT v.id verdict_id,v.level,q.content,MAX(a.delivered_at) delivered_at,"
             "MAX(a.group_name_at_alert) group_name_at_alert FROM alert a "
             "JOIN member old ON old.id=a.membership_id JOIN verdict v ON v.id=a.verdict_id "
-            "JOIN query q ON q.id=v.query_id JOIN family f ON f.id=old.family_id "
-            "WHERE old.user_id=? AND old.family_id=? AND f.disbanded_at IS NULL "
-            "AND EXISTS(SELECT 1 FROM member cur WHERE cur.user_id=? AND cur.family_id=? AND cur.ended_at IS NULL) "
+            "JOIN query q ON q.id=v.query_id JOIN protection_group g ON g.id=old.group_id "
+            "WHERE old.user_id=? AND old.group_id=? AND g.disbanded_at IS NULL "
+            "AND EXISTS(SELECT 1 FROM member cur WHERE cur.user_id=? AND cur.group_id=? AND cur.ended_at IS NULL) "
             "GROUP BY v.id ORDER BY v.id DESC LIMIT ?",
-            (user_id,family_id,user_id,family_id,limit),
+            (user_id,group_id,user_id,group_id,limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -397,30 +397,30 @@ class AlertRepo:
         if not had:
             return None, None
         groups = self.conn.execute(
-            "SELECT DISTINCT f.id,a.group_name_at_alert name FROM alert a JOIN member old ON old.id=a.membership_id "
-            "JOIN family f ON f.id=old.family_id JOIN member cur ON cur.family_id=f.id AND cur.user_id=? "
-            "AND cur.ended_at IS NULL WHERE a.verdict_id=? AND old.user_id=? AND f.disbanded_at IS NULL "
-            "ORDER BY f.id", (user_id,verdict_id,user_id),
+            "SELECT DISTINCT g.id,a.group_name_at_alert name FROM alert a JOIN member old ON old.id=a.membership_id "
+            "JOIN protection_group g ON g.id=old.group_id JOIN member cur ON cur.group_id=g.id AND cur.user_id=? "
+            "AND cur.ended_at IS NULL WHERE a.verdict_id=? AND old.user_id=? AND g.disbanded_at IS NULL "
+            "ORDER BY g.id", (user_id,verdict_id,user_id),
         ).fetchall()
         if groups:
             return {**dict(detail),"group_names":[r["name"] for r in groups]}, None
-        active_family = self.conn.execute(
-            "SELECT 1 FROM alert a JOIN member old ON old.id=a.membership_id JOIN family f ON f.id=old.family_id "
-            "WHERE a.verdict_id=? AND old.user_id=? AND f.disbanded_at IS NULL LIMIT 1", (verdict_id,user_id),
+        active_group = self.conn.execute(
+            "SELECT 1 FROM alert a JOIN member old ON old.id=a.membership_id JOIN protection_group g ON g.id=old.group_id "
+            "WHERE a.verdict_id=? AND old.user_id=? AND g.disbanded_at IS NULL LIMIT 1", (verdict_id,user_id),
         ).fetchone()
-        return None, "membership_ended" if active_family else "group_disbanded"
+        return None, "membership_ended" if active_group else "group_disbanded"
 
-    def active_family_ids_for_user(self, user_id: int) -> set[int]:
+    def active_group_ids_for_user(self, user_id: int) -> set[int]:
         return {int(r[0]) for r in self.conn.execute(
-            "SELECT m.family_id FROM member m JOIN family f ON f.id=m.family_id "
-            "WHERE m.user_id=? AND m.ended_at IS NULL AND f.disbanded_at IS NULL", (user_id,),
+            "SELECT m.group_id FROM member m JOIN protection_group g ON g.id=m.group_id "
+            "WHERE m.user_id=? AND m.ended_at IS NULL AND g.disbanded_at IS NULL", (user_id,),
         ).fetchall()}
 
-    def family_was_recipient(self, verdict_id: int, user_id: int, family_id: int) -> bool:
+    def group_was_recipient(self, verdict_id: int, user_id: int, group_id: int) -> bool:
         return self.conn.execute(
             "SELECT 1 FROM alert a JOIN member m ON m.id=a.membership_id "
-            "WHERE a.verdict_id=? AND m.user_id=? AND m.family_id=? LIMIT 1",
-            (verdict_id,user_id,family_id),
+            "WHERE a.verdict_id=? AND m.user_id=? AND m.group_id=? LIMIT 1",
+            (verdict_id,user_id,group_id),
         ).fetchone() is not None
 
 
@@ -446,8 +446,8 @@ class CorrectionRepo:
             cid = int(cur.lastrowid)
             for m in memberships:
                 self.conn.execute(
-                    "INSERT INTO correction_group(correction_id,family_id,by_membership_id) VALUES(?,?,?)",
-                    (cid,m.family_id,m.id),
+                    "INSERT INTO correction_group(correction_id,group_id,by_membership_id) VALUES(?,?,?)",
+                    (cid,m.group_id,m.id),
                 )
         return cid
 
@@ -470,8 +470,8 @@ class CorrectionRepo:
     def get_with_groups(self, correction_id: int) -> tuple[dict | None,list[dict]]:
         row = self.conn.execute("SELECT * FROM correction WHERE id=?",(correction_id,)).fetchone()
         groups = self.conn.execute(
-            "SELECT cg.family_id,cg.by_membership_id,m.user_id,f.disbanded_at FROM correction_group cg "
-            "JOIN member m ON m.id=cg.by_membership_id JOIN family f ON f.id=cg.family_id WHERE cg.correction_id=?",
+            "SELECT cg.group_id,cg.by_membership_id,m.user_id,g.disbanded_at FROM correction_group cg "
+            "JOIN member m ON m.id=cg.by_membership_id JOIN protection_group g ON g.id=cg.group_id WHERE cg.correction_id=?",
             (correction_id,),
         ).fetchall()
         return (dict(row) if row else None,[dict(g) for g in groups])
@@ -486,10 +486,10 @@ class CorrectionRepo:
             if cur.rowcount != 1:
                 raise ValidationError("correction already decided")
 
-    def count_group(self, family_id: int, since: int, status: str | None = None, label: str | None = None) -> int:
+    def count_group(self, group_id: int, since: int, status: str | None = None, label: str | None = None) -> int:
         sql = ("SELECT COUNT(*) c FROM correction_group cg JOIN correction c ON c.id=cg.correction_id "
-               "WHERE cg.family_id=? AND c.decided_at>=?")
-        params: list = [family_id,since]
+               "WHERE cg.group_id=? AND c.decided_at>=?")
+        params: list = [group_id,since]
         if status:
             sql += " AND c.status=?"
             params.append(status)
@@ -498,14 +498,14 @@ class CorrectionRepo:
             params.append(label)
         return int(self.conn.execute(sql,params).fetchone()["c"])
 
-    def list_pending_with_context(self, family_id: int) -> list[dict]:
+    def list_pending_with_context(self, group_id: int) -> list[dict]:
         rows = self.conn.execute(
             "SELECT c.id,c.label,c.note,c.created_at,submit.name by_name,q.content "
             "FROM correction_group cg JOIN correction c ON c.id=cg.correction_id "
             "JOIN verdict v ON v.id=c.verdict_id JOIN query q ON q.id=v.query_id "
             "JOIN member submit ON submit.id=cg.by_membership_id "
-            "WHERE cg.family_id=? AND c.status='pending' ORDER BY c.created_at DESC",
-            (family_id,),
+            "WHERE cg.group_id=? AND c.status='pending' ORDER BY c.created_at DESC",
+            (group_id,),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -543,16 +543,16 @@ class BindCodeRepo:
             with WRITE_LOCK, self.conn:
                 row = self.conn.execute(
                     "SELECT bc.id FROM bind_code bc JOIN member m ON m.id=bc.member_id "
-                    "JOIN family f ON f.id=m.family_id WHERE UPPER(bc.code)=UPPER(?) "
+                    "JOIN protection_group g ON g.id=m.group_id WHERE UPPER(bc.code)=UPPER(?) "
                     "AND bc.member_id=? AND bc.used_at IS NULL AND bc.expires_at>? "
-                    "AND m.user_id IS NULL AND m.ended_at IS NULL AND f.disbanded_at IS NULL",
+                    "AND m.user_id IS NULL AND m.ended_at IS NULL AND g.disbanded_at IS NULL",
                     (code,member_id,now),
                 ).fetchone()
                 if row is None:
                     return False
                 bound = self.conn.execute(
                     "UPDATE member SET user_id=? WHERE id=? AND user_id IS NULL AND ended_at IS NULL "
-                    "AND EXISTS(SELECT 1 FROM family WHERE family.id=member.family_id AND disbanded_at IS NULL)",
+                    "AND EXISTS(SELECT 1 FROM protection_group WHERE protection_group.id=member.group_id AND disbanded_at IS NULL)",
                     (user_id,member_id),
                 )
                 if bound.rowcount != 1:
@@ -571,18 +571,18 @@ class BindCodeRepo:
         with WRITE_LOCK, self.conn:
             self.conn.execute("UPDATE bind_code SET used_at=? WHERE member_id=? AND used_at IS NULL",(utcnow(),member_id))
 
-    def invalidate_family(self, family_id: int) -> None:
+    def invalidate_group(self, group_id: int) -> None:
         with WRITE_LOCK, self.conn:
             self.conn.execute(
                 "UPDATE bind_code SET used_at=? WHERE used_at IS NULL AND member_id IN "
-                "(SELECT id FROM member WHERE family_id=?)", (utcnow(),family_id),
+                "(SELECT id FROM member WHERE group_id=?)", (utcnow(),group_id),
             )
 
     def peek(self, code: str) -> dict | None:
         row = self.conn.execute(
             "SELECT bc.* FROM bind_code bc JOIN member m ON m.id=bc.member_id "
-            "JOIN family f ON f.id=m.family_id WHERE UPPER(bc.code)=UPPER(?) "
-            "AND bc.used_at IS NULL AND bc.expires_at>? AND m.ended_at IS NULL AND f.disbanded_at IS NULL",
+            "JOIN protection_group g ON g.id=m.group_id WHERE UPPER(bc.code)=UPPER(?) "
+            "AND bc.used_at IS NULL AND bc.expires_at>? AND m.ended_at IS NULL AND g.disbanded_at IS NULL",
             (code,utcnow()),
         ).fetchone()
         return dict(row) if row else None
@@ -599,7 +599,7 @@ class BindCodeRepo:
 class Repos:
     conn: sqlite3.Connection
     users: UserRepo
-    family: FamilyRepo
+    group: GroupRepo
     member: MemberRepo
     query: QueryRepo
     verdict: VerdictRepo
@@ -610,5 +610,5 @@ class Repos:
 
 def make_repos(conn: sqlite3.Connection) -> Repos:
     users = UserRepo(conn)
-    return Repos(conn,users,FamilyRepo(conn),MemberRepo(conn,users),QueryRepo(conn),VerdictRepo(conn),
+    return Repos(conn,users,GroupRepo(conn),MemberRepo(conn,users),QueryRepo(conn),VerdictRepo(conn),
                  AlertRepo(conn),CorrectionRepo(conn),BindCodeRepo(conn))

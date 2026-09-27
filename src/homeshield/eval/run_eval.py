@@ -62,8 +62,8 @@ def main() -> None:
     # 各来源样本数,写入报告头部
     profile = Counter(s.source.split(":", 1)[0] for s in samples)
     deps = build_deps(settings)
-    fid = deps.repos.family.create("eval")
-    mid = deps.repos.member.add(fid, "evaler", openid="test:eval")
+    group_id = deps.repos.group.create("eval")
+    mid = deps.repos.member.add(group_id, "evaler", openid="test:eval")
 
     names = [c.strip() for c in args.configs.split(",")] if args.configs else None
     if args.checkpoint:

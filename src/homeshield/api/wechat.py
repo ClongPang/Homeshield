@@ -96,18 +96,18 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
             if exc.reason == "retry":
                 return messages.BIND_RETRY
             return messages.BIND_INVALID
-        fam = deps.repos.family.get(bound.family_id)
+        group = deps.repos.group.get(bound.group_id)
         identity = deps.repos.users.get(bound.user_id) if bound.user_id is not None else None
         link = identity.entry_url(deps.settings.public_base_url) if identity else ""
         return messages.BIND_SUCCESS.format(
-            family=fam["name"] if fam else "我的家庭",
+            group=group["name"] if group else "我的防护群",
             name=bound.name,
             link=f"\n个人网页入口:{link}" if link else "",
         )
     if list_groups:
         if user is None:
             return messages.BIND_GUIDE
-        groups = deps.repos.family.list_for_user(user.id)
+        groups = deps.repos.group.list_for_user(user.id)
         if not groups:
             return messages.BIND_GUIDE_OUTSIDE_GROUP
         return "你加入的防护群:\n" + "\n".join(
@@ -116,17 +116,17 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
     if open_name is not None:
         if user is None:
             try:
-                admin = deps.binding.open_family(openid,open_name or None)
+                admin = deps.binding.open_group(openid,open_name or None)
             except BindingError as e:
                 return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else messages.BIND_ALREADY
         elif not open_name:
-            groups = deps.repos.family.list_for_user(user.id)
+            groups = deps.repos.group.list_for_user(user.id)
             if groups:
                 return "你已加入这些防护群:\n" + "\n".join(
                     f"{i}. {g['name']}" for i,g in enumerate(groups,1)
                 ) + "\n新建群请回复:开通 群名"
             try:
-                admin = deps.binding.open_family(openid)
+                admin = deps.binding.open_group(openid)
             except BindingError as e:
                 return messages.OPEN_LIMIT if e.reason in ("limit","group_limit") else messages.BIND_ALREADY
         else:
@@ -154,12 +154,12 @@ def _binding_reply(deps: Deps, user, openid: str, kind: str, text: str) -> str |
             return "无法完成操作,请检查群名和权限。"
     else:
         return None
-    fam = deps.repos.family.get(admin.family_id)
+    group = deps.repos.group.get(admin.group_id)
     identity = deps.repos.users.get(user.id if user else admin.user_id)
     url = identity.entry_url(deps.settings.public_base_url) if identity else ""
     if url:
-        return messages.OPEN_SUCCESS.format(family=fam["name"] if fam else "我的家庭", url=url)
-    return messages.OPEN_NO_URL.format(family=fam["name"] if fam else "我的防护群")
+        return messages.OPEN_SUCCESS.format(group=group["name"] if group else "我的防护群", url=url)
+    return messages.OPEN_NO_URL.format(group=group["name"] if group else "我的防护群")
 
 
 async def _welcome_wechat(deps: Deps, ch, data: dict) -> None:
@@ -219,7 +219,7 @@ async def _handle_wechat_message(
 
 
 def _resolve_group(deps: Deps, user_id: int, selector: str):
-    groups = deps.repos.family.list_for_user(user_id)
+    groups = deps.repos.group.list_for_user(user_id)
     matches = [g for g in groups if g["name"] == selector]
     if not matches and selector.isdigit():
         index = int(selector)

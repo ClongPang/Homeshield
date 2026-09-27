@@ -36,7 +36,7 @@ class Settings:
     public_base_url: str = ""
     max_members: int = 10
     max_groups: int = 10
-    max_families: int = 100  # 多租户护栏:公众号自助开通的全局家庭上限
+    max_total_groups: int = 100  # 多租户护栏:公众号自助开通的全局防护群上限
     bind_code_ttl_days: int = 7  # 绑定码有效期;超期/已用即失效
     db_path: str = "homeshield.db"
     judge_retries: int = 2  # 引用校验失败重试上限
@@ -74,7 +74,7 @@ class Settings:
             public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
             max_members=int(os.getenv("MAX_MEMBERS", "10")),
             max_groups=int(os.getenv("MAX_GROUPS", "10")),
-            max_families=int(os.getenv("MAX_FAMILIES", "100")),
+            max_total_groups=int(os.getenv("MAX_TOTAL_GROUPS", "100")),
             bind_code_ttl_days=int(os.getenv("BIND_CODE_TTL_DAYS", "7")),
             db_path=os.getenv("DB_PATH", "homeshield.db"),
             safe_confidence_floor=int(os.getenv("SAFE_CONFIDENCE_FLOOR", "60")),

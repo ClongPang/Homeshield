@@ -1,4 +1,4 @@
-"""SQLite 连接与 schema。时间戳为 Unix 秒;外键开启;当前版本从新库启动。"""
+"""SQLite 连接与 schema。时间戳为 Unix 秒;外键开启。"""
 import sqlite3
 
 SCHEMA = """
@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS user(
     token TEXT NOT NULL UNIQUE,
     created_at INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS family(
+CREATE TABLE IF NOT EXISTS protection_group(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     created_by_user_id INTEGER REFERENCES user(id),
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS family(
 );
 CREATE TABLE IF NOT EXISTS member(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    family_id INTEGER NOT NULL REFERENCES family(id),
+    group_id INTEGER NOT NULL REFERENCES protection_group(id),
     user_id INTEGER REFERENCES user(id),
     name TEXT NOT NULL,
     trusted INTEGER NOT NULL DEFAULT 0,
@@ -28,9 +28,9 @@ CREATE TABLE IF NOT EXISTS member(
     CHECK((ended_at IS NULL) = (end_reason IS NULL))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_member
-    ON member(family_id,user_id) WHERE user_id IS NOT NULL AND ended_at IS NULL;
+    ON member(group_id,user_id) WHERE user_id IS NOT NULL AND ended_at IS NULL;
 CREATE INDEX IF NOT EXISTS ix_member_user_active ON member(user_id,ended_at);
-CREATE INDEX IF NOT EXISTS ix_member_family_active ON member(family_id,ended_at);
+CREATE INDEX IF NOT EXISTS ix_member_group_active ON member(group_id,ended_at);
 CREATE TABLE IF NOT EXISTS bind_code(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT NOT NULL UNIQUE,
@@ -51,11 +51,11 @@ CREATE TABLE IF NOT EXISTS query(
 CREATE UNIQUE INDEX IF NOT EXISTS uq_query_msg_id ON query(msg_id) WHERE msg_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS query_group(
     query_id INTEGER NOT NULL REFERENCES query(id),
-    family_id INTEGER NOT NULL REFERENCES family(id),
+    group_id INTEGER NOT NULL REFERENCES protection_group(id),
     query_member_id INTEGER NOT NULL REFERENCES member(id),
-    PRIMARY KEY(query_id,family_id)
+    PRIMARY KEY(query_id,group_id)
 );
-CREATE INDEX IF NOT EXISTS ix_query_group_family ON query_group(family_id,query_id);
+CREATE INDEX IF NOT EXISTS ix_query_group_id ON query_group(group_id,query_id);
 CREATE TABLE IF NOT EXISTS verdict(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     query_id INTEGER NOT NULL REFERENCES query(id),
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS correction(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     verdict_id INTEGER NOT NULL REFERENCES verdict(id),
     by_user_id INTEGER NOT NULL REFERENCES user(id),
-    label TEXT NOT NULL CHECK(label IN ('real','false_positive','confirmed_scam')),
+    label TEXT NOT NULL CHECK(label IN ('real','false_positive')),
     note TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK(status IN ('pending','confirmed','rejected')),
     decided_by_membership_id INTEGER REFERENCES member(id),
@@ -92,11 +92,11 @@ CREATE TABLE IF NOT EXISTS correction(
 );
 CREATE TABLE IF NOT EXISTS correction_group(
     correction_id INTEGER NOT NULL REFERENCES correction(id),
-    family_id INTEGER NOT NULL REFERENCES family(id),
+    group_id INTEGER NOT NULL REFERENCES protection_group(id),
     by_membership_id INTEGER NOT NULL REFERENCES member(id),
-    PRIMARY KEY(correction_id,family_id)
+    PRIMARY KEY(correction_id,group_id)
 );
-CREATE INDEX IF NOT EXISTS ix_correction_group_family ON correction_group(family_id,correction_id);
+CREATE INDEX IF NOT EXISTS ix_correction_group_id ON correction_group(group_id,correction_id);
 """
 
 

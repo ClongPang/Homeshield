@@ -1,5 +1,5 @@
 [Unit]
-Description=Homeshield family anti-fraud service
+Description=Homeshield group anti-fraud service
 After=network.target
 
 [Service]

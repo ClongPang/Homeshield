@@ -8,8 +8,8 @@ from homeshield.core.reply import validate_reply
 from conftest import ingest_member
 
 
-def test_end_to_end_dangerous(deps, family):
-    fid, elder, adult = family
+def test_end_to_end_dangerous(deps, group):
+    group_id, elder, adult = group
     intake = ingest_member(
         deps.repos, elder,
         content="妈,是我,别告诉家人,立即转账5万到安全账户,手续费2000",
@@ -22,11 +22,11 @@ def test_end_to_end_dangerous(deps, family):
     assert "高危提醒" in result.reply  # 通知说明只在实际生成告警后追加
     # dangerous → alert 表留痕,覆盖全体成员(群模型告警面)
     n = deps.conn.execute("SELECT COUNT(*) c FROM alert").fetchone()["c"]
-    assert n == len(deps.repos.member.list_members(fid))
+    assert n == len(deps.repos.member.list_members(group_id))
 
 
-def test_image_transcribe_degrade(deps, family):
-    fid, elder, _ = family
+def test_image_transcribe_degrade(deps, group):
+    group_id, elder, _ = group
     intake = ingest_member(
         deps.repos, elder,
         content="DEGRADEME",
@@ -37,9 +37,9 @@ def test_image_transcribe_degrade(deps, family):
     assert "请把内容打成文字" in result.reply
 
 
-def test_suspicious_not_alerting(deps, family):
+def test_suspicious_not_alerting(deps, group):
     """suspicious 不产生 alert。"""
-    fid, elder, _ = family
+    group_id, elder, _ = group
     intake = ingest_member(deps.repos, elder, content="最后一天限时优惠,马上下单")
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
     assert result.verdict.level is Level.SUSPICIOUS

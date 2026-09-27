@@ -11,15 +11,15 @@ from conftest import ingest_member
 from homeshield.core.models import CorrectionLabel, CorrectionStatus
 
 
-def _make_verdict(deps, family):
-    fid, elder, _ = family
+def _make_verdict(deps, group):
+    group_id, elder, _ = group
     intake = ingest_member(deps.repos, elder, content="别告诉家人,立即转账")
     return asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id)).verdict_id
 
 
-def test_untrusted_pending_trusted_confirm(deps, family):
-    fid, untrusted, trusted = family
-    vid = _make_verdict(deps, family)
+def test_untrusted_pending_trusted_confirm(deps, group):
+    group_id, untrusted, trusted = group
+    vid = _make_verdict(deps, group)
     svc = CorrectionService(deps.repos)
     cid, status = svc.submit(vid, deps.repos.member.get(untrusted).user_id, CorrectionLabel.REAL, note="这是真的骗局")
     assert status is CorrectionStatus.PENDING
@@ -30,27 +30,27 @@ def test_untrusted_pending_trusted_confirm(deps, family):
         svc.decide(cid, trusted, "reject")  # confirmed 后非法转移
 
 
-def test_trusted_submit_directly_confirmed(deps, family):
-    fid, elder, adult = family
-    vid = _make_verdict(deps, family)
+def test_trusted_submit_directly_confirmed(deps, group):
+    group_id, elder, adult = group
+    vid = _make_verdict(deps, group)
     _, status = CorrectionService(deps.repos).submit(vid, deps.repos.member.get(adult).user_id, CorrectionLabel.FALSE_POSITIVE)
     assert status is CorrectionStatus.CONFIRMED
 
 
-def test_weekly_report(deps, family):
-    fid, elder, adult = family
-    vid = _make_verdict(deps, family)
+def test_weekly_report(deps, group):
+    group_id, elder, adult = group
+    vid = _make_verdict(deps, group)
     svc = CorrectionService(deps.repos)
     cid, _ = svc.submit(vid, deps.repos.member.get(adult).user_id, CorrectionLabel.FALSE_POSITIVE, note="正常消息")
-    report = weekly_report(deps.repos, fid)
+    report = weekly_report(deps.repos, group_id)
     assert report["queries"] == 1
     assert report["corrections"] == 1
     assert report["false_positives"] == 1
 
 
-def test_expire_pending(deps, family):
-    fid, elder, adult = family
-    vid = _make_verdict(deps, family)
+def test_expire_pending(deps, group):
+    group_id, elder, adult = group
+    vid = _make_verdict(deps, group)
     svc = CorrectionService(deps.repos)
     cid, _ = svc.submit(vid, deps.repos.member.get(elder).user_id, CorrectionLabel.REAL)
     # 未超时:不动
@@ -62,10 +62,10 @@ def test_expire_pending(deps, family):
     assert deps.repos.correction.get(cid).status is CorrectionStatus.REJECTED
 
 
-def test_stale_pending_cannot_be_confirmed(deps, family):
+def test_stale_pending_cannot_be_confirmed(deps, group):
     """惰性清算:决定前先清算超时,过期 pending 不可再确认。"""
-    fid, elder, adult = family
-    vid = _make_verdict(deps, family)
+    group_id, elder, adult = group
+    vid = _make_verdict(deps, group)
     svc = CorrectionService(deps.repos)
     cid, _ = svc.submit(vid, deps.repos.member.get(elder).user_id, CorrectionLabel.REAL)
     deps.conn.execute("UPDATE correction SET created_at=?", [time.time() - 8 * 86400])
@@ -75,10 +75,10 @@ def test_stale_pending_cannot_be_confirmed(deps, family):
     assert deps.repos.correction.get(cid).status is CorrectionStatus.REJECTED
 
 
-def test_fresh_pending_still_confirmable(deps, family):
+def test_fresh_pending_still_confirmable(deps, group):
     """惰性清算不误伤:未超时的 pending 正常确认。"""
-    fid, elder, adult = family
-    vid = _make_verdict(deps, family)
+    group_id, elder, adult = group
+    vid = _make_verdict(deps, group)
     svc = CorrectionService(deps.repos)
     cid, _ = svc.submit(vid, deps.repos.member.get(elder).user_id, CorrectionLabel.REAL)
     assert svc.decide(cid, adult, "confirm") is CorrectionStatus.CONFIRMED
