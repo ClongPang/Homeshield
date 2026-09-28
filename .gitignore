@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 *.db
+*.db.server.lock
 .env
 .pytest_cache/
 data/eval_out/

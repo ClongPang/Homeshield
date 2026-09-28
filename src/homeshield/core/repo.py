@@ -517,6 +517,27 @@ class CorrectionRepo:
             "JOIN verdict v ON v.id=c.verdict_id WHERE c.status='confirmed'")]
 
 
+@_serialize_repo_access
+class WecomMemberRepo:
+    """wxkf 用户 ↔ 企业微信成员 userid 的映射;应用消息告警按此触达微信插件。"""
+
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
+
+    def link(self, user_id: int, corp_userid: str) -> None:
+        with self.conn:
+            # corp_userid 亦有 UNIQUE 约束:成员改绑到另一用户时先腾出旧映射
+            self.conn.execute("DELETE FROM wecom_member WHERE corp_userid=? AND user_id<>?",
+                              (corp_userid, user_id))
+            self.conn.execute("INSERT INTO wecom_member(user_id,corp_userid) VALUES(?,?) "
+                              "ON CONFLICT(user_id) DO UPDATE SET corp_userid=excluded.corp_userid",
+                              (user_id, corp_userid))
+
+    def get(self, user_id: int) -> str | None:
+        row = self.conn.execute("SELECT corp_userid FROM wecom_member WHERE user_id=?",
+                                (user_id,)).fetchone()
+        return row["corp_userid"] if row else None
+
+
 @dataclass
 class Repos:
     conn: sqlite3.Connection
@@ -528,8 +549,10 @@ class Repos:
     alert: AlertRepo
     correction: CorrectionRepo
     incident: IncidentRepo
+    wecom_member: WecomMemberRepo
 
 
 def make_repos(conn: sqlite3.Connection) -> Repos:
     return Repos(conn, UserRepo(conn), RelationRepo(conn), InviteRepo(conn), QueryRepo(conn),
-                 VerdictRepo(conn), AlertRepo(conn), CorrectionRepo(conn), IncidentRepo(conn))
+                 VerdictRepo(conn), AlertRepo(conn), CorrectionRepo(conn), IncidentRepo(conn),
+                 WecomMemberRepo(conn))

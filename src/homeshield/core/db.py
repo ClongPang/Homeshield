@@ -123,6 +123,10 @@ CREATE TABLE IF NOT EXISTS correction_vote(
     CHECK((label IS NULL) = (voted_at IS NULL))
 );
 CREATE INDEX IF NOT EXISTS ix_correction_vote_relation ON correction_vote(relation_id,case_id);
+CREATE TABLE IF NOT EXISTS wecom_member(
+    user_id INTEGER PRIMARY KEY REFERENCES user(id),
+    corp_userid TEXT NOT NULL UNIQUE
+);
 """
 
 

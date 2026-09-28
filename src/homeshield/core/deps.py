@@ -10,6 +10,7 @@ from pathlib import Path
 
 from homeshield.core.config import Settings
 from homeshield.core.channels.wechat import WeChatChannel
+from homeshield.core.channels.wecom import WeComChannel
 from homeshield.core.db import connect, init_schema
 from homeshield.core.events import EventBus
 from homeshield.core.relations import RelationService
@@ -40,6 +41,7 @@ class Deps:
     broker: AlertBroker
     alert_router: AlertRouter
     wechat: WeChatChannel | None
+    wecom: WeComChannel | None
     llm: LLMPort
     retriever: Retriever
     judge: Judge
@@ -57,6 +59,9 @@ def build_deps(settings: Settings) -> Deps:
     broker = AlertBroker()
     # 微信通道单例:回调签名 + 客服接口回复 + 模板消息共用一个实例(token 缓存随之生效)
     wechat = WeChatChannel(settings) if settings.wechat_token else None
+    # 企微通道单例:有 corpid 即构造;回调与 kf 接口分别由 configured/api_ready 自门控,
+    # 避免只配密钥(拉取+告警可用)却因缺回调三件套而整条通道静默失效
+    wecom = WeComChannel(settings) if settings.wecom_corpid else None
     llm = make_llm(settings) # 模型对象实例
     # EMBED 供应商未配置时传 None,检索退化为纯关键词
     retriever = Retriever(
@@ -75,6 +80,9 @@ def build_deps(settings: Settings) -> Deps:
     if (wechat is not None and settings.wechat_appid and settings.wechat_secret
             and settings.wechat_multi_template_id):
         router.wechat = wechat
+    # 企微应用消息(微信插件)告警:密钥与 agentid 齐备才启用
+    if wecom is not None and wecom.api_ready and settings.wecom_agent_id:
+        router.wecom = wecom
     pipeline = Pipeline(
         repos=repos,
         llm=llm,
@@ -99,6 +107,7 @@ def build_deps(settings: Settings) -> Deps:
         broker=broker,
         alert_router=router,
         wechat=wechat,
+        wecom=wecom,
         llm=llm,
         retriever=retriever,
         judge=judge,

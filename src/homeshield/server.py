@@ -5,8 +5,10 @@ uses platform signature validation; text and image queries receive a quick ACK
 then run through the existing verification pipeline.
 Routes: api/relations.py (personal data) and api/wechat.py (WeChat callback).
 """
+import asyncio
 import os
 import pathlib
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
@@ -18,6 +20,7 @@ except ImportError:  # 非 POSIX 平台跳过护栏(部署目标为 Linux/macOS)
 
 from homeshield.api.relations import build_relation_router
 from homeshield.api.wechat import build_wechat_router
+from homeshield.api.wecom import build_wecom_router, wecom_poller
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps
 from homeshield.core.feedback import CorrectionService
@@ -59,7 +62,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     setup_logging()
     _acquire_single_process_lock(settings.db_path)
     deps = build_deps(settings)
-    app = FastAPI(title="Homeshield")   # 这个 app 就是后续 uvicorn module:app 启动时引用的对象
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # 企微拉取轮询器:配置齐备才启动;游标在内存,重启重放由 msg_id 幂等去重兜底
+        poller = None
+        if deps.wecom is not None and deps.wecom.api_ready:
+            poller = asyncio.create_task(wecom_poller(deps, deps.verification))
+        yield
+        if poller is not None:
+            poller.cancel()
+
+    app = FastAPI(title="Homeshield", lifespan=lifespan)   # 这个 app 就是后续 uvicorn module:app 启动时引用的对象
     app.state.deps = deps # 把构建好的依赖（数据库连接等）登记为应用级共享状态
 
     # Register personal relation and query interfaces.
@@ -72,6 +86,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     # 注册微信公众号回调接口
     app.include_router(build_wechat_router(deps, deps.verification))
+    # 注册企业微信(微信客服)回调接口
+    app.include_router(build_wecom_router(deps))
 
     @app.get("/")
     def index():

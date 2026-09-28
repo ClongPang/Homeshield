@@ -26,6 +26,10 @@ def main() -> None:
     preview = sub.add_parser("supply-preview", help="read-only preview of query context")
     preview.add_argument("--query-id", type=int, required=True)
 
+    wlink = sub.add_parser("wecom-link", help="map a user to their WeCom corp userid (alert delivery)")
+    wlink.add_argument("--user-id", type=int, required=True)
+    wlink.add_argument("--corp-userid", required=True)
+
     args = parser.parse_args()
     deps = build_deps(Settings.load())
 
@@ -35,6 +39,10 @@ def main() -> None:
         user = deps.repos.users.get(args.user_id)
         if user is None: raise SystemExit("user not found")
         print(user.entry_url(args.base_url))
+    elif args.cmd == "wecom-link":
+        if deps.repos.users.get(args.user_id) is None: raise SystemExit("user not found")
+        deps.repos.wecom_member.link(args.user_id, args.corp_userid)
+        print("linked", args.user_id, "->", args.corp_userid)
     elif args.cmd == "incident":
         print(json.dumps(deps.repos.incident.list_for_user(args.user_id), ensure_ascii=False, indent=2))
     elif args.cmd == "supply-preview":

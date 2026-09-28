@@ -32,6 +32,13 @@ class Settings:
     wechat_appid: str = ""
     wechat_secret: str = ""
     wechat_multi_template_id: str = ""
+    # 企业微信(微信客服):corpid/密钥用于 API 调用,token/aes_key 用于回调验签与加解密
+    wecom_corpid: str = ""
+    wecom_agent_id: str = ""
+    wecom_app_secret: str = ""  # 自建应用密钥(需在控制台授权为微信客服可调用应用)
+    wecom_kf_secret: str = ""  # 微信客服自身密钥(可选,优先级高于应用密钥)
+    wecom_token: str = ""
+    wecom_aes_key: str = ""
     public_base_url: str = ""
     max_relations: int = 10
     invite_code_ttl_days: int = 7
@@ -71,6 +78,12 @@ class Settings:
             wechat_appid=os.getenv("WECHAT_APPID", ""),
             wechat_secret=os.getenv("WECHAT_SECRET", ""),
             wechat_multi_template_id=os.getenv("WECHAT_MULTI_TEMPLATE_ID", ""),
+            wecom_corpid=os.getenv("WECOM_CORPID", ""),
+            wecom_agent_id=os.getenv("WECOM_AGENT_ID", ""),
+            wecom_app_secret=os.getenv("WECOM_APP_SECRET", ""),
+            wecom_kf_secret=os.getenv("WECOM_KF_SECRET", ""),
+            wecom_token=os.getenv("WECOM_TOKEN", ""),
+            wecom_aes_key=os.getenv("WECOM_AES_KEY", ""),
             public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
             max_relations=int(os.getenv("MAX_RELATIONS", "10")),
             invite_code_ttl_days=int(os.getenv("INVITE_CODE_TTL_DAYS", "7")),
