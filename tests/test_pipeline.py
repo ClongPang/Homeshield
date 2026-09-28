@@ -1,48 +1,90 @@
-"""管线端到端(mock 模式):判定、规则下限、回复格式、告警落库、图片降级。"""
+"""Pipeline behavior remains unchanged; alert notes follow relation fanout."""
 import asyncio
 
 from homeshield.core.deps import make_pipeline
+from homeshield.core.errors import DegradeError
 from homeshield.core.intake import ingest
-from homeshield.core.models import Level
+from homeshield.core.judge import JudgeInput
+from homeshield.core.models import JudgeOutput, Level, Mode
 from homeshield.core.reply import is_valid_reply
-from conftest import ingest_member
 
 
-def test_end_to_end_dangerous(deps, group):
-    group_id, elder, adult = group
-    intake = ingest_member(
-        deps.repos, elder,
-        content="妈,是我,别告诉家人,立即转账5万到安全账户,手续费2000",
-    )
+def test_end_to_end_dangerous_and_relation_alert(deps, relations):
+    protected, _, relation_id = relations
+    intake = ingest(deps.repos, user_id=protected.id,
+                    content="妈,是我,别告诉家人,立即转账5万到安全账户,手续费2000")
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
     assert result.verdict is not None and result.verdict_id is not None
     assert result.verdict.level is Level.DANGEROUS
-    assert result.rule_floor_level is Level.DANGEROUS  # isolation+transfer 共现
+    assert result.rule_floor_level is Level.DANGEROUS
     assert is_valid_reply(result.reply)
-    assert "高危提醒" in result.reply  # 通知说明只在实际生成告警后追加
-    # dangerous → alert 表留痕,覆盖全体成员(群模型告警面)
-    n = deps.conn.execute("SELECT COUNT(*) c FROM alert").fetchone()["c"]
-    assert n == len(deps.repos.member.list_members(group_id))
+    assert "儿子" in result.reply and "提醒列表" in result.reply
+    rows = deps.conn.execute("SELECT relation_id,name_at_alert FROM alert").fetchall()
+    assert [(row["relation_id"], row["name_at_alert"]) for row in rows] == [(relation_id, "妈妈")]
 
 
-def test_image_transcribe_degrade(deps, group):
-    group_id, elder, _ = group
-    intake = ingest_member(
-        deps.repos, elder,
-        content="DEGRADEME",
-        content_type="image",
-    )
+def test_image_transcribe_degrade(deps, user):
+    intake = ingest(deps.repos, user_id=user.id, content="DEGRADEME", content_type="image")
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
     assert result.degraded and result.verdict is None
     assert "请把内容打成文字" in result.reply
 
 
-def test_suspicious_not_alerting(deps, group):
-    """suspicious 不产生 alert。"""
-    group_id, elder, _ = group
-    intake = ingest_member(deps.repos, elder, content="最后一天限时优惠,马上下单")
+def test_suspicious_not_alerting(deps, relations):
+    protected, _, _ = relations
+    intake = ingest(deps.repos, user_id=protected.id, content="最后一天限时优惠,马上下单")
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
     assert result.verdict.level is Level.SUSPICIOUS
-    assert "已通知" not in result.reply
-    n = deps.conn.execute("SELECT COUNT(*) c FROM alert").fetchone()["c"]
-    assert n == 0
+    assert "提醒列表" not in result.reply
+    assert deps.conn.execute("SELECT COUNT(*) FROM alert").fetchone()[0] == 0
+
+
+def test_bare_dangerous_query_has_no_alert_or_notification_claim(deps, user):
+    intake = ingest(deps.repos, user_id=user.id, content="别告诉家人，立即转账5万")
+    result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
+    assert result.verdict.level is Level.DANGEROUS
+    assert deps.conn.execute("SELECT COUNT(*) FROM alert").fetchone()[0] == 0
+    assert "提醒列表" not in result.reply
+
+
+class _JudgeAlwaysDegrades:
+    """判定阶段失败的替身:抽取阶段正常完成,规则下限已在手。"""
+
+    mode = Mode.LLM
+
+    async def judge(self, inp: JudgeInput, *, constrained: bool) -> JudgeOutput:
+        raise DegradeError("这条消息我拿不准，请把内容给家人看看再决定", "test judge degrade")
+
+
+def test_judge_degrade_keeps_dangerous_rule_floor(deps, user):
+    intake = ingest(deps.repos, user_id=user.id, content="别告诉家人，立即转账5万到安全账户")
+    pipeline = make_pipeline(deps)
+    pipeline.judge = _JudgeAlwaysDegrades()
+    result = asyncio.run(pipeline.run(intake.message, intake.query_id))
+    assert result.degraded and result.verdict is None and result.verdict_id is None
+    assert result.rule_floor_level is Level.DANGEROUS
+    assert "不要转钱" in result.reply and "96110" in result.reply
+    assert "拿不准" not in result.reply
+    assert deps.conn.execute("SELECT COUNT(*) FROM verdict").fetchone()[0] == 0
+    assert deps.conn.execute("SELECT COUNT(*) FROM alert").fetchone()[0] == 0
+
+
+def test_judge_degrade_keeps_suspicious_rule_floor(deps, user):
+    intake = ingest(deps.repos, user_id=user.id, content="这件事要保密，是我们俩的事")
+    pipeline = make_pipeline(deps)
+    pipeline.judge = _JudgeAlwaysDegrades()
+    result = asyncio.run(pipeline.run(intake.message, intake.query_id))
+    assert result.degraded and result.verdict is None
+    assert result.rule_floor_level is Level.SUSPICIOUS
+    assert "保密" in result.reply and "核实" in result.reply
+    assert "拿不准" not in result.reply
+
+
+def test_judge_degrade_safe_floor_keeps_baseline_copy(deps, user):
+    intake = ingest(deps.repos, user_id=user.id, content="今天天气不错，出来散步吗")
+    pipeline = make_pipeline(deps)
+    pipeline.judge = _JudgeAlwaysDegrades()
+    result = asyncio.run(pipeline.run(intake.message, intake.query_id))
+    assert result.degraded and result.verdict is None
+    assert result.rule_floor_level is Level.SAFE
+    assert "拿不准" in result.reply

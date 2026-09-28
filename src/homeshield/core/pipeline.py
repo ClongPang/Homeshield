@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel
 
+from homeshield.core import messages
 from homeshield.core.annotate import annotate_text
 from homeshield.core.errors import DegradeError
 from homeshield.core.events import EventBus, VerdictCompleted
@@ -185,10 +186,15 @@ class Pipeline:
                     logger.warning("image transcript persistence failed", exc_info=True)
             conversation = _to_conversation(text, message.content_type.value)
             extraction = await self._extract_features_and_cases(conversation)
-            supplied = self._supply(message, query_id, text) if self.config.supply_features else []
+        except DegradeError as de:
+            # 阶段1-2 失败(如图片转写):尚无任何确定性结论,整体降级
+            return self._build_degraded_result(query_id, de.user_message, t0)
+        supplied = self._supply(message, query_id, text) if self.config.supply_features else []
+        try:
             verdict = await self._judge_conversation(conversation, extraction)
         except DegradeError as de:
-            return self._build_degraded_result(query_id, de.user_message, t0)
+            # 阶段3 失败:规则下限不依赖 LLM,是确定性结论,降级口径不得低于它
+            return self._build_degraded_result(query_id, de.user_message, t0, floor=extraction.rule_floor)
         return await self._persist_verdict_and_publish_event(
             message, query_id, conversation.render(), extraction, verdict, t0, supplied
         )
@@ -442,6 +448,11 @@ class Pipeline:
         )
 
     def _build_degraded_result(self, query_id: int, reply: str, t0: float, floor: Level = Level.SAFE) -> PipelineResult:
+        # 降级口径不得低于规则下限:下限说明规则层已确定命中的骗术特征,此刻说"拿不准"是虚假陈述
+        if floor is Level.DANGEROUS:
+            reply = messages.DEGRADED_FLOOR_DANGEROUS
+        elif floor is Level.SUSPICIOUS:
+            reply = messages.DEGRADED_FLOOR_SUSPICIOUS
         return PipelineResult(
             query_id=query_id,
             reply=reply,

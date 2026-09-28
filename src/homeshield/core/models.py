@@ -1,4 +1,4 @@
-"""领域模型与枚举。身份凭证属于 user,成员关系属于 member。时间戳为 Unix 秒整数。"""
+"""Domain models and enums. User tokens are personal; timestamps are Unix seconds."""
 from datetime import datetime, timezone
 from enum import StrEnum
 
@@ -29,14 +29,14 @@ class Mode(StrEnum):
 class CorrectionLabel(StrEnum):
     """提交时的用户主张,永不改写;"是否已核实"由 CorrectionStatus 表达。"""
 
-    REAL = "real"  # 漏报主张:判轻了,实际是诈骗
-    FALSE_POSITIVE = "false_positive"  # 误报主张:判重了,实际不是诈骗
+    REAL = "real"                       # 漏报主张:判轻了,实际是诈骗
+    FALSE_POSITIVE = "false_positive"   # 误报主张:判重了,实际不是诈骗
 
 
 class CorrectionStatus(StrEnum):
     PENDING = "pending"
     CONFIRMED = "confirmed"
-    REJECTED = "rejected"
+    NO_CONSENSUS = "no_consensus"       # 未达成共识
 
 
 LEVEL_RANK: dict[Level, int] = {
@@ -52,11 +52,10 @@ def max_level(a: Level, b: Level) -> Level:
 
 
 class Message(BaseModel):
-    """intake 产物及受理时固定的群和成员关系快照。"""
+    """Intake result and the directed relations snapshotted at acceptance."""
 
     user_id: int
-    group_ids: list[int]
-    membership_ids: list[int]
+    relation_ids: list[int] = Field(default_factory=list)
     content_type: ContentType
     content: str
     channel: str = "web"  # wechat | web
@@ -169,10 +168,7 @@ class JudgeOutput(BaseModel):
 
 
 class User(BaseModel):
-    """
-    跨群身份（一个人的全局身份）。
-    openid 对应微信账号,token 是个人控制台凭证。
-    """
+    """A person's global identity. openid maps to WeChat; token authenticates the console."""
 
     id: int
     openid: str
@@ -183,34 +179,3 @@ class User(BaseModel):
         if not base_url:
             return ""
         return f"{base_url.rstrip('/')}/console?token={self.token}"
-
-
-class Member(BaseModel):
-    """
-    群成员关系（这个人在某个群里的成员关系）。
-    Member.user_id 连接到 User
-    trusted 是唯一的成员内差异:纠正即时生效 + 可管理成员;
-    它是数据质量防火墙,不是身份层级——由信任成员管理,与年龄无关。
-    """
-
-    id: int
-    group_id: int
-    user_id: int | None = None
-    name: str
-    trusted: bool = False
-    mute: bool = False                  # 是否静音这个群的提醒
-    ended_at: int | None = None         # 成员关系结束的时间戳。None 表示仍在群里。
-    end_reason: str | None = None       # 关系结束原因，例如 left（主动退出）、removed（被移除）、disbanded（群解散）。关系仍有效时为 None
-
-
-class CorrectionRecord(BaseModel):
-    """
-    记录一条成员对系统判定提出的纠正，让系统能追踪谁纠正了哪条判定、理由是什么，以及纠正是否被认可
-    """
-    id: int
-    verdict_id: int                     # 被纠正的反诈判定
-    by_user_id: int
-    label: CorrectionLabel
-    note: str = ""
-    status: CorrectionStatus
-    decided_by_membership_id: int | None = None

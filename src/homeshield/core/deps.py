@@ -9,11 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from homeshield.core.config import Settings
-from homeshield.core.binding import BindingService
 from homeshield.core.channels.wechat import WeChatChannel
 from homeshield.core.db import connect, init_schema
 from homeshield.core.events import EventBus
-from homeshield.core.groups import GroupService
+from homeshield.core.relations import RelationService
 from homeshield.core.judge import Judge, LLMJudge, MockJudge
 from homeshield.core.llm import LLMPort, make_llm
 from homeshield.core.models import KbCase
@@ -47,8 +46,7 @@ class Deps:
     reply: ReplyGenerator
     pipeline: Pipeline
     verification: VerificationService
-    binding: BindingService
-    groups: GroupService
+    relations: RelationService
 
 
 def build_deps(settings: Settings) -> Deps:
@@ -70,12 +68,12 @@ def build_deps(settings: Settings) -> Deps:
     )
     router = wire_alerts(
         bus,broker,repos,base_url=settings.public_base_url,
-        template_id=settings.wechat_template_id,multi_template_id=settings.wechat_multi_template_id,
+        template_id=settings.wechat_multi_template_id,
     )
     # 模板消息发送需要三件套(appid/secret 换 token,template_id 指模板);
     # 只配 wechat_token 时回调链路可用,告警模板保持关闭而非发送时失败
     if (wechat is not None and settings.wechat_appid and settings.wechat_secret
-            and (settings.wechat_template_id or settings.wechat_multi_template_id)):
+            and settings.wechat_multi_template_id):
         router.wechat = wechat
     pipeline = Pipeline(
         repos=repos,
@@ -92,12 +90,7 @@ def build_deps(settings: Settings) -> Deps:
         supply_max_items=settings.supply_max_items,
     )
     verification = VerificationService(repos, pipeline)
-    binding = BindingService(
-        repos,
-        max_members=settings.max_members,
-        code_ttl_days=settings.bind_code_ttl_days,
-        max_groups=settings.max_groups,
-    )
+    relations = RelationService(repos, settings.max_relations, settings.invite_code_ttl_days)
     return Deps(
         settings=settings,
         conn=conn,
@@ -112,8 +105,7 @@ def build_deps(settings: Settings) -> Deps:
         reply=reply,
         pipeline=pipeline,
         verification=verification,
-        binding=binding,
-        groups=GroupService(repos,settings.max_members),
+        relations=relations,
     )
 
 

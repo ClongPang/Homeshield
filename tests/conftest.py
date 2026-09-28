@@ -1,35 +1,38 @@
-"""测试夹具:mock 模式全链路可跑,临时库隔离。包化后无需 sys.path hack。"""
+"""Isolated in-memory test fixtures."""
 import os
 import pytest
 
-# server 模块导入时会构造默认 app;禁止它碰工作目录里可能存在的旧版开发库。
 os.environ["DB_PATH"] = ":memory:"
 
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps
 from homeshield.core.intake import ingest
 
-@pytest.fixture()
+
+@pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(mode="mock", db_path=str(tmp_path / "test.db"))
 
 
-@pytest.fixture()
+@pytest.fixture
 def deps(settings):
     return build_deps(settings)
 
 
-@pytest.fixture()
-def group(deps):
-    """(group_id, untrusted_id, trusted_id)——纠正信任位的两端各一。"""
-    group_id = deps.repos.group.create("测试家庭")
-    untrusted = deps.repos.member.add(group_id, "妈妈", openid="test:mom")
-    trusted = deps.repos.member.add(group_id, "儿子", trusted=True, openid="test:son")
-    return group_id, untrusted, trusted
+@pytest.fixture
+def user(deps):
+    return deps.repos.users.get_or_create("test:queryer")
 
 
-def ingest_member(repos, member_id, **kwargs):
-    member = repos.member.get(member_id)
-    return ingest(
-        repos, user_id=member.user_id, memberships=repos.member.list_for_user(member.user_id), **kwargs
-    )
+@pytest.fixture
+def relations(deps):
+    protector = deps.repos.users.get_or_create("test:protector")
+    protected = deps.repos.users.get_or_create("test:protected")
+    invite = deps.relations.issue_invite(protector.id, "妈妈")
+    _, relation_id, _ = deps.relations.join(protected.openid, invite["code"])
+    deps.repos.relation.update(relation_id, protected.id, inverse_name="儿子")
+    return protected, protector, relation_id
+
+
+def ingest_user(repos, user, **kwargs):
+    return ingest(repos, user_id=user.id, **kwargs)

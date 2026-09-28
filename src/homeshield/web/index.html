@@ -4,6 +4,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="referrer" content="no-referrer" />
 <title>小盾 · 帮你看看</title>
 <style>
   body { font-family: -apple-system, sans-serif; font-size: 22px; margin: 0; background: #f6f7f9; }
@@ -11,6 +12,7 @@
   h1 { font-size: 26px; }
   textarea { width: 100%; height: 110px; font-size: 20px; padding: 10px; box-sizing: border-box; }
   button { width: 100%; padding: 14px; font-size: 22px; margin-top: 10px; border: 0; border-radius: 10px; background: #2b6cb0; color: #fff; }
+  button:disabled { opacity: .6; }
   .file { margin-top: 10px; font-size: 17px; color: #444; }
   .card { background: #fff; border-radius: 12px; padding: 16px; margin-top: 16px; white-space: pre-wrap; line-height: 1.6; }
   .tip { color: #666; font-size: 15px; margin-top: 8px; }
@@ -21,23 +23,34 @@
   <h1>小盾 · 帮你看看</h1>
   <textarea id="input" placeholder="把可疑消息粘贴到这里…"></textarea>
   <input type="file" id="pic" accept="image/*" class="file" />
-  <button onclick="submit_text_query()">帮我看看</button>
-  <div class="tip">你查证的内容,家人可以看到。</div>
+  <button id="go" onclick="submit_text_query()">帮我看看</button>
+  <div class="tip">查证结果只回复你本人。只有你主动提交纠正后，原查询内容才会供当前联防者投票查看。</div>
   <div class="card" id="out" hidden></div>
 </div>
 <script>
 const token = new URLSearchParams(location.search).get("token") || "";
 const out = document.getElementById("out");
+const go = document.getElementById("go");
+
+// crypto.randomUUID 只在安全上下文存在;局域网 HTTP 自托管时退化为时间戳随机串(幂等键只需唯一)
+const newMsgId = () => (crypto.randomUUID
+  ? crypto.randomUUID()
+  : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`);
 
 function show(text) { out.hidden = false; out.textContent = text; }
 
+let sending = false;
+
 async function submit_risk_query(payload) {
+  if (sending) return;
+  sending = true;
+  go.disabled = true;
   show("小盾正在看…");
   try {
     const resp = await fetch("/api/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, msg_id: crypto.randomUUID(), ...payload }),
+      body: JSON.stringify({ token, msg_id: newMsgId(), ...payload }),
     });
     if (resp.status === 401) return show("链接已失效，请让家人重新发一条链接");
     if (resp.status === 409) return show("这条消息已经提交过了，请稍等结果");
@@ -46,6 +59,9 @@ async function submit_risk_query(payload) {
     show(data.reply || "小盾暂时出错了，请稍后再试");
   } catch (e) {
     show("网络出了点问题，请稍后再试");
+  } finally {
+    sending = false;
+    go.disabled = false;
   }
 }
 

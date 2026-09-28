@@ -21,7 +21,7 @@ DOMAIN_FILES = [
     "src/homeshield/core/feedback.py",
     "src/homeshield/core/pipeline.py",
     "src/homeshield/core/annotate.py",
-    "src/homeshield/core/binding.py",
+    "src/homeshield/core/relations.py",
     "src/homeshield/core/verification.py",
 ]
 

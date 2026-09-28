@@ -1,4 +1,4 @@
-"""SQLite 仓储。共享连接上的数据库访问与写事务都经过 WRITE_LOCK。"""
+"""SQLite repositories. A process-wide lock serializes access to the shared connection."""
 from functools import wraps
 import json
 import secrets
@@ -7,24 +7,20 @@ import threading
 from dataclasses import dataclass
 
 from homeshield.core.errors import DuplicateMessage, ValidationError
-from homeshield.core.models import (
-    CorrectionLabel, CorrectionRecord, CorrectionStatus, Level, Member, Mode, User, utc_timestamp,
-)
+from homeshield.core.models import Level, Mode, User, utc_timestamp
 
 WRITE_LOCK = threading.RLock()
+CODE_ALPHABET = "2346789ABCDEFGHJKMNPQRSTUVWXYZ"
 
 
 def _serialize_repo_access(cls):
-    """共享连接不能被 FastAPI 工作线程并发操作,仓储方法统一串行执行。"""
     for name, method in tuple(vars(cls).items()):
         if name.startswith("_") or isinstance(method, (staticmethod, classmethod)) or not callable(method):
             continue
-
         @wraps(method)
         def serialized(self, *args, _method=method, **kwargs):
             with WRITE_LOCK:
                 return _method(self, *args, **kwargs)
-
         setattr(cls, name, serialized)
     return cls
 
@@ -35,12 +31,10 @@ def _token() -> str:
 
 @_serialize_repo_access
 class UserRepo:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
 
     @staticmethod
-    def _model(row) -> User | None:
-        return User(**dict(row)) if row else None
+    def _model(row) -> User | None: return User(**dict(row)) if row else None
 
     def get(self, user_id: int) -> User | None:
         return self._model(self.conn.execute("SELECT * FROM user WHERE id=?", (user_id,)).fetchone())
@@ -52,202 +46,180 @@ class UserRepo:
         return self._model(self.conn.execute("SELECT * FROM user WHERE token=?", (token,)).fetchone())
 
     def get_or_create(self, openid: str) -> User:
-        with WRITE_LOCK, self.conn:
+        with self.conn:
             row = self.conn.execute("SELECT * FROM user WHERE openid=?", (openid,)).fetchone()
-            if row:
-                return User(**dict(row))
-            cur = self.conn.execute(
-                "INSERT INTO user(openid,token,created_at) VALUES(?,?,?)",
-                (openid, _token(), utc_timestamp()),
-            )
+            if row: return User(**dict(row))
+            cur = self.conn.execute("INSERT INTO user(openid,token,created_at) VALUES(?,?,?)",
+                                    (openid, _token(), utc_timestamp()))
             row = self.conn.execute("SELECT * FROM user WHERE id=?", (cur.lastrowid,)).fetchone()
         return User(**dict(row))
 
 
 @_serialize_repo_access
-class GroupRepo:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+class RelationRepo:
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
 
-    def create(self, name: str, created_by_user_id: int | None = None) -> int:
-        with WRITE_LOCK, self.conn:
-            cur = self.conn.execute(
-                "INSERT INTO protection_group(name,created_by_user_id,created_at) VALUES(?,?,?)",
-                (name, created_by_user_id, utc_timestamp()),
-            )
-        return int(cur.lastrowid)
-
-    def create_with_creator(self, name: str, creator_name: str, user_id: int) -> int:
-        with WRITE_LOCK, self.conn:
-            cur = self.conn.execute(
-                "INSERT INTO protection_group(name,created_by_user_id,created_at) VALUES(?,?,?)",
-                (name, user_id, utc_timestamp()),
-            )
-            group_id = int(cur.lastrowid)
-            self.conn.execute(
-                "INSERT INTO member(group_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
-                (group_id, user_id, creator_name, 1, utc_timestamp()),
-            )
-        return group_id
-
-    def get(self, group_id: int) -> dict | None:
-        row = self.conn.execute("SELECT * FROM protection_group WHERE id=?", (group_id,)).fetchone()
+    def get(self, relation_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM guard_relation WHERE id=?", (relation_id,)).fetchone()
         return dict(row) if row else None
 
-    def list_active_groups_for_user(self, user_id: int) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT g.id,g.name,m.id AS membership_id,m.trusted,m.mute,"
-            "(SELECT COUNT(*) FROM member x WHERE x.group_id=g.id AND x.ended_at IS NULL) member_count "
-            "FROM member m JOIN protection_group g ON g.id=m.group_id "
-            "WHERE m.user_id=? AND m.ended_at IS NULL AND g.disbanded_at IS NULL ORDER BY g.id",
-            (user_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+    def list_for_user(self, user_id: int) -> dict:
+        guardings = self.conn.execute(
+            "SELECT id,name,mute,created_at FROM guard_relation WHERE protector_user_id=? AND ended_at IS NULL ORDER BY id",
+            (user_id,)).fetchall()
+        guardians = self.conn.execute(
+            "SELECT id,COALESCE(NULLIF(inverse_name,''),'联防者 #'||id) name FROM guard_relation "
+            "WHERE protected_user_id=? AND ended_at IS NULL ORDER BY id", (user_id,)).fetchall()
+        return {"guardings": [dict(r) for r in guardings], "guardians": [dict(r) for r in guardians]}
+
+    def count_active(self, user_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) n FROM guard_relation WHERE ended_at IS NULL AND (protector_user_id=? OR protected_user_id=?)",
+            (user_id, user_id)).fetchone()
+        return int(row["n"])
+
+    def update(self, relation_id: int, user_id: int, *, name: str | None = None,
+               inverse_name: str | None = None, mute: bool | None = None) -> str | None:
+        with self.conn:
+            row = self.conn.execute("SELECT * FROM guard_relation WHERE id=? AND ended_at IS NULL", (relation_id,)).fetchone()
+            if row is None: return "relation_ended"
+            if row["protector_user_id"] == user_id:
+                if inverse_name is not None: return "wrong_side"
+                fields, values = [], []
+                if name is not None: fields.append("name=?"); values.append(name)
+                if mute is not None: fields.append("mute=?"); values.append(int(mute))
+            elif row["protected_user_id"] == user_id:
+                if name is not None or mute is not None: return "wrong_side"
+                fields, values = [], []
+                if inverse_name is not None: fields.append("inverse_name=?"); values.append(inverse_name)
+            else: return "not_participant"
+            if fields:
+                self.conn.execute(f"UPDATE guard_relation SET {','.join(fields)} WHERE id=?", (*values, relation_id))
+            return "updated"
+
+    def end(self, relation_id: int, user_id: int) -> str:
+        with self.conn:
+            row = self.conn.execute("SELECT * FROM guard_relation WHERE id=?", (relation_id,)).fetchone()
+            if row is None or user_id not in (row["protector_user_id"], row["protected_user_id"]):
+                return "not_found"
+            if row["ended_at"] is not None: return "already_ended"
+            reason = "by_protector" if row["protector_user_id"] == user_id else "by_protected"
+            now = utc_timestamp()
+            self.conn.execute("UPDATE guard_relation SET ended_at=?,end_reason=? WHERE id=? AND ended_at IS NULL",
+                              (now, reason, relation_id))
+            if reason == "by_protector":
+                self.conn.execute("UPDATE invite_code SET revoked_at=? WHERE creator_user_id=? AND used_at IS NULL AND revoked_at IS NULL",
+                                  (now, user_id))
+            return reason
+
+    def snapshot_for_protected(self, user_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id FROM guard_relation WHERE protected_user_id=? AND ended_at IS NULL ORDER BY id", (user_id,))]
 
 
 @_serialize_repo_access
-class MemberRepo:
-    def __init__(self, conn: sqlite3.Connection, users: UserRepo):
-        self.conn, self.users = conn, users
+class InviteRepo:
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
 
-    def add(
-        self, group_id: int, name: str, trusted: bool = False,
-        openid: str | None = None, user_id: int | None = None,
-    ) -> int:
-        if openid:
-            user_id = self.users.get_or_create(openid).id
-        with WRITE_LOCK, self.conn:
-            cur = self.conn.execute(
-                "INSERT INTO member(group_id,user_id,name,trusted,created_at) VALUES(?,?,?,?,?)",
-                (group_id, user_id, name, int(trusted and user_id is not None), utc_timestamp()),
-            )
-        return int(cur.lastrowid)
-
-    def _model(self, row) -> Member | None:
-        return Member(**dict(row)) if row else None
-
-    def _select(self) -> str:
-        return "SELECT m.* FROM member m"
-
-    def get(self, member_id: int) -> Member | None:
-        return self._model(self.conn.execute(self._select()+" WHERE m.id=?", (member_id,)).fetchone())
-
-    def list_members(self, group_id: int, active_only: bool = True) -> list[Member]:
-        sql = self._select()+" WHERE m.group_id=?"
-        if active_only:
-            sql += " AND m.ended_at IS NULL"
-        sql += " ORDER BY m.id"
-        return [self._model(r) for r in self.conn.execute(sql, (group_id,)).fetchall()]
-
-    def list_for_user(self, user_id: int, active_only: bool = True) -> list[Member]:
-        sql = self._select()+" JOIN protection_group g ON g.id=m.group_id WHERE m.user_id=?"
-        params: list = [user_id]
-        if active_only:
-            sql += " AND m.ended_at IS NULL AND g.disbanded_at IS NULL"
-        sql += " ORDER BY g.id"
-        return [self._model(r) for r in self.conn.execute(sql, params).fetchall()]
-
-    def active_members_in_groups(self, group_ids: list[int]) -> list[Member]:
-        if not group_ids:
-            return []
-        marks = ",".join("?" for _ in group_ids)
-        sql = self._select()+f" JOIN protection_group g ON g.id=m.group_id WHERE m.group_id IN ({marks}) " \
-              "AND m.user_id IS NOT NULL AND m.ended_at IS NULL AND g.disbanded_at IS NULL ORDER BY g.id,m.id"
-        return [self._model(r) for r in self.conn.execute(sql, group_ids).fetchall()]
-
-    def bind_member_to_user_by_openid(self, member_id: int, openid: str) -> User:
-        user = self.users.get_or_create(openid)
+    def create(self, creator_id: int, name: str, ttl_days: int, max_relations: int = 10) -> dict:
+        now = utc_timestamp()
+        code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
+        expires = now + ttl_days * 86400
+        self.conn.execute("BEGIN IMMEDIATE")
         try:
-            with WRITE_LOCK, self.conn:
-                cur = self.conn.execute(
-                    "UPDATE member SET user_id=? WHERE id=? AND user_id IS NULL AND ended_at IS NULL",
-                    (user.id, member_id),
-                )
-                if cur.rowcount != 1:
-                    raise ValidationError("member slot is no longer available")
-        except sqlite3.IntegrityError as e:
-            raise ValidationError(f"openid already has an active membership in this group: {openid}") from e
-        return user
-
-    def set_trust(self, member_id: int, trusted: bool) -> None:
-        with WRITE_LOCK, self.conn:
-            self.conn.execute(
-                "UPDATE member SET trusted=? WHERE id=? AND user_id IS NOT NULL AND ended_at IS NULL",
-                (int(trusted), member_id),
-            )
-
-    def demote_with_guard(self, member_id: int, group_id: int) -> bool:
-        with WRITE_LOCK, self.conn:
+            count = self.conn.execute("SELECT COUNT(*) n FROM guard_relation WHERE ended_at IS NULL "
+                                      "AND (protector_user_id=? OR protected_user_id=?)", (creator_id, creator_id)).fetchone()["n"]
+            if int(count) >= max_relations:
+                self.conn.rollback()
+                raise ValidationError("relation limit reached")
             cur = self.conn.execute(
-                "UPDATE member SET trusted=0 WHERE id=? AND group_id=? AND trusted=1 AND ended_at IS NULL"
-                " AND (SELECT COUNT(*) FROM member WHERE group_id=? AND trusted=1 AND user_id IS NOT NULL"
-                " AND ended_at IS NULL AND id<>?)>=1",
-                (member_id, group_id, group_id, member_id),
-            )
-        return cur.rowcount > 0
+                "INSERT INTO invite_code(code,creator_user_id,name,created_at,expires_at) VALUES(?,?,?,?,?)",
+                (code, creator_id, name, now, expires))
+            self.conn.commit()
+        except Exception:
+            if self.conn.in_transaction: self.conn.rollback()
+            raise
+        return {"id": int(cur.lastrowid), "code": code, "expires_at": expires}
 
-    def set_mute(self, member_id: int, mute: bool) -> None:
-        with WRITE_LOCK, self.conn:
-            self.conn.execute("UPDATE member SET mute=? WHERE id=? AND ended_at IS NULL", (int(mute), member_id))
+    def get(self, code: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM invite_code WHERE UPPER(code)=UPPER(?)", (code,)).fetchone()
+        return dict(row) if row else None
 
-    def rename_member(self, member_id: int, name: str) -> None:
-        with WRITE_LOCK, self.conn:
-            cur = self.conn.execute(
-                "UPDATE member SET name=? WHERE id=? AND ended_at IS NULL", (name, member_id)
-            )
-            if cur.rowcount != 1:
-                raise ValidationError("member not found")
+    def get_valid(self, code: str) -> dict | None:
+        row = self.conn.execute("SELECT * FROM invite_code WHERE UPPER(code)=UPPER(?) AND used_at IS NULL "
+                                "AND revoked_at IS NULL AND expires_at>?", (code, utc_timestamp())).fetchone()
+        return dict(row) if row else None
 
-    def count_trusted_members(self, group_id: int, exclude_id: int | None = None) -> int:
-        sql = "SELECT COUNT(*) c FROM member WHERE group_id=? AND trusted=1 AND user_id IS NOT NULL AND ended_at IS NULL"
-        params: list = [group_id]
-        if exclude_id is not None:
-            sql += " AND id<>?"
-            params.append(exclude_id)
-        return int(self.conn.execute(sql, params).fetchone()["c"])
+    def list_for_creator(self, user_id: int) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT id,code,name,created_at,expires_at,used_at,used_by_user_id,revoked_at FROM invite_code "
+            "WHERE creator_user_id=? ORDER BY id DESC", (user_id,))]
 
-    def count_bound_members(self, group_id: int, exclude_id: int | None = None) -> int:
-        sql = "SELECT COUNT(*) c FROM member WHERE group_id=? AND user_id IS NOT NULL AND ended_at IS NULL"
-        params: list = [group_id]
-        if exclude_id is not None:
-            sql += " AND id<>?"
-            params.append(exclude_id)
-        return int(self.conn.execute(sql, params).fetchone()["c"])
+    def revoke(self, invite_id: int, creator_id: int) -> str:
+        with self.conn:
+            row = self.conn.execute("SELECT * FROM invite_code WHERE id=? AND creator_user_id=?", (invite_id, creator_id)).fetchone()
+            if row is None: return "not_found"
+            if row["used_at"] is not None: return "used"
+            if row["revoked_at"] is not None: return "revoked"
+            self.conn.execute("UPDATE invite_code SET revoked_at=? WHERE id=? AND used_at IS NULL AND revoked_at IS NULL",
+                              (utc_timestamp(), invite_id))
+            return "revoked"
+
+    def claim(self, code: str, protected_id: int, max_relations: int) -> tuple[str, int | None]:
+        """Consume a code and create its directed relation in one write transaction."""
+        now = utc_timestamp()
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.conn.execute("SELECT * FROM invite_code WHERE UPPER(code)=UPPER(?)", (code,)).fetchone()
+            if row is None: reason = "invalid"
+            elif row["used_at"] is not None: reason = "used"
+            elif row["revoked_at"] is not None: reason = "revoked"
+            elif row["expires_at"] <= now: reason = "expired"
+            elif int(row["creator_user_id"]) == protected_id: reason = "self"
+            else:
+                creator_id = int(row["creator_user_id"])
+                exists = self.conn.execute("SELECT 1 FROM guard_relation WHERE protector_user_id=? AND protected_user_id=? AND ended_at IS NULL",
+                                           (creator_id, protected_id)).fetchone()
+                if exists: reason = "already_exists"
+                else:
+                    ids = (creator_id, protected_id)
+                    counts = [self.conn.execute("SELECT COUNT(*) n FROM guard_relation WHERE ended_at IS NULL AND (protector_user_id=? OR protected_user_id=?)", (uid, uid)).fetchone()["n"] for uid in ids]
+                    if any(int(count) >= max_relations for count in counts): reason = "limit"
+                    else:
+                        cur = self.conn.execute("INSERT INTO guard_relation(protector_user_id,protected_user_id,name,created_at) VALUES(?,?,?,?)",
+                                                (creator_id, protected_id, row["name"], now))
+                        claimed = self.conn.execute("UPDATE invite_code SET used_at=?,used_by_user_id=? WHERE id=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?",
+                                                    (now, protected_id, row["id"], now))
+                        if claimed.rowcount != 1: raise ValidationError("invite became unavailable")
+                        reason = "created"; relation_id = int(cur.lastrowid)
+            if reason == "created": self.conn.commit(); return reason, relation_id
+            self.conn.rollback(); return reason, None
+        except Exception:
+            self.conn.rollback()
+            raise
 
 
 @_serialize_repo_access
 class QueryRepo:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
 
-    def insert(self, user_id: int, memberships: list[Member], content_type: str,
-               content: str, msg_id: str | None, kind: str = "query") -> int:
+    def insert(self, user_id: int, content_type: str, content: str, msg_id: str | None,
+               kind: str = "query") -> int:
         try:
-            with WRITE_LOCK, self.conn:
-                # 查询群快照和成员生命周期共用写锁,不把已退群成员的旧列表写入查询。
-                active = self.conn.execute(
-                    "SELECT m.id,m.group_id FROM member m JOIN protection_group g ON g.id=m.group_id "
-                    "WHERE m.user_id=? AND m.ended_at IS NULL AND g.disbanded_at IS NULL",
-                    (user_id,),
-                ).fetchall()
-                allowed = {(int(r["id"]), int(r["group_id"])) for r in active}
-                memberships = [m for m in memberships if (m.id, m.group_id) in allowed]
-                if not memberships:
-                    raise ValidationError("user has no active group")
+            with self.conn:
                 now = utc_timestamp()
-                cur = self.conn.execute(
-                    "INSERT INTO query(user_id,content_type,content,msg_id,created_at,kind) VALUES(?,?,?,?,?,?)",
-                    (user_id, content_type, content, msg_id, now, kind),
-                )
-                qid = int(cur.lastrowid)
-                for member in memberships:
-                    self.conn.execute(
-                        "INSERT INTO query_group(query_id,group_id,query_member_id) VALUES(?,?,?)",
-                        (qid, member.group_id, member.id),
-                    )
-        except sqlite3.IntegrityError as e:
-            raise DuplicateMessage(msg_id or "") from e
-        return qid
+                cur = self.conn.execute("INSERT INTO query(user_id,content_type,content,msg_id,created_at,kind) VALUES(?,?,?,?,?,?)",
+                                        (user_id, content_type, content, msg_id, now, kind))
+                query_id = int(cur.lastrowid)
+                self.conn.execute("INSERT INTO query_relation(query_id,relation_id) "
+                                  "SELECT ?,id FROM guard_relation WHERE protected_user_id=? AND ended_at IS NULL",
+                                  (query_id, user_id))
+        except sqlite3.IntegrityError as exc:
+            # 只把 MsgId 幂等键冲突映射为重复消息;其余约束违例原样抛出,不冒充重复
+            if msg_id and "query.msg_id" in str(exc):
+                raise DuplicateMessage(msg_id) from exc
+            raise
+        return query_id
 
     def find_by_msg_id(self, msg_id: str) -> dict | None:
         row = self.conn.execute("SELECT id,user_id FROM query WHERE msg_id=?", (msg_id,)).fetchone()
@@ -258,148 +230,97 @@ class QueryRepo:
         return dict(row) if row else None
 
     def update_transcript(self, query_id: int, transcript: str) -> None:
-        with WRITE_LOCK, self.conn:
-            self.conn.execute(
-                "UPDATE query SET transcript=? WHERE id=? AND content_type='image'",
-                (transcript, query_id),
-            )
+        with self.conn: self.conn.execute("UPDATE query SET transcript=? WHERE id=? AND content_type='image'", (transcript, query_id))
 
     def supply_context(self, query_id: int, user_id: int, window_seconds: int) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT prior.id,prior.content_type,prior.content,prior.transcript,"
-            "prior.created_at,prior.incident_id,cur.incident_id AS current_incident_id,"
-            "cur.created_at AS current_created_at FROM query cur JOIN query prior "
-            "ON prior.user_id=cur.user_id WHERE cur.id=? AND cur.user_id=? "
-            "AND cur.kind='query' AND cur.incident_id IS NOT NULL "
-            "AND prior.kind='query' AND prior.id<cur.id "
-            "AND prior.created_at>=cur.created_at-? "
-            "ORDER BY prior.created_at DESC,prior.id DESC LIMIT 200",
-            (query_id, user_id, window_seconds),
-        ).fetchall()
-        return [dict(row) for row in rows]
-
-    def list_groups_for_query(self, query_id: int) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT qg.group_id,qg.query_member_id,g.name,g.disbanded_at FROM query_group qg "
-            "JOIN protection_group g ON g.id=qg.group_id WHERE qg.query_id=? ORDER BY qg.group_id",
-            (query_id,),
-        ).fetchall()
+            "SELECT prior.id,prior.content_type,prior.content,prior.transcript,prior.created_at,prior.incident_id,"
+            "cur.incident_id AS current_incident_id,cur.created_at AS current_created_at FROM query cur JOIN query prior "
+            "ON prior.user_id=cur.user_id WHERE cur.id=? AND cur.user_id=? AND cur.kind='query' AND cur.incident_id IS NOT NULL "
+            "AND prior.kind='query' AND prior.id<cur.id AND prior.created_at>=cur.created_at-? "
+            "ORDER BY prior.created_at DESC,prior.id DESC LIMIT 200", (query_id, user_id, window_seconds)).fetchall()
         return [dict(r) for r in rows]
 
-    def count_queries_for_group_since(self, group_id: int, since: int) -> int:
-        row = self.conn.execute(
-            "SELECT COUNT(*) c FROM query_group qg JOIN query q ON q.id=qg.query_id "
-            "WHERE qg.group_id=? AND q.created_at>=? AND q.kind='query'", (group_id, since),
-        ).fetchone()
-        return int(row["c"])
+    def list_relations_for_query(self, query_id: int, active_only: bool = False) -> list[dict]:
+        sql = "SELECT r.* FROM query_relation qr JOIN guard_relation r ON r.id=qr.relation_id WHERE qr.query_id=?"
+        if active_only: sql += " AND r.ended_at IS NULL"
+        return [dict(r) for r in self.conn.execute(sql + " ORDER BY r.id", (query_id,))]
+
+    def list_for_user(self, user_id: int, limit: int = 100) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT v.id verdict_id,v.query_id,v.level,v.created_at verdict_at,c.status correction_status,c.resolved_label "
+            "FROM query q JOIN verdict v ON v.query_id=q.id LEFT JOIN correction_case c ON c.verdict_id=v.id "
+            "WHERE q.user_id=? ORDER BY v.id DESC LIMIT ?", (user_id, limit))]
+
+    def get_my_detail(self, user_id: int, verdict_id: int) -> dict | None:
+        row = self.conn.execute("SELECT v.id verdict_id,v.query_id,v.level,v.reason,v.reply,v.created_at verdict_at,"
+                                "q.content,q.content_type,c.id case_id,c.status correction_status,c.resolved_label,"
+                                "c.queryer_label,c.queryer_note FROM verdict v JOIN query q ON q.id=v.query_id "
+                                "LEFT JOIN correction_case c ON c.verdict_id=v.id WHERE v.id=? AND q.user_id=?",
+                                (verdict_id, user_id)).fetchone()
+        return dict(row) if row else None
 
 
 @_serialize_repo_access
 class IncidentRepo:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
 
     def current_epoch(self, user_id: int) -> int:
         row = self.conn.execute("SELECT session_epoch FROM user WHERE id=?", (user_id,)).fetchone()
-        if row is None:
-            raise ValidationError("user not found")
+        if row is None: raise ValidationError("user not found")
         return int(row["session_epoch"])
 
     def attach_query_to_incident(self, query_id: int, user_id: int, idle_seconds: int,
                                  expected_epoch: int | None = None) -> int | None:
-        # SQLite 的同一连接由 WRITE_LOCK 串行化;冲突重试覆盖多连接写入窗口。
         for attempt in range(2):
             try:
                 with WRITE_LOCK, self.conn:
-                    # 读代次前先拿 SQLite 写锁,防止另一进程在检查后、入案前完成重开。
                     self.conn.execute("BEGIN IMMEDIATE")
-                    if expected_epoch is not None and self.current_epoch(user_id) != expected_epoch:
-                        return None  # 回调收到查询后用户已显式重开;旧查询仅按本条判定
-                    query = self.conn.execute(
-                        "SELECT created_at FROM query WHERE id=? AND user_id=? AND kind='query'",
-                        (query_id, user_id),
-                    ).fetchone()
-                    if query is None:
-                        raise ValidationError("query not found")
+                    if expected_epoch is not None and self.current_epoch(user_id) != expected_epoch: return None
+                    query = self.conn.execute("SELECT created_at FROM query WHERE id=? AND user_id=? AND kind='query'", (query_id, user_id)).fetchone()
+                    if query is None: raise ValidationError("query not found")
                     now = int(query["created_at"])
-                    inc = self.conn.execute(
-                        "SELECT id,opened_at,last_query_at FROM incident WHERE user_id=? AND closed_at IS NULL",
-                        (user_id,),
-                    ).fetchone()
-                    if inc is not None and now < int(inc["opened_at"]) - idle_seconds:
-                        return None  # 超过同案空闲窗的迟到查询不可并入后来才开启的案件
+                    inc = self.conn.execute("SELECT id,opened_at,last_query_at FROM incident WHERE user_id=? AND closed_at IS NULL", (user_id,)).fetchone()
+                    if inc is not None and now < int(inc["opened_at"]) - idle_seconds: return None
                     if inc is not None and now - int(inc["last_query_at"]) <= idle_seconds:
                         incident_id = int(inc["id"])
-                        self.conn.execute(
-                            "UPDATE incident SET last_query_at=? WHERE id=?",
-                            (max(now, int(inc["last_query_at"])), incident_id),
-                        )
+                        self.conn.execute("UPDATE incident SET last_query_at=? WHERE id=?", (max(now, int(inc["last_query_at"])), incident_id))
                     else:
-                        if inc is not None:
-                            self.conn.execute(
-                                "UPDATE incident SET closed_at=?,close_reason='timeout' WHERE id=?",
-                                (now, inc["id"]),
-                            )
-                        cur = self.conn.execute(
-                            "INSERT INTO incident(user_id,opened_at,last_query_at) VALUES(?,?,?)",
-                            (user_id, now, now),
-                        )
+                        if inc is not None: self.conn.execute("UPDATE incident SET closed_at=?,close_reason='timeout' WHERE id=?", (now, inc["id"]))
+                        cur = self.conn.execute("INSERT INTO incident(user_id,opened_at,last_query_at) VALUES(?,?,?)", (user_id, now, now))
                         incident_id = int(cur.lastrowid)
-                    self.conn.execute(
-                        "UPDATE query SET incident_id=? WHERE id=?", (incident_id, query_id)
-                    )
+                    self.conn.execute("UPDATE query SET incident_id=? WHERE id=?", (incident_id, query_id))
                     return incident_id
             except sqlite3.IntegrityError:
-                if attempt:
-                    raise
+                if attempt: raise
         raise RuntimeError("incident attach failed")
 
-    def close_open_incident(self, user_id: int, reason: str = "explicit",
-                            msg_id: str | None = None) -> bool:
-        if reason not in {"explicit", "manual"}:
-            raise ValidationError("invalid close reason")
-        with WRITE_LOCK, self.conn:
+    def close_open_incident(self, user_id: int, reason: str = "explicit", msg_id: str | None = None) -> bool:
+        if reason not in {"explicit", "manual"}: raise ValidationError("invalid close reason")
+        with self.conn:
             if msg_id:
-                try:
-                    self.conn.execute(
-                        "INSERT INTO session_reset_msg(msg_id,user_id,created_at) VALUES(?,?,?)",
-                        (msg_id, user_id, utc_timestamp()),
-                    )
-                except sqlite3.IntegrityError:
-                    return False
-            self.conn.execute(
-                "UPDATE user SET session_epoch=session_epoch+1 WHERE id=?", (user_id,)
-            )
-            self.conn.execute(
-                "UPDATE incident SET closed_at=?,close_reason=? WHERE user_id=? AND closed_at IS NULL",
-                (utc_timestamp(), reason, user_id),
-            )
+                try: self.conn.execute("INSERT INTO session_reset_msg(msg_id,user_id,created_at) VALUES(?,?,?)", (msg_id, user_id, utc_timestamp()))
+                except sqlite3.IntegrityError: return False
+            self.conn.execute("UPDATE user SET session_epoch=session_epoch+1 WHERE id=?", (user_id,))
+            self.conn.execute("UPDATE incident SET closed_at=?,close_reason=? WHERE user_id=? AND closed_at IS NULL", (utc_timestamp(), reason, user_id))
         return True
 
     def list_for_user(self, user_id: int) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT i.*,COUNT(q.id) AS query_count FROM incident i LEFT JOIN query q "
-            "ON q.incident_id=i.id AND q.kind='query' WHERE i.user_id=? "
-            "GROUP BY i.id ORDER BY i.id DESC", (user_id,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        return [dict(r) for r in self.conn.execute("SELECT i.*,COUNT(q.id) AS query_count FROM incident i LEFT JOIN query q "
+               "ON q.incident_id=i.id AND q.kind='query' WHERE i.user_id=? GROUP BY i.id ORDER BY i.id DESC", (user_id,))]
 
 
 @_serialize_repo_access
 class VerdictRepo:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
 
-    def insert(self, query_id: int, level: Level, cited_ids: list[str], features_snapshot: list[dict],
-               reason: str, reply: str, latency_ms: int, mode: Mode,
-               context_snapshot: str | None = None) -> int:
-        with WRITE_LOCK, self.conn:
-            cur = self.conn.execute(
-                "INSERT INTO verdict(query_id,level,cited_ids,features,reason,reply,latency_ms,mode,created_at,context_snapshot)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (query_id, level.value, json.dumps(cited_ids), json.dumps(features_snapshot, ensure_ascii=False),
-                 reason, reply, latency_ms, mode.value, utc_timestamp(), context_snapshot),
-            )
+    def insert(self, query_id: int, level: Level, cited_ids: list[str], features_snapshot: list[dict], reason: str,
+               reply: str, latency_ms: int, mode: Mode, context_snapshot: str | None = None) -> int:
+        with self.conn:
+            cur = self.conn.execute("INSERT INTO verdict(query_id,level,cited_ids,features,reason,reply,latency_ms,mode,created_at,context_snapshot) "
+                                    "VALUES(?,?,?,?,?,?,?,?,?,?)", (query_id, level.value, json.dumps(cited_ids),
+                                    json.dumps(features_snapshot, ensure_ascii=False), reason, reply, latency_ms, mode.value,
+                                    utc_timestamp(), context_snapshot))
         return int(cur.lastrowid)
 
     def get(self, verdict_id: int) -> dict | None:
@@ -407,318 +328,208 @@ class VerdictRepo:
         return dict(row) if row else None
 
     def get_with_context(self, verdict_id: int) -> dict | None:
-        row = self.conn.execute(
-            "SELECT v.id,v.query_id,v.level,v.reply,v.created_at,q.user_id,q.content "
-            "FROM verdict v JOIN query q ON q.id=v.query_id WHERE v.id=?", (verdict_id,),
-        ).fetchone()
+        row = self.conn.execute("SELECT v.id,v.query_id,v.level,v.reply,v.created_at,q.user_id,q.content FROM verdict v "
+                                "JOIN query q ON q.id=v.query_id WHERE v.id=?", (verdict_id,)).fetchone()
         return dict(row) if row else None
-
-    def count_dangerous_verdicts_for_group(self, group_id: int, since: int) -> int:
-        row = self.conn.execute(
-            "SELECT COUNT(DISTINCT a.verdict_id) c FROM alert a JOIN member m ON m.id=a.membership_id "
-            "JOIN verdict v ON v.id=a.verdict_id WHERE m.group_id=? AND a.delivered_at>=? "
-            "AND v.level='dangerous'", (group_id, since),
-        ).fetchone()
-        return int(row["c"])
 
 
 @_serialize_repo_access
 class AlertRepo:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
 
     def record_alerts_for_verdict(self, verdict_id: int, query_id: int) -> dict:
-        """写入判定时仍活跃的接收关系,并按 user 聚合收件人。"""
-        recipients: dict[int, dict] = {}
-        generated_groups: dict[int, str] = {}
-        with WRITE_LOCK, self.conn:
-            queryer_id = self.conn.execute(
-                "SELECT user_id FROM query WHERE id=?", (query_id,)
-            ).fetchone()["user_id"]
-            rows = self.conn.execute(
-                "SELECT m.id membership_id,m.user_id,m.group_id,m.mute,u.openid,u.token,g.name "
-                "FROM query_group qg JOIN protection_group g ON g.id=qg.group_id AND g.disbanded_at IS NULL "
-                "JOIN member m ON m.group_id=g.id AND m.user_id IS NOT NULL AND m.ended_at IS NULL "
-                "JOIN user u ON u.id=m.user_id WHERE qg.query_id=? ORDER BY m.user_id,g.id,m.id",
-                (query_id,),
-            ).fetchall()
-            now = utc_timestamp()
-            for r in rows:
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO alert(verdict_id,membership_id,group_name_at_alert,delivered_at)"
-                    " VALUES(?,?,?,?)", (verdict_id,r["membership_id"],r["name"],now),
-                )
-                generated_groups[r["group_id"]] = r["name"]
-                item = recipients.setdefault(r["user_id"], {
-                    "user_id":r["user_id"],"openid":r["openid"],"token":r["token"],"groups":[]
-                })
-                item["groups"].append({"group_id":r["group_id"],"membership_id":r["membership_id"],
-                                       "name":r["name"],"mute":bool(r["mute"])})
-        query_groups = self.conn.execute(
-            "SELECT group_id FROM query_group WHERE query_id=?", (query_id,),
-        ).fetchall()
-        names = [generated_groups[k] for k in sorted(generated_groups)]
-        return {"queryer_id":queryer_id,"query_group_count":len(query_groups),
-                "generated_group_names":names,"recipients":list(recipients.values())}
+        now = utc_timestamp()
+        queryer = self.conn.execute("SELECT user_id FROM query WHERE id=?", (query_id,)).fetchone()
+        if queryer is None: return {"queryer_id": None, "recipients": []}
+        recipients = []
+        with self.conn:
+            rows = self.conn.execute("SELECT r.id relation_id,r.protector_user_id user_id,r.name,r.inverse_name,r.mute,u.openid,u.token "
+                "FROM query_relation qr JOIN guard_relation r ON r.id=qr.relation_id JOIN user u ON u.id=r.protector_user_id "
+                "WHERE qr.query_id=? AND r.ended_at IS NULL ORDER BY r.id", (query_id,)).fetchall()
+            for row in rows:
+                self.conn.execute("INSERT OR IGNORE INTO alert(verdict_id,relation_id,name_at_alert,delivered_at) VALUES(?,?,?,?)",
+                                  (verdict_id, row["relation_id"], row["name"], now))
+                alert = self.conn.execute("SELECT id,delivered_at FROM alert WHERE verdict_id=? AND relation_id=?",
+                                          (verdict_id, row["relation_id"])).fetchone()
+                recipients.append({"relation_id": int(row["relation_id"]), "user_id": int(row["user_id"]),
+                                   "openid": row["openid"], "token": row["token"], "name_at_alert": row["name"],
+                                   "inverse_name": row["inverse_name"], "mute": bool(row["mute"]),
+                                   "alert_id": int(alert["id"]), "delivered_at": int(alert["delivered_at"])})
+        return {"queryer_id": int(queryer["user_id"]), "recipients": recipients}
 
-    def get_push_context_for_user(self, verdict_id: int, user_id: int) -> dict | None:
-        rows = self.conn.execute(
-            "SELECT a.membership_id,m.group_id,m.mute,a.group_name_at_alert name,u.openid,u.token "
-            "FROM alert a JOIN member old ON old.id=a.membership_id "
-            "JOIN protection_group g ON g.id=old.group_id AND g.disbanded_at IS NULL "
-            "JOIN member m ON m.group_id=g.id AND m.user_id=? AND m.ended_at IS NULL "
-            "JOIN user u ON u.id=m.user_id WHERE a.verdict_id=? AND old.user_id=? AND m.mute=0 "
-            "ORDER BY g.id,m.id", (user_id,verdict_id,user_id),
-        ).fetchall()
-        if not rows:
-            return None
-        active = self.conn.execute(
-            "SELECT COUNT(*) c FROM member m JOIN protection_group g ON g.id=m.group_id "
-            "WHERE m.user_id=? AND m.ended_at IS NULL AND g.disbanded_at IS NULL", (user_id,),
-        ).fetchone()["c"]
-        return {"openid":rows[0]["openid"],"token":rows[0]["token"],"active_group_count":int(active),
-                "groups":[{"group_id":r["group_id"],"membership_id":r["membership_id"],"name":r["name"]} for r in rows]}
+    def event_context(self, alert_id: int) -> dict | None:
+        row = self.conn.execute("SELECT a.id alert_id,a.verdict_id,a.relation_id,a.name_at_alert,a.delivered_at,"
+            "r.protector_user_id user_id,r.mute FROM alert a JOIN guard_relation r ON r.id=a.relation_id "
+            "WHERE a.id=? AND r.ended_at IS NULL", (alert_id,)).fetchone()
+        return dict(row) if row else None
 
-    def list_alerts_for_user_in_group(self, user_id: int, group_id: int, limit: int = 50) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT v.id verdict_id,v.level,q.content,MAX(a.delivered_at) delivered_at,"
-            "MAX(a.group_name_at_alert) group_name_at_alert FROM alert a "
-            "JOIN member old ON old.id=a.membership_id JOIN verdict v ON v.id=a.verdict_id "
-            "JOIN query q ON q.id=v.query_id JOIN protection_group g ON g.id=old.group_id "
-            "WHERE old.user_id=? AND old.group_id=? AND g.disbanded_at IS NULL "
-            "AND EXISTS(SELECT 1 FROM member cur WHERE cur.user_id=? AND cur.group_id=? AND cur.ended_at IS NULL) "
-            "GROUP BY v.id ORDER BY v.id DESC LIMIT ?",
-            (user_id,group_id,user_id,group_id,limit),
-        ).fetchall()
-        return [dict(r) for r in rows]
+    def push_context(self, alert_id: int) -> dict | None:
+        row = self.conn.execute("SELECT a.id alert_id,a.verdict_id,a.relation_id,a.name_at_alert,a.delivered_at,"
+            "r.protector_user_id user_id,r.mute,u.openid,u.token FROM alert a JOIN guard_relation r ON r.id=a.relation_id "
+            "JOIN user u ON u.id=r.protector_user_id WHERE a.id=? AND r.ended_at IS NULL AND r.mute=0", (alert_id,)).fetchone()
+        return dict(row) if row else None
 
-    def get_alert_detail_for_user(self, user_id: int, verdict_id: int) -> tuple[dict | None, str | None]:
-        detail = self.conn.execute(
-            "SELECT v.id verdict_id,v.level,v.reply,v.created_at,q.content FROM verdict v "
-            "JOIN query q ON q.id=v.query_id WHERE v.id=? AND v.level='dangerous'", (verdict_id,),
-        ).fetchone()
-        if not detail:
-            return None, None
-        had = self.conn.execute(
-            "SELECT 1 FROM alert a JOIN member old ON old.id=a.membership_id "
-            "WHERE a.verdict_id=? AND old.user_id=? LIMIT 1", (verdict_id,user_id),
-        ).fetchone()
-        if not had:
-            return None, None
-        groups = self.conn.execute(
-            "SELECT DISTINCT g.id,a.group_name_at_alert name FROM alert a JOIN member old ON old.id=a.membership_id "
-            "JOIN protection_group g ON g.id=old.group_id JOIN member cur ON cur.group_id=g.id AND cur.user_id=? "
-            "AND cur.ended_at IS NULL WHERE a.verdict_id=? AND old.user_id=? AND g.disbanded_at IS NULL "
-            "ORDER BY g.id", (user_id,verdict_id,user_id),
-        ).fetchall()
-        if groups:
-            return {**dict(detail),"group_names":[r["name"] for r in groups]}, None
-        active_group = self.conn.execute(
-            "SELECT 1 FROM alert a JOIN member old ON old.id=a.membership_id JOIN protection_group g ON g.id=old.group_id "
-            "WHERE a.verdict_id=? AND old.user_id=? AND g.disbanded_at IS NULL LIMIT 1", (verdict_id,user_id),
-        ).fetchone()
-        return None, "membership_ended" if active_group else "group_disbanded"
+    def list_for_user(self, user_id: int, relation_id: int | None = None, limit: int = 100) -> list[dict]:
+        sql = ("SELECT a.id alert_id,a.verdict_id,a.relation_id,a.name_at_alert,a.delivered_at,a.read_at,v.level,q.content "
+               "FROM alert a JOIN guard_relation r ON r.id=a.relation_id JOIN verdict v ON v.id=a.verdict_id "
+               "JOIN query q ON q.id=v.query_id WHERE r.protector_user_id=? AND r.ended_at IS NULL")
+        params: list = [user_id]
+        if relation_id is not None: sql += " AND a.relation_id=?"; params.append(relation_id)
+        sql += " ORDER BY a.id DESC LIMIT ?"; params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params)]
 
-    def active_group_ids_for_user(self, user_id: int) -> set[int]:
-        return {int(r[0]) for r in self.conn.execute(
-            "SELECT m.group_id FROM member m JOIN protection_group g ON g.id=m.group_id "
-            "WHERE m.user_id=? AND m.ended_at IS NULL AND g.disbanded_at IS NULL", (user_id,),
-        ).fetchall()}
-
-    def group_was_recipient(self, verdict_id: int, user_id: int, group_id: int) -> bool:
-        return self.conn.execute(
-            "SELECT 1 FROM alert a JOIN member m ON m.id=a.membership_id "
-            "WHERE a.verdict_id=? AND m.user_id=? AND m.group_id=? LIMIT 1",
-            (verdict_id,user_id,group_id),
-        ).fetchone() is not None
+    def detail_for_user(self, user_id: int, alert_id: int) -> tuple[dict | None, str | None]:
+        row = self.conn.execute("SELECT a.id alert_id,a.verdict_id,a.relation_id,a.name_at_alert,a.delivered_at,"
+            "v.level,v.reply,v.created_at verdict_at,q.content,q.content_type,c.id case_id,c.status correction_status,"
+            "c.resolved_label,cv.label my_vote,cv.voted_at FROM alert a JOIN guard_relation r ON r.id=a.relation_id "
+            "JOIN verdict v ON v.id=a.verdict_id JOIN query q ON q.id=v.query_id "
+            "LEFT JOIN correction_case c ON c.verdict_id=v.id LEFT JOIN correction_vote cv ON cv.case_id=c.id AND cv.relation_id=r.id "
+            "WHERE a.id=? AND r.protector_user_id=?", (alert_id, user_id)).fetchone()
+        if row is None: return None, None
+        if self.conn.execute("SELECT ended_at FROM guard_relation WHERE id=?", (row["relation_id"],)).fetchone()["ended_at"] is not None:
+            return None, "relation_ended"
+        return dict(row), None
 
 
 @_serialize_repo_access
 class CorrectionRepo:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+    def __init__(self, conn: sqlite3.Connection): self.conn = conn
 
-    def create_or_get_correction(self, verdict_id: int, user_id: int, memberships: list[Member], label: CorrectionLabel,
-               note: str, status: CorrectionStatus, decided_by: int | None) -> int:
+    def submit(self, verdict_id: int, user_id: int, label: str, note: str, window_days: int) -> dict:
+        """Open a case, save queryer feedback, or cast one relation vote atomically."""
         now = utc_timestamp()
-        with WRITE_LOCK, self.conn:
-            existing = self.conn.execute(
-                "SELECT id FROM correction WHERE verdict_id=? AND by_user_id=?", (verdict_id,user_id),
-            ).fetchone()
-            if existing:
-                return int(existing["id"])
-            cur = self.conn.execute(
-                "INSERT INTO correction(verdict_id,by_user_id,label,note,status,decided_by_membership_id,created_at,decided_at)"
-                " VALUES(?,?,?,?,?,?,?,?)",
-                (verdict_id,user_id,label.value,note,status.value,decided_by,now,now if status is CorrectionStatus.CONFIRMED else None),
-            )
-            cid = int(cur.lastrowid)
-            for m in memberships:
-                self.conn.execute(
-                    "INSERT INTO correction_group(correction_id,group_id,by_membership_id) VALUES(?,?,?)",
-                    (cid,m.group_id,m.id),
-                )
-        return cid
-
-    def get(self, correction_id: int) -> CorrectionRecord | None:
-        row = self.conn.execute("SELECT * FROM correction WHERE id=?", (correction_id,)).fetchone()
-        return self._to_record(row) if row else None
-
-    @staticmethod
-    def _to_record(row) -> CorrectionRecord:
-        return CorrectionRecord(
-            id=row["id"],verdict_id=row["verdict_id"],by_user_id=row["by_user_id"],
-            label=CorrectionLabel(row["label"]),note=row["note"],status=CorrectionStatus(row["status"]),
-            decided_by_membership_id=row["decided_by_membership_id"],
-        )
-
-    def get_by_verdict_and_user(self, verdict_id: int, user_id: int) -> CorrectionRecord | None:
-        row = self.conn.execute("SELECT * FROM correction WHERE verdict_id=? AND by_user_id=?",(verdict_id,user_id)).fetchone()
-        return self._to_record(row) if row else None
-
-    def get_correction_with_related_groups(self, correction_id: int) -> tuple[dict | None,list[dict]]:
-        row = self.conn.execute("SELECT * FROM correction WHERE id=?",(correction_id,)).fetchone()
-        groups = self.conn.execute(
-            "SELECT cg.group_id,cg.by_membership_id,m.user_id,g.disbanded_at FROM correction_group cg "
-            "JOIN member m ON m.id=cg.by_membership_id JOIN protection_group g ON g.id=cg.group_id WHERE cg.correction_id=?",
-            (correction_id,),
-        ).fetchall()
-        return (dict(row) if row else None,[dict(g) for g in groups])
-
-    def decide_correction(self, correction_id: int, status: CorrectionStatus, decided_by: int) -> None:
-        with WRITE_LOCK, self.conn:
-            cur = self.conn.execute(
-                "UPDATE correction SET status=?,decided_by_membership_id=?,decided_at=? "
-                "WHERE id=? AND status='pending'",
-                (status.value,decided_by,utc_timestamp(),correction_id),
-            )
-            if cur.rowcount != 1:
-                raise ValidationError("correction already decided")
-
-    def count_corrections_for_group(self, group_id: int, since: int, status: str | None = None, label: str | None = None) -> int:
-        sql = ("SELECT COUNT(*) c FROM correction_group cg JOIN correction c ON c.id=cg.correction_id "
-               "WHERE cg.group_id=? AND c.decided_at>=?")
-        params: list = [group_id,since]
-        if status:
-            sql += " AND c.status=?"
-            params.append(status)
-        if label:
-            sql += " AND c.label=?"
-            params.append(label)
-        return int(self.conn.execute(sql,params).fetchone()["c"])
-
-    def list_pending_corrections_with_context(self, group_id: int) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT c.id,c.label,c.note,c.created_at,submit.name by_name,q.content "
-            "FROM correction_group cg JOIN correction c ON c.id=cg.correction_id "
-            "JOIN verdict v ON v.id=c.verdict_id JOIN query q ON q.id=v.query_id "
-            "JOIN member submit ON submit.id=cg.by_membership_id "
-            "WHERE cg.group_id=? AND c.status='pending' ORDER BY c.created_at DESC",
-            (group_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    def reject_pending_corrections_before(self, cutoff: int) -> int:
-        with WRITE_LOCK, self.conn:
-            cur = self.conn.execute(
-                "UPDATE correction SET status='rejected',decided_at=? WHERE status='pending' AND created_at<?",
-                (utc_timestamp(),cutoff),
-            )
-        return max(0,cur.rowcount)
-
-
-CODE_ALPHABET = "2346789ABCDEFGHJKMNPQRSTUVWXYZ"
-
-
-@_serialize_repo_access
-class BindCodeRepo:
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
-
-    def create(self, member_id: int, created_by: int | None, ttl_days: int) -> dict:
-        now = utc_timestamp()
-        code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(8))
-        with WRITE_LOCK, self.conn:
-            self.conn.execute(
-                "INSERT INTO bind_code(code,member_id,created_by,created_at,expires_at) VALUES(?,?,?,?,?)",
-                (code,member_id,created_by,now,now+ttl_days*86400),
-            )
-        return {"code":code,"member_id":member_id,"expires_at":now+ttl_days*86400}
-
-    def claim_and_bind(self, code: str, member_id: int, user_id: int) -> bool:
-        """在一个事务内消费邀请码并绑定成员位,任一步失败都保留邀请码。"""
-        now = utc_timestamp()
+        self.conn.execute("BEGIN IMMEDIATE")
         try:
-            with WRITE_LOCK, self.conn:
-                row = self.conn.execute(
-                    "SELECT bc.id FROM bind_code bc JOIN member m ON m.id=bc.member_id "
-                    "JOIN protection_group g ON g.id=m.group_id WHERE UPPER(bc.code)=UPPER(?) "
-                    "AND bc.member_id=? AND bc.used_at IS NULL AND bc.expires_at>? "
-                    "AND m.user_id IS NULL AND m.ended_at IS NULL AND g.disbanded_at IS NULL",
-                    (code,member_id,now),
-                ).fetchone()
-                if row is None:
-                    return False
-                bound = self.conn.execute(
-                    "UPDATE member SET user_id=? WHERE id=? AND user_id IS NULL AND ended_at IS NULL "
-                    "AND EXISTS(SELECT 1 FROM protection_group WHERE protection_group.id=member.group_id AND disbanded_at IS NULL)",
-                    (user_id,member_id),
-                )
-                if bound.rowcount != 1:
-                    return False
-                claimed = self.conn.execute(
-                    "UPDATE bind_code SET used_at=? WHERE id=? AND used_at IS NULL AND expires_at>?",
-                    (now,row["id"],now),
-                )
-                if claimed.rowcount != 1:
-                    raise ValidationError("invitation became unavailable")
-        except sqlite3.Error as exc:
-            raise ValidationError("binding transaction failed") from exc
-        return True
+            verdict = self.conn.execute("SELECT v.id,v.level,v.query_id,q.user_id queryer_id,q.content FROM verdict v "
+                                        "JOIN query q ON q.id=v.query_id WHERE v.id=?", (verdict_id,)).fetchone()
+            if verdict is None: raise ValidationError("verdict not found")
+            if verdict["level"] not in ("safe", "suspicious", "dangerous"):
+                raise ValidationError("verdict is not eligible for correction")
+            case = self.conn.execute("SELECT * FROM correction_case WHERE verdict_id=?", (verdict_id,)).fetchone()
+            if case and case["status"] == "pending" and now >= int(case["closes_at"]):
+                self.conn.execute("UPDATE correction_case SET status='no_consensus',resolved_at=? WHERE id=? AND status='pending'", (now, case["id"]))
+                case = self.conn.execute("SELECT * FROM correction_case WHERE id=?", (case["id"],)).fetchone()
+            is_queryer = int(verdict["queryer_id"]) == user_id
+            relation_id = None
+            if not is_queryer:
+                if case is not None:
+                    rel = self.conn.execute("SELECT r.id FROM correction_vote cv JOIN guard_relation r ON r.id=cv.relation_id "
+                        "WHERE cv.case_id=? AND r.protector_user_id=? AND r.ended_at IS NULL", (case["id"], user_id)).fetchone()
+                else:
+                    if verdict["level"] != "dangerous": raise ValidationError("only queryer can open low-risk correction")
+                    rel = self.conn.execute("SELECT r.id FROM guard_relation r JOIN alert a ON a.relation_id=r.id "
+                        "WHERE a.verdict_id=? AND r.protector_user_id=? AND r.ended_at IS NULL", (verdict_id, user_id)).fetchone()
+                if rel is None: raise ValidationError("no active voting relation")
+                relation_id = int(rel["id"])
+            if case is None:
+                if not is_queryer and verdict["level"] != "dangerous": raise ValidationError("only queryer can open correction")
+                opened = now; closes = now + window_days * 86400
+                cur = self.conn.execute("INSERT INTO correction_case(verdict_id,queryer_label,queryer_note,queryer_feedback_at,status,opened_at,closes_at) "
+                    "VALUES(?,NULL,'',NULL,'pending',?,?)", (verdict_id, opened, closes))
+                case_id = int(cur.lastrowid)
+                if verdict["level"] == "dangerous":
+                    eligible = self.conn.execute("SELECT DISTINCT r.id FROM alert a JOIN guard_relation r ON r.id=a.relation_id "
+                        "WHERE a.verdict_id=? AND r.ended_at IS NULL", (verdict_id,)).fetchall()
+                else:
+                    eligible = self.conn.execute("SELECT r.id FROM query_relation qr JOIN guard_relation r ON r.id=qr.relation_id "
+                        "WHERE qr.query_id=? AND r.ended_at IS NULL", (verdict["query_id"],)).fetchall()
+                self.conn.executemany("INSERT INTO correction_vote(case_id,relation_id) VALUES(?,?)",
+                                      [(case_id, int(r["id"])) for r in eligible])
+                if not eligible:
+                    self.conn.execute("UPDATE correction_case SET status='no_consensus',resolved_at=? WHERE id=?", (now, case_id))
+                case = self.conn.execute("SELECT * FROM correction_case WHERE id=?", (case_id,)).fetchone()
+            case_id = int(case["id"])
+            if is_queryer:
+                if case["queryer_label"] is not None:
+                    if case["queryer_label"] != label:
+                        raise ValidationError("queryer feedback cannot be changed")
+                    self.conn.commit()
+                    return self.case_summary(case_id)
+                self.conn.execute("UPDATE correction_case SET queryer_label=?,queryer_note=?,queryer_feedback_at=? WHERE id=?",
+                                  (label, note, now, case_id))
+            else:
+                eligible = self.conn.execute("SELECT label FROM correction_vote WHERE case_id=? AND relation_id=?", (case_id, relation_id)).fetchone()
+                if eligible is None: raise ValidationError("relation is not eligible for this correction")
+                if eligible["label"] is not None:
+                    if eligible["label"] != label: raise ValidationError("vote cannot be changed")
+                    self.conn.commit()
+                    return self.case_summary(case_id)
+                else:
+                    if case["status"] != "pending": raise ValidationError("correction case is closed")
+                    self.conn.execute("UPDATE correction_vote SET label=?,voted_at=? WHERE case_id=? AND relation_id=? AND label IS NULL",
+                                      (label, now, case_id, relation_id))
+                    total = int(self.conn.execute("SELECT COUNT(*) n FROM correction_vote WHERE case_id=?", (case_id,)).fetchone()["n"])
+                    required = total // 2 + 1
+                    counts = self.conn.execute("SELECT label,COUNT(*) n FROM correction_vote WHERE case_id=? AND label IS NOT NULL GROUP BY label", (case_id,)).fetchall()
+                    winner = next((r["label"] for r in counts if int(r["n"]) >= required), None)
+                    if winner:
+                        self.conn.execute("UPDATE correction_case SET status='confirmed',resolved_label=?,resolved_at=? WHERE id=? AND status='pending'",
+                                          (winner, now, case_id))
+            self.conn.commit()
+            return self.case_summary(case_id)
+        except Exception:
+            self.conn.rollback()
+            raise
 
-    def invalidate_for_member(self, member_id: int) -> None:
-        with WRITE_LOCK, self.conn:
-            self.conn.execute("UPDATE bind_code SET used_at=? WHERE member_id=? AND used_at IS NULL",(utc_timestamp(),member_id))
+    def close_expired(self) -> int:
+        now = utc_timestamp()
+        with self.conn:
+            cur = self.conn.execute("UPDATE correction_case SET status='no_consensus',resolved_at=? WHERE status='pending' AND closes_at<=?", (now, now))
+        return cur.rowcount
 
-    def invalidate_group(self, group_id: int) -> None:
-        with WRITE_LOCK, self.conn:
-            self.conn.execute(
-                "UPDATE bind_code SET used_at=? WHERE used_at IS NULL AND member_id IN "
-                "(SELECT id FROM member WHERE group_id=?)", (utc_timestamp(),group_id),
-            )
+    def case_summary(self, case_id: int) -> dict:
+        row = self.conn.execute("SELECT * FROM correction_case WHERE id=?", (case_id,)).fetchone()
+        if row is None: raise ValidationError("correction case not found")
+        counts = {r["label"]: int(r["n"]) for r in self.conn.execute(
+            "SELECT label,COUNT(*) n FROM correction_vote WHERE case_id=? AND label IS NOT NULL GROUP BY label", (case_id,))}
+        total = int(self.conn.execute("SELECT COUNT(*) n FROM correction_vote WHERE case_id=?", (case_id,)).fetchone()["n"])
+        return {"case_id": int(row["id"]), "verdict_id": int(row["verdict_id"]), "status": row["status"],
+                "resolved_label": row["resolved_label"], "votes": counts, "eligible_count": total,
+                "required_votes": total // 2 + 1 if total else 0, "closes_at": int(row["closes_at"]),
+                "queryer_label": row["queryer_label"], "queryer_note": row["queryer_note"]}
 
-    def get_valid_bind_code(self, code: str) -> dict | None:
-        row = self.conn.execute(
-            "SELECT bc.* FROM bind_code bc JOIN member m ON m.id=bc.member_id "
-            "JOIN protection_group g ON g.id=m.group_id WHERE UPPER(bc.code)=UPPER(?) "
-            "AND bc.used_at IS NULL AND bc.expires_at>? AND m.ended_at IS NULL AND g.disbanded_at IS NULL",
-            (code,utc_timestamp()),
-        ).fetchone()
+    def list_pending_for_user(self, user_id: int) -> list[dict]:
+        self.close_expired()
+        rows = self.conn.execute("SELECT c.id case_id,c.verdict_id,c.closes_at,v.level,q.content,q.created_at query_at,"
+            "cv.label my_vote,COUNT(allv.relation_id) eligible_count FROM correction_case c "
+            "JOIN correction_vote cv ON cv.case_id=c.id JOIN guard_relation r ON r.id=cv.relation_id "
+            "JOIN verdict v ON v.id=c.verdict_id JOIN query q ON q.id=v.query_id "
+            "LEFT JOIN correction_vote allv ON allv.case_id=c.id WHERE c.status='pending' AND r.protector_user_id=? "
+            "AND r.ended_at IS NULL GROUP BY c.id,cv.relation_id ORDER BY c.opened_at", (user_id,)).fetchall()
+        return [{**dict(r), "required_votes": int(r["eligible_count"]) // 2 + 1} for r in rows]
+
+    def detail_for_relation(self, case_id: int, relation_id: int, user_id: int) -> dict | None:
+        self.close_expired()
+        row = self.conn.execute("SELECT c.id case_id,c.verdict_id,c.status,c.resolved_label,c.closes_at,c.queryer_label,"
+            "c.queryer_note,v.level,q.content,cv.label my_vote,cv.voted_at FROM correction_case c "
+            "JOIN correction_vote cv ON cv.case_id=c.id JOIN guard_relation r ON r.id=cv.relation_id "
+            "JOIN verdict v ON v.id=c.verdict_id JOIN query q ON q.id=v.query_id "
+            "WHERE c.id=? AND cv.relation_id=? AND r.protector_user_id=? AND r.ended_at IS NULL",
+            (case_id, relation_id, user_id)).fetchone()
         return dict(row) if row else None
 
-    def get_latest_active_bind_code(self, member_id: int) -> dict | None:
-        row = self.conn.execute(
-            "SELECT code,expires_at FROM bind_code WHERE member_id=? AND used_at IS NULL AND expires_at>? ORDER BY id DESC LIMIT 1",
-            (member_id,utc_timestamp()),
-        ).fetchone()
-        return dict(row) if row else None
+    def get_case_for_verdict(self, verdict_id: int) -> dict | None:
+        row = self.conn.execute("SELECT id FROM correction_case WHERE verdict_id=?", (verdict_id,)).fetchone()
+        return self.case_summary(int(row["id"])) if row else None
+
+    def confirmed_labels(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute("SELECT v.id verdict_id,c.resolved_label FROM correction_case c "
+            "JOIN verdict v ON v.id=c.verdict_id WHERE c.status='confirmed'")]
 
 
 @dataclass
 class Repos:
     conn: sqlite3.Connection
     users: UserRepo
-    group: GroupRepo
-    member: MemberRepo
+    relation: RelationRepo
+    invite: InviteRepo
     query: QueryRepo
     verdict: VerdictRepo
     alert: AlertRepo
     correction: CorrectionRepo
-    bind_code: BindCodeRepo
     incident: IncidentRepo
 
 
 def make_repos(conn: sqlite3.Connection) -> Repos:
-    users = UserRepo(conn)
-    return Repos(conn,users,GroupRepo(conn),MemberRepo(conn,users),QueryRepo(conn),VerdictRepo(conn),
-                 AlertRepo(conn),CorrectionRepo(conn),BindCodeRepo(conn),IncidentRepo(conn))
+    return Repos(conn, UserRepo(conn), RelationRepo(conn), InviteRepo(conn), QueryRepo(conn),
+                 VerdictRepo(conn), AlertRepo(conn), CorrectionRepo(conn), IncidentRepo(conn))

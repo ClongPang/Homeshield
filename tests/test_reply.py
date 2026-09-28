@@ -50,8 +50,8 @@ def test_dangerous_reply_no_identity_claim_and_official_fallback():
 def test_delivery_notice_is_added_only_by_alert_coordinator():
     llm = FakeLLM(["【依据】对方自称公检法\n【建议】挂断并拨110核实"])
     dangerous = asyncio.run(LLMReply(llm).generate(_verdict(Level.DANGEROUS), _features(), []))
-    assert "已为防护群发出高危提醒" not in dangerous
-    assert add_delivery_notice(dangerous,"已为防护群发出高危提醒").endswith("已为防护群发出高危提醒")
+    assert "高危提醒已加入妈妈的提醒列表" not in dangerous
+    assert add_delivery_notice(dangerous,"高危提醒已加入妈妈的提醒列表").endswith("高危提醒已加入妈妈的提醒列表")
     safe = asyncio.run(LLMReply(llm).generate(_verdict(Level.SAFE), _features(), []))
     assert add_delivery_notice(safe,"") == safe
 
@@ -76,16 +76,16 @@ def test_delivery_notice_survives_truncation():
     long_value = "https://very-long-scam-domain.example.com/path?token=" + "x" * 60
     features = [Feature(id=f"F0{i}", type="url", value=long_value, evidence_span=long_value) for i in (1, 2)]
     verdict = JudgeOutput(level=Level.DANGEROUS, confidence=90, cited_ids=["F01", "F02"], reason="")
-    reply = add_delivery_notice(asyncio.run(TemplateReply().generate(verdict, features, [])),"已向妈妈家发出高危提醒")
+    reply = add_delivery_notice(asyncio.run(TemplateReply().generate(verdict, features, [])),"高危提醒已加入妈妈的提醒列表")
     assert len(reply) <= 150
-    assert reply.endswith("已向妈妈家发出高危提醒")
+    assert reply.endswith("高危提醒已加入妈妈的提醒列表")
     assert is_valid_reply(reply)
 
 
 def test_template_reply_safe_no_suffix():
     reply = asyncio.run(TemplateReply().generate(_verdict(Level.SAFE), _features(), []))
     assert reply.startswith("【结论】没发现已知骗术的特征")
-    assert "已为防护群发出高危提醒" not in reply
+    assert "高危提醒已加入妈妈的提醒列表" not in reply
     assert is_valid_reply(reply)
 
 

@@ -1,4 +1,4 @@
-"""SQLite 连接与 schema。时间戳为 Unix 秒;外键开启。"""
+"""SQLite schema. Timestamps are Unix seconds and foreign keys stay enabled."""
 import sqlite3
 
 SCHEMA = """
@@ -13,38 +13,6 @@ CREATE TABLE IF NOT EXISTS session_reset_msg(
     msg_id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES user(id),
     created_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS protection_group(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    created_by_user_id INTEGER REFERENCES user(id),
-    created_at INTEGER NOT NULL,
-    disbanded_at INTEGER
-);
-CREATE TABLE IF NOT EXISTS member(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id INTEGER NOT NULL REFERENCES protection_group(id),
-    user_id INTEGER REFERENCES user(id),
-    name TEXT NOT NULL,
-    trusted INTEGER NOT NULL DEFAULT 0,
-    mute INTEGER NOT NULL DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    ended_at INTEGER,
-    end_reason TEXT CHECK(end_reason IN ('left','removed','disbanded')),
-    CHECK((ended_at IS NULL) = (end_reason IS NULL))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_active_member
-    ON member(group_id,user_id) WHERE user_id IS NOT NULL AND ended_at IS NULL;
-CREATE INDEX IF NOT EXISTS ix_member_user_active ON member(user_id,ended_at);
-CREATE INDEX IF NOT EXISTS ix_member_group_active ON member(group_id,ended_at);
-CREATE TABLE IF NOT EXISTS bind_code(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    code TEXT NOT NULL UNIQUE,
-    member_id INTEGER NOT NULL REFERENCES member(id),
-    created_by INTEGER REFERENCES member(id),
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    used_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS incident(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,13 +37,37 @@ CREATE TABLE IF NOT EXISTS query(
 CREATE UNIQUE INDEX IF NOT EXISTS uq_query_msg_id ON query(msg_id) WHERE msg_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS ix_query_user_time ON query(user_id,created_at);
 CREATE INDEX IF NOT EXISTS ix_query_incident ON query(incident_id);
-CREATE TABLE IF NOT EXISTS query_group(
-    query_id INTEGER NOT NULL REFERENCES query(id),
-    group_id INTEGER NOT NULL REFERENCES protection_group(id),
-    query_member_id INTEGER NOT NULL REFERENCES member(id),
-    PRIMARY KEY(query_id,group_id)
+CREATE TABLE IF NOT EXISTS guard_relation(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    protector_user_id INTEGER NOT NULL REFERENCES user(id),
+    protected_user_id INTEGER NOT NULL REFERENCES user(id),
+    name TEXT NOT NULL,
+    inverse_name TEXT,
+    mute INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    end_reason TEXT CHECK(end_reason IN ('by_protector','by_protected')),
+    CHECK(protector_user_id <> protected_user_id),
+    CHECK((ended_at IS NULL) = (end_reason IS NULL))
 );
-CREATE INDEX IF NOT EXISTS ix_query_group_id ON query_group(group_id,query_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_relation
+    ON guard_relation(protector_user_id,protected_user_id) WHERE ended_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_relation_protected_active ON guard_relation(protected_user_id,ended_at);
+CREATE INDEX IF NOT EXISTS ix_relation_protector_active ON guard_relation(protector_user_id,ended_at);
+CREATE TABLE IF NOT EXISTS invite_code(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    creator_user_id INTEGER NOT NULL REFERENCES user(id),
+    name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER,
+    used_by_user_id INTEGER REFERENCES user(id),
+    revoked_at INTEGER,
+    CHECK(NOT (used_at IS NOT NULL AND revoked_at IS NOT NULL)),
+    CHECK((used_at IS NULL) = (used_by_user_id IS NULL))
+);
+CREATE INDEX IF NOT EXISTS ix_invite_creator ON invite_code(creator_user_id,id);
 CREATE TABLE IF NOT EXISTS verdict(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     query_id INTEGER NOT NULL REFERENCES query(id),
@@ -89,35 +81,48 @@ CREATE TABLE IF NOT EXISTS verdict(
     created_at INTEGER NOT NULL,
     context_snapshot TEXT
 );
+CREATE INDEX IF NOT EXISTS ix_verdict_query ON verdict(query_id,id);
+CREATE TABLE IF NOT EXISTS query_relation(
+    query_id INTEGER NOT NULL REFERENCES query(id),
+    relation_id INTEGER NOT NULL REFERENCES guard_relation(id),
+    PRIMARY KEY(query_id,relation_id)
+);
 CREATE TABLE IF NOT EXISTS alert(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     verdict_id INTEGER NOT NULL REFERENCES verdict(id),
-    membership_id INTEGER NOT NULL REFERENCES member(id),
-    group_name_at_alert TEXT NOT NULL,
+    relation_id INTEGER NOT NULL REFERENCES guard_relation(id),
+    name_at_alert TEXT NOT NULL,
     delivered_at INTEGER NOT NULL,
     read_at INTEGER,
-    UNIQUE(verdict_id,membership_id)
+    UNIQUE(verdict_id,relation_id)
 );
-CREATE INDEX IF NOT EXISTS ix_alert_member_time ON alert(membership_id,delivered_at);
-CREATE TABLE IF NOT EXISTS correction(
+CREATE INDEX IF NOT EXISTS ix_alert_relation_time ON alert(relation_id,delivered_at);
+CREATE TABLE IF NOT EXISTS correction_case(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    verdict_id INTEGER NOT NULL REFERENCES verdict(id),
-    by_user_id INTEGER NOT NULL REFERENCES user(id),
-    label TEXT NOT NULL CHECK(label IN ('real','false_positive')),
-    note TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL CHECK(status IN ('pending','confirmed','rejected')),
-    decided_by_membership_id INTEGER REFERENCES member(id),
-    created_at INTEGER NOT NULL,
-    decided_at INTEGER,
-    UNIQUE(verdict_id,by_user_id)
+    verdict_id INTEGER NOT NULL UNIQUE REFERENCES verdict(id),
+    queryer_label TEXT CHECK(queryer_label IN ('real','false_positive')),
+    queryer_note TEXT NOT NULL DEFAULT '',
+    queryer_feedback_at INTEGER,
+    status TEXT NOT NULL CHECK(status IN ('pending','confirmed','no_consensus')),
+    resolved_label TEXT CHECK(resolved_label IN ('real','false_positive')),
+    opened_at INTEGER NOT NULL,
+    closes_at INTEGER NOT NULL,
+    resolved_at INTEGER,
+    CHECK(closes_at > opened_at),
+    CHECK((queryer_label IS NULL) = (queryer_feedback_at IS NULL)),
+    CHECK((status = 'confirmed') = (resolved_label IS NOT NULL)),
+    CHECK((status = 'pending') = (resolved_at IS NULL))
 );
-CREATE TABLE IF NOT EXISTS correction_group(
-    correction_id INTEGER NOT NULL REFERENCES correction(id),
-    group_id INTEGER NOT NULL REFERENCES protection_group(id),
-    by_membership_id INTEGER NOT NULL REFERENCES member(id),
-    PRIMARY KEY(correction_id,group_id)
+CREATE INDEX IF NOT EXISTS ix_correction_case_status_closes ON correction_case(status,closes_at);
+CREATE TABLE IF NOT EXISTS correction_vote(
+    case_id INTEGER NOT NULL REFERENCES correction_case(id),
+    relation_id INTEGER NOT NULL REFERENCES guard_relation(id),
+    label TEXT CHECK(label IN ('real','false_positive')),
+    voted_at INTEGER,
+    PRIMARY KEY(case_id,relation_id),
+    CHECK((label IS NULL) = (voted_at IS NULL))
 );
-CREATE INDEX IF NOT EXISTS ix_correction_group_id ON correction_group(group_id,correction_id);
+CREATE INDEX IF NOT EXISTS ix_correction_vote_relation ON correction_vote(relation_id,case_id);
 """
 
 
@@ -130,5 +135,5 @@ def connect(path: str) -> sqlite3.Connection:
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA)          # 数据库的幂等初始化
     conn.commit()

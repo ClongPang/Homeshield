@@ -49,13 +49,13 @@ def test_load_scans_env(monkeypatch, tmp_path):
     assert s.get_embedding_provider() is None
 
 
-def test_load_reads_group_capacity_limits_from_env_file(monkeypatch, tmp_path):
-    names = ("MAX_GROUPS", "MAX_MEMBERS")
+def test_load_reads_relation_and_correction_limits_from_env_file(monkeypatch, tmp_path):
+    names = ("MAX_RELATIONS", "INVITE_CODE_TTL_DAYS", "CORRECTION_WINDOW_DAYS")
     for name in names:
         monkeypatch.delenv(name, raising=False)
     env_file = tmp_path / "limits.env"
     env_file.write_text(
-        "MAX_GROUPS=4\nMAX_MEMBERS=7\n",
+        "MAX_RELATIONS=4\nINVITE_CODE_TTL_DAYS=5\nCORRECTION_WINDOW_DAYS=9\n",
         encoding="utf-8",
     )
 
@@ -63,8 +63,9 @@ def test_load_reads_group_capacity_limits_from_env_file(monkeypatch, tmp_path):
     for name in names:
         monkeypatch.delenv(name, raising=False)
 
-    assert settings.max_groups == 4
-    assert settings.max_members == 7
+    assert settings.max_relations == 4
+    assert settings.invite_code_ttl_days == 5
+    assert settings.correction_window_days == 9
 
 
 def test_llm_routes_tasks_to_providers():

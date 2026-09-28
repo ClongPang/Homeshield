@@ -4,7 +4,7 @@ import json
 
 from homeshield.core.deps import make_pipeline
 from homeshield.core.features import FeatureSpec, detect_escalation_feature
-from conftest import ingest_member
+from conftest import ingest_user
 from homeshield.core.models import Conversation
 from homeshield.core.pipeline import _to_conversation
 
@@ -52,10 +52,10 @@ def test_escalation_absent_cases():
     ]) is None
 
 
-def test_pipeline_multi_turn_assigns_turns_and_escalation(deps, group):
-    group_id, elder, _ = group
+def test_pipeline_multi_turn_assigns_turns_and_escalation(deps, relations):
+    user, _, _ = relations
     content = "【第1轮】我是你领导,这是我的新号\n【第2轮】在开会不方便接电话,帮我垫付5万合同款,马上"
-    intake = ingest_member(deps.repos, elder, content=content)
+    intake = ingest_user(deps.repos, user, content=content)
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
     assert result.verdict is not None
     feats = result.verdict.model_dump()  # cited/reason 引用特征

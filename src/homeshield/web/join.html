@@ -1,47 +1,7 @@
-<!doctype html>
-<html lang="zh">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>加入家中盾防护群</title>
-<style>
-  body { font-family: -apple-system, sans-serif; margin: 0; background: #f6f7f9; color: #20252b; }
-  main { max-width: 520px; margin: 0 auto; padding: 22px; }
-  .card { background: white; border-radius: 14px; padding: 18px; margin-top: 14px; line-height: 1.65; }
-  h1 { font-size: 22px; }
-  code { display: inline-block; padding: 8px 12px; background: #f0f3f6; border-radius: 8px; letter-spacing: 2px; font-size: 20px; }
-  button { padding: 11px 16px; border: 0; border-radius: 9px; background: #2b6cb0; color: white; font-size: 16px; }
-  .muted { color: #65717d; font-size: 14px; }
-</style>
-</head>
-<body><main id="app"><div class="card">正在检查邀请…</div></main>
-<script>
-const code = decodeURIComponent(location.pathname.split("/").pop() || "");
-const app = document.getElementById("app");
-const el = (tag, text, cls) => { const n=document.createElement(tag); if(text!==undefined)n.textContent=text; if(cls)n.className=cls; return n; };
-function showError() {
-  app.replaceChildren(el("h1","邀请链接已失效"),el("div","请让群主重新生成邀请，再把新链接发给你。","card"));
-}
-fetch(`/api/join/${encodeURIComponent(code)}`).then(async response => {
-  if (!response.ok) throw new Error("unavailable");
-  const invite = await response.json();
-  app.replaceChildren(el("h1",`加入「${invite.group_name}」`));
-  const card=el("div",undefined,"card");
-  card.append(el("div",`群主邀请你以「${invite.member_name}」的称呼加入防护群。`));
-  card.append(el("p")); card.append(el("code",code));
-  const copy=el("button","复制绑定口令"); card.append(copy);
-  card.append(el("p","打开家中盾公众号并发送下面这条口令，即可完成加入：","muted"));
-  card.append(el("code",invite.command));
-  card.append(el("p",`邀请有效期至 ${new Date(invite.expires_at * 1000).toLocaleString()}。加入后，公众号会回复你的个人控制台入口。`,"muted"));
-  app.append(card);
-  copy.onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(invite.command);
-      copy.textContent = "已复制 ✓";
-    } catch {
-      copy.textContent = "复制失败，请长按口令复制";
-    }
-  };
-}).catch(showError);
-</script></body>
-</html>
+<!doctype html><html lang="zh"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><meta name="referrer" content="no-referrer"/>
+<title>加入联防 · 家中盾</title><style>body{font-family:-apple-system,sans-serif;margin:0;background:#f4f6f8;color:#20252b}main{max-width:520px;margin:auto;padding:22px}.card{background:#fff;border-radius:14px;padding:18px;margin-top:14px;line-height:1.65}h1{font-size:23px}code{display:inline-block;padding:9px 12px;background:#eef2f5;border-radius:8px;letter-spacing:2px;font-size:19px}button{padding:11px 16px;border:0;border-radius:9px;background:#1769aa;color:#fff;font-size:16px}.muted{color:#687580;font-size:14px}</style></head>
+<body><main id="app"><div class="card">正在检查邀请…</div></main><script>
+const code=decodeURIComponent(location.pathname.split("/").pop()||""),app=document.getElementById("app");const el=(t,s,c)=>{const n=document.createElement(t);if(s!==undefined)n.textContent=s;if(c)n.className=c;return n};
+function failed(){app.replaceChildren(el("h1","邀请链接已失效"),el("div","请让邀请者重新生成邀请码。","card"))}
+fetch(`/api/join/${encodeURIComponent(code)}`).then(async r=>{if(!r.ok)throw 0;const d=await r.json();app.replaceChildren(el("h1","接受联防邀请"));const c=el("div",undefined,"card");c.append(el("b",d.direction),el("p",`邀请者会以「${d.name}」称呼你。`),el("p",d.sharing),el("p","绑定后，双方仍各自独立查询；你可以随时解除这条关系。","muted"),el("p","在家中盾公众号发送以下口令完成绑定："),el("code",d.command));const b=el("button","复制绑定口令");b.onclick=async()=>{try{await navigator.clipboard.writeText(d.command);b.textContent="已复制 ✓"}catch{b.textContent="复制失败，请长按口令复制"}};c.append(el("p"),b,el("p",`有效期至 ${new Date(d.expires_at*1000).toLocaleString()}。绑定完成后，可回复「我的联防」取得个人控制台链接。`,"muted"));app.append(c)}).catch(failed);
+</script></main></body></html>

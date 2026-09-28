@@ -33,9 +33,7 @@ async def run_arm(arcs: list[dict], settings: Settings, enabled: bool) -> list[d
     deps.verification.pipeline.judge.judge = counted_judge
     results = []
     for arc in arcs:
-        group_id = deps.repos.group.create(f"eval:{arc['arc_id']}")
-        member_id = deps.repos.member.add(group_id, "eval", openid=f"eval:{arc['arc_id']}")
-        member = deps.repos.member.get(member_id)
+        user = deps.repos.users.get_or_create(f"eval:{arc['arc_id']}")
         now = 1_800_000_000
         final = None
         calls_before = judge_calls
@@ -43,7 +41,7 @@ async def run_arm(arcs: list[dict], settings: Settings, enabled: bool) -> list[d
             now += int(message["delay_seconds"])
             with patch("homeshield.core.repo.utc_timestamp", return_value=now):
                 final = await deps.verification.verify(
-                    member=member, content=message["text"], content_type="text"
+                    user=user, content=message["text"], content_type="text"
                 )
         result = final.result
         stored = deps.repos.verdict.get(result.verdict_id) if result.verdict_id else None
@@ -164,10 +162,9 @@ def evaluate_pairs(arcs: list[dict], off: list[dict], on: list[dict], mode: str,
 
 async def fault_injection_check() -> bool:
     deps = build_deps(Settings(mode="mock", db_path=":memory:"))
-    group_id = deps.repos.group.create("fault-check")
-    member = deps.repos.member.get(deps.repos.member.add(group_id, "tester", openid="fault:test"))
+    user = deps.repos.users.get_or_create("fault:test")
     deps.verification.pipeline = make_pipeline(deps, PipelineConfig(supply_features=True))
-    await deps.verification.verify(member=member, content="这是机密，别告诉家人")
+    await deps.verification.verify(user=user, content="这是机密，别告诉家人")
     seen = []
     original = deps.judge.judge
 
@@ -178,9 +175,9 @@ async def fault_injection_check() -> bool:
     deps.judge.judge = capture
     with patch.object(deps.repos.query, "supply_context", side_effect=RuntimeError("injected")), \
             patch("homeshield.core.pipeline.logger.warning"):
-        failed = await deps.verification.verify(member=member, content="请转账")
+        failed = await deps.verification.verify(user=user, content="请转账")
     deps.verification.pipeline = make_pipeline(deps, PipelineConfig(supply_features=False))
-    baseline = await deps.verification.verify(member=member, content="请转账")
+    baseline = await deps.verification.verify(user=user, content="请转账")
     deps.conn.close()
     return (seen[-2] == seen[-1]
             and failed.result.verdict.model_dump() == baseline.result.verdict.model_dump()

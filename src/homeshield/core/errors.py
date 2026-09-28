@@ -1,4 +1,4 @@
-"""领域异常。"""
+"""领域异常"""
 
 
 class HomeshieldError(Exception):

@@ -1,126 +1,47 @@
-# 家中盾(Homeshield)—— 家庭反诈联防层
+# 家中盾（Homeshield）
 
-> 规格:docs/《家中盾_产品定位.md》(做什么/为什么) + docs/《家中盾_架构技术.md》(架构) + docs/《家中盾_多群模型_实施规格.md》(多群行为与验收)。
-> 本 README 只讲**工程骨架**:怎么跑、怎么设计的、扩展点在哪。
+家中盾为个人提供反诈查证，并允许用户自愿建立单向联防关系。当前实现以[关系模型实施规格 v1.2](docs/家中盾_关系模型_实施规格.md)为准；多群规格仅作历史依据。
 
-## 快速开始(Python 3.12,uv 管理)
-
-```bash
-uv sync                       # 创建虚拟环境、锁依赖;homeshield 以 editable 方式安装
-uv run pytest                 # 全部测试(MODE=mock,无需 API key,FR-10)
-uv run homeshield-cli init-db # 建库
-uv run uvicorn homeshield.server:app --reload   # MODE=mock 下即可完整演示
-uv run homeshield-eval        # 生成 docs/reports/report.md(FR-9)
-```
-
-家人入群走公众号(见下文「家人入口」);本地无微信演示可用 CLI 创建演示身份:
+## 开发
 
 ```bash
-uv run homeshield-cli add-group --name 演示群
-uv run homeshield-cli add-member --group-id <群ID> --name 演示用户 --trusted --demo-user
-uv run homeshield-cli link --member-id <成员ID> --base-url http://localhost:8000
+uv sync
+uv run pytest
+uv run homeshield-cli init-db
+uv run uvicorn homeshield.server:app --reload
+uv run homeshield-eval
 ```
 
-演示身份不触发微信推送;不带 `--demo-user`/`--openid` 的 `add-member` 只建未绑定成员位。配置:复制 `.env.example` 为 `.env`,`MODE=llm` 时填 OpenAI 兼容接口与微信参数。
+复制 `.env.example` 到 `.env`。`MODE=mock` 无需外部 API；`MODE=llm` 时配置兼容 OpenAI 的供应商参数。
 
-命名更新：CLI `add-family/--family-id` 改为 `add-group/--group-id`；旧 Python 名称 `api.family`、`repos.family`、`FamilyRepo` 已移除。SQLite 只按当前 `protection_group/group_id` 结构建库，不包含旧库迁移；HTTP 路径本来就是 `/api/groups`。
+微信用户首次发送文字、URL 或图片时自动创建个人身份，并完整进入查证流程；关注公众号只发送欢迎语。查询结果只回复查询者，不要求建立联防关系。用户可回复「邀请 称呼」发出单向邀请、「绑定 邀请码」接受邀请、「我的联防」查看关系、「解除 #关系ID」解除关系。
+
+`PUBLIC_BASE_URL` 配置后，首次处理完成时通过客服消息单独发送个人控制台链接。邀请页不展示个人 token；网页查询和控制台均要求个人 token。
+
+## 关键行为
+
+- 查询受理时快照查询者当时的活跃 incoming 关系；判定为高危时，只为仍活跃的快照关系创建提醒。解除后无法查看该关系收到的历史提醒。
+- 每条关系独立静音模板消息；提醒记录和 SSE 不受静音影响。模板统一使用 `WECHAT_MULTI_TEMPLATE_ID`，`thing2` 是被联防者称呼。
+- 查询者的纠正是普通反馈，不计入投票。危险判定由收到提醒的活跃联防者投票；低风险判定由查询者主动反馈后，查询时关系快照中的活跃联防者投票。超过固定投票人数一半的标签才会确认；零人或期限内无多数记为 `no_consensus`。
+- `MAX_RELATIONS` 限制每个用户进出合计的活跃关系数；`INVITE_CODE_TTL_DAYS` 设置邀请码期限；`CORRECTION_WINDOW_DAYS` 设置投票期限。
+- 关系模型替换群容器，不提供旧库迁移。开发库需重建；旧群成员不会自动转成关系。
 
 ## 目录
 
-```
-src/homeshield/   唯一 Python 包(uv 安装,editable;标准 src 布局)
-  server.py       FastAPI 装配根:依赖注入 + 路由挂载 + 静态页(uvicorn homeshield.server:app)
-  api/            HTTP 路由层:schemas.py 请求模型 · groups.py 防护群 API · wechat.py 公众号回调
-  cli.py          运维/演示 CLI(= homeshield-cli)
-  web/            聊天页 index.html / 群控制台 console.html / 告警页 alert.html / 邀请页 join.html
-  core/           领域层(纯逻辑,依赖规则见 tests/test_architecture.py)
-    models.py config.py errors.py events.py messages.py
-    intake.py features.py retrieval.py judge.py reply.py notifier.py
-    feedback.py binding.py groups.py annotate.py verification.py pipeline.py
-    db.py repo.py llm.py deps.py       ← 适配器/组合根
-    knowledge/  taxonomy.py mechanics.py cases.json   ← 骗术分类学+机制卡+案例种子
-    channels/   wechat.py              ← 微信防腐层
-  eval/           评测:dataset/metrics/ablation/report/run_eval/contrast(= homeshield-eval)
-  kbbuild/        离线素材库构建(= homeshield-kbcli,不依赖 .env/LLM)
-tests/            契约测试、状态机测试、API 冒烟、架构守护
-docs/             规格与产物:产品定位/架构技术/设计教训/过程总结
-  reports/        评测报告(run_eval --out 默认落点)  archive/ 交接文档归档  papers/ 参考文献
-data/             samples/ 评测样例;raw/ 原始语料(gitignore);kb_build.db 离线库(gitignore)
-deploy/           systemd/launchd 进程守护单元
-pyproject.toml uv.lock .env.example
+```text
+src/homeshield/
+  server.py                 FastAPI 组合根
+  api/relations.py          个人关系、查询、提醒和投票 API
+  api/wechat.py             微信回调与命令
+  core/relations.py         单向关系和邀请规则
+  core/repo.py              SQLite 仓储与事务
+  core/db.py                当前数据库 schema
+  core/{pipeline,features,judge,reply}.py  查证管线
+  web/                      查询页、控制台、提醒页、邀请页
+  eval/                     离线评测
+  kbbuild/                  离线素材库工具
+tests/                      判定回归、关系模型和 API 验收
+docs/                       产品、架构和实施规格
 ```
 
-## 设计决策(模式 → 落点 → 解决什么)
-
-| 模式 | 落点 | 解决什么 |
-|---|---|---|
-| 六边形架构(端口/适配器) | 领域模块只依赖 Protocol;`tests/test_architecture.py` 用 AST 守护依赖方向 | 防止业务逻辑长进框架里;LLM/SQLite/微信可整体替换 |
-| 策略模式 | `Judge`(MockJudge/LLMJudge)、`LLMPort`(MockLLM/OpenAICompatLLM)、ReplyGenerator | §1.2 双模式:MODE 一键切换,CI 不依赖外部 API |
-| 管道 + 配置即数据 | `Pipeline` + `PipelineConfig`(A/B/C 开关) | 消融矩阵与产品共用同一条代码路径(§6.3),评测不需要第二套实现 |
-| 观察者/事件总线 | `EventBus`(sync/async 显式分派,含可调用对象)+ `VerdictCompleted` → `AlertRouter` | 判定与送达解耦;慢 I/O 由 handler 自行后台化,告警策略(dangerous 才推,§3.1)可整体替换 |
-| 服务层(通道去重) | `core/verification.py` `VerificationService` | web/微信两条入口共用"幂等 ingest→管线"主链路,通道只做协议翻译;新增入口(如 iLink)不再复制主链路 |
-| 仓储模式 | `repo.py`(SQL 只在此文件) | 领域层只见领域对象;SQLite 可换而不动业务 |
-| 显式状态机 | `feedback.LEGAL_TRANSITIONS` | 纠正流转(§3.3)非法转移直接拒绝,防投毒规则可测 |
-| 防腐层 | `channels/wechat.py` | 微信签名/XML/客服接口/模板消息不渗入领域 |
-| 确定性兜底 | `TemplateReply` + `is_valid_reply`;`judge_with_validation` 重试→降级 | FR-4/FR-5 的格式正确性不赌 LLM |
-| 组合根 | `deps.build_deps`(唯一 new 具体实现的地方) | server/cli/eval 共用装配;测试注入假实现 |
-| 日志约定 | `core/logsetup.py` + 各模块 `logger.warning(exc_info=True)` | 降级与外部调用失败不静默:留排查痕迹,不打断主链路 |
-
-## 当前多群实现口径
-
-多群行为与生命周期以[实施规格](docs/家中盾_多群模型_实施规格.md)为准:
-
-1. **身份与成员关系分离**:`user` 持有 `openid/token`;`member` 仅描述用户在某群的关系。查询保存 `query_group` 快照,退群/移除/解散保留成员历史。
-2. **查询不选群,群页显式选群**:查询触发相关群广播;单群沿用旧模板,多群接收者使用带群名模板。控制台按群展示告警、纠正队列和周报;首次多群访问先要求选择群。公众号命令包括`开通 [群名]`、`我的群`、`退出 <群名/序号>`与创建者`解散 <群名/序号>`。
-3. **`user_visible_false_positive_rate` 指标(报告字段仍叫 `fpr_strict`)**:在规格 FPR(dangerous 级)之外补充用户感知口径(suspicious 亦计入),用于工作点选择;报告两者都出。
-4. **降级语义**:转写失败/引用校验耗尽 → 不落 verdict、不触发告警,回复走人工兜底文案(FR-2/FR-4 的"需人工判断")。
-5. **评测隔离**:`run_eval` 用 `:memory:` 库,不污染主库。
-6. **超时用惰性触发,不建定时器**:`CorrectionService.decide()` 前先清算过期 pending——规则在唯一需要它的现场自执行(经评审否决了"server 内每日清扫"的过度设计);真实使用量起来后再评估是否升级为定时任务。
-7. **触点模型(双方零技术背景)**:长辈只在微信里;子女是"被通知的人 + 一次点击的反馈者"——高危时模板消息送达并直达详情落地页(`/alert/<id>`,一键反馈),线下核实发生在系统之外;console 是兜底聚合页(告警历史/队列/周报),CLI 定位为开发者工具(模型详见《产品定位》§1.2)。
-8. **异常即人话回复**:管线的意外故障在 VerificationService 收口为兜底文案(LOOK_FAILED),长辈与子女永远得到一句能懂的回应,而不是 500 或沉默;微信回执与全部提示文案集中在 src/homeshield/core/messages.py。
-9. **纠正数据以库为源**:confirmed 纠正留存于库即真实数据源,不维护并行的导出文件;需要回归验证时从库内读取,避免"导出文件过期、与库不一致"。
-10. **供应商即配置,任务经路由分发**:任意 `<NAME>_API_KEY / BASE_URL / MODEL` 在 .env 声明一个供应商;判定/补抽/回复走 `CHAT_PROVIDER`,图片转写走 `TRANSCRIBE_PROVIDER`,向量检索走 `EMBED_PROVIDER`——换供应商只改 .env,不加代码;路由键就是贯穿管线的 task 参数。
-
-## 评测纪律(防"虚假环境陷阱")
-
-唯一的质量收敛标准是**真实世界使用**:真实查询日志、confirmed 纠正(库内留存)、真机/真通道延迟。
-mock、种子样例、合成数据只有两个合法用途:**CI 管道回归**与**冷启动冒烟**。
-对着自产数据调词表/提示词/阈值/检索权重,拟合的是想象,不是现实。
-
-- docs/reports/report.md 强制标注数据来源构成(adapted/synthetic/correction)与模式口径;
-- mock 口径的数字一律表述为"管道验证",禁止表述为产品质量;
-- 词表、提示词、阈值、检索权重的每次变更,须附真实数据复测(库内纠正重放 / 真机日志)才可合入;
-- 冷启动集(§6.1 配比)只服务起步;真实使用启动后,数据分布与扩充由回流决定。
-
-> 当前仓库 14 条种子样例跑出的任何数字(如 Recall 0.667、FPR 0)都是**管道验证值**;
-> 9.4 秒的 localhost 延迟同样不代表真机/微信通道延迟。两者都不是质量结论。
-
-## 与里程碑的对应
-
-- **D1**:核心管线 + 引用校验 + 双模式 —— 骨架已可跑;待办:知识库每类 ≥3 案例、LLM 补抽提示词调优、FR-2 断言测试扩容。
-- **D2**:样例集扩到 80-100 条(记 provenance)、消融/阈值扫描在 LLM 模式跑全量。
-- **D3**:微信测试号闭环(回调/客服/模板已具备,待联调)、SSE 前端打磨、纠正队列视图。
-- **D4**:README 生产化(认证服务号阶梯)、iLink 评估(《产品定位》§4.3)。
-
-## 部署(deploy/)
-
-家人零维护,进程必须自愈。按宿主二选一:
-
-- Linux:`cp deploy/systemd/homeshield.service /etc/systemd/system/ && systemctl enable --now homeshield`
-- macOS:`cp deploy/launchd/com.homeshield.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.homeshield.plist`
-
-对外可达:VPS 直接绑定 `0.0.0.0`,家用宽带用内网穿透(frp / Tailscale Funnel)。多群部署配置 `PUBLIC_BASE_URL`;微信发送模板时保留 `WECHAT_TEMPLATE_ID`,并配置带群名字段的 `WECHAT_MULTI_TEMPLATE_ID`。
-
-家人入口(公众号,零注册):
-
-1. 新群:家人回复`开通 [群名]`→ 建立防护群,创建者成为信任成员并收到个人控制台链接;
-2. 邀请:信任成员在控制台创建成员位并分享邀请链接或绑定口令;邀请页展示群名、成员称呼与口令,绑定前不展示个人 token;
-3. 加入:家人关注公众号回复`绑定 <码>`即加入该群,同一微信号可加入多个群;
-4. 用户退出全部群后仍保留个人身份,可裸回复`开通`新建群;未绑定者的其他消息只收到引导,不判定、不落库。
-
-服务级活跃群数不设上限。护栏配置见 `.env.example`:`MAX_GROUPS`(每个用户可创建或加入的活跃群数,默认 10)、`MAX_MEMBERS`(每群活跃成员位数,默认 10)、`BIND_CODE_TTL_DAYS`(邀请码有效期,默认 7 天)。CLI 的 `add-group/add-member/link/disband` 保留为运维与演示工具。
-
-## 安全状态
-
-- 已完成:家人 API 以 user 级不可枚举 token 鉴权;`/wechat/callback` 平台签名校验;多群告警/历史授权/纠正队列按成员关系隔离;信任成员护栏与历史保留;绑定码一次性原子认领,过期/重发即失效。实施与验收记录见多群实施规格 §8.1。
-- 待办:前端渲染统一转义(防 XSS);生产微信加密模式与 IP 白名单;按群的 LLM 用量配额。`MAX_GROUPS` 与 `MAX_MEMBERS` 限制单用户和单群规模,不构成服务级总量配额。
+微信模板字段、客服链接投递以及模板落地页仍需在部署前用真实测试号验证。
