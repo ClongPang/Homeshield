@@ -36,7 +36,7 @@ def handle_relation_command(relations: RelationService, repos: Repos, settings: 
                 "already_exists": "这条联防关系已经建立，无需重复绑定。",
                 "limit": f"你或邀请者的活跃联防已达上限（{settings.max_relations} 条）。",
             }.get(exc.reason, "绑定暂时未完成，请稍后重试。")
-        return ("已建立联防关系。对方会收到你的高危提醒；你主动纠正其他判定时，原查询内容也会供对方投票查看。"
+        return ("已建立联防关系。对方会收到你的查询提醒；你主动纠正其他判定时，原查询内容也会供对方投票查看。"
                 "回复「我的联防」查看，回复「解除 #" + str(relation_id) + "」可停止。")
     if invite_name is not None:
         try:
@@ -45,7 +45,7 @@ def handle_relation_command(relations: RelationService, repos: Repos, settings: 
             return f"活跃联防已达上限（{settings.max_relations} 条），请先解除一条再邀请。" if exc.reason == "limit" else "暂时无法生成邀请码。"
         url = f"{settings.public_base_url.rstrip('/')}/join/{invite['code']}" if settings.public_base_url else ""
         link = f"\n邀请链接：{url}" if url else ""
-        return (f"邀请码：{invite['code']}{link}\nTA 绑定后，你将收到 TA 的高危提醒；"
+        return (f"邀请码：{invite['code']}{link}\nTA 绑定后，你将收到 TA 的查询提醒；"
                 "TA 主动纠正低风险判定时，原查询也会供你投票查看。")
     if text.strip() == "我的联防":
         data = relations.list_for_user(user.id)
@@ -67,8 +67,8 @@ def handle_relation_command(relations: RelationService, repos: Repos, settings: 
             return "没有找到这条联防关系。回复「我的联防」查看关系编号。"
         relation = matches[0]
         if status == "by_protector":
-            return f"已解除 #{relation['id']}：对方不再收到你的高危提醒。"
+            return f"已解除 #{relation['id']}：对方不再收到你的查询提醒。"
         if status == "by_protected":
-            return f"已解除 #{relation['id']}：你不再收到对方的高危提醒。"
+            return f"已解除 #{relation['id']}：你不再收到对方的查询提醒。"
         return "这条联防关系已解除。"
     return None

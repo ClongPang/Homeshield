@@ -8,6 +8,7 @@ from homeshield.core import messages
 from homeshield.core.channels.wecom import WeComChannel
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps
+from homeshield.core.models import Level
 
 EID = "wmEtest0001"
 KFID = "wkAtest0001"
@@ -203,7 +204,7 @@ def test_wecom_alert_delivery_matrix():
         {"user_id": u_ses.id, "openid": "wxkf:no-mapping", "alert_id": 2},
         {"user_id": u_wx.id, "openid": "oWxPublicOpenid123", "alert_id": 3},
     ]
-    asyncio.run(router._send_wecom_alerts(recipients, "可疑内容"))
+    asyncio.run(router._send_wecom_alerts(recipients, Level.DANGEROUS))
     assert len(ch.app_messages) == 1 and ch.app_messages[0][0] == ["CorpZhang"]
     assert "高危预警" in ch.app_messages[0][1] and "妈妈" in ch.app_messages[0][1]
     assert len(ch.session_alerts) == 1 and "高危预警" in ch.session_alerts[0][1]

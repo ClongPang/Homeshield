@@ -81,4 +81,4 @@ class RelationService:
     @staticmethod
     def join_preview(invite: dict) -> dict:
         return {"direction": "邀请者将联防你", "name": invite["name"],
-                "sharing": "接受后,你的高危提醒将同步给发码者;你主动纠正其他判定时,原查询会供其投票查看"}
+                "sharing": "接受后,你的查询提醒将同步给发码者;你主动纠正其他判定时,原查询会供其投票查看"}

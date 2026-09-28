@@ -73,7 +73,7 @@ def test_invite_preview_and_personal_relationship_management(client):
     created = client.post("/api/relations/invites", json={"token": a.token, "name": "妈妈"}).json()
     preview = client.get(f"/api/join/{created['code']}")
     assert preview.status_code == 200 and preview.json()["name"] == "妈妈"
-    assert "高危提醒" in preview.json()["sharing"] and "投票查看" in preview.json()["sharing"]
+    assert "查询提醒" in preview.json()["sharing"] and "投票查看" in preview.json()["sharing"]
     assert "token" not in preview.json()
     _, rid, _ = deps.relations.join(b.openid, created["code"])
     assert client.get("/api/relations", params={"token": a.token}).json()["guardings"][0]["name"] == "妈妈"

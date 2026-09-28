@@ -30,13 +30,15 @@ def test_image_transcribe_degrade(deps, user):
     assert "请把内容打成文字" in result.reply
 
 
-def test_suspicious_not_alerting(deps, relations):
-    protected, _, _ = relations
+def test_suspicious_alerts_query_driven(deps, relations):
+    """扇出由查询事件触发,判定等级不过滤:可疑判定同样进联防者提醒列表。"""
+    protected, _, relation_id = relations
     intake = ingest(deps.repos, user_id=protected.id, content="最后一天限时优惠,马上下单")
     result = asyncio.run(make_pipeline(deps).run(intake.message, intake.query_id))
     assert result.verdict.level is Level.SUSPICIOUS
-    assert "提醒列表" not in result.reply
-    assert deps.conn.execute("SELECT COUNT(*) FROM alert").fetchone()[0] == 0
+    assert "查询提醒已加入儿子的提醒列表" in result.reply
+    rows = deps.conn.execute("SELECT relation_id,name_at_alert FROM alert").fetchall()
+    assert [(row["relation_id"], row["name_at_alert"]) for row in rows] == [(relation_id, "妈妈")]
 
 
 def test_bare_dangerous_query_has_no_alert_or_notification_claim(deps, user):

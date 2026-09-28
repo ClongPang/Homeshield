@@ -5,6 +5,7 @@ from homeshield.core import messages
 def test_welcome_discloses_private_results_and_official_fallback():
     assert "是不是骗局" not in messages.WELCOME
     assert "只回复你本人" in messages.WELCOME
+    assert "每次查证都会提醒联防你的人" in messages.WELCOME
     assert "96110" in messages.WELCOME
     assert "邀请 称呼" in messages.WELCOME and "绑定 邀请码" in messages.WELCOME
     assert "也可以直接转发可疑消息给我看" in messages.WELCOME
