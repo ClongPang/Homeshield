@@ -28,10 +28,6 @@ class Settings:
     chat_provider_name: str = ""  # 判定 / 特征补抽 / 回复
     transcribe_provider_name: str = ""  # 图片转写;留空回落 chat
     embed_provider_name: str = ""  # 向量检索;留空退化为纯关键词
-    wechat_token: str = ""
-    wechat_appid: str = ""
-    wechat_secret: str = ""
-    wechat_multi_template_id: str = ""
     # 企业微信(微信客服):corpid/密钥用于 API 调用,token/aes_key 用于回调验签与加解密
     wecom_corpid: str = ""
     wecom_agent_id: str = ""
@@ -74,10 +70,6 @@ class Settings:
             chat_provider_name=os.getenv("CHAT_PROVIDER", "").upper(),
             transcribe_provider_name=os.getenv("TRANSCRIBE_PROVIDER", "").upper(),
             embed_provider_name=os.getenv("EMBED_PROVIDER", "").upper(),
-            wechat_token=os.getenv("WECHAT_TOKEN", ""),
-            wechat_appid=os.getenv("WECHAT_APPID", ""),
-            wechat_secret=os.getenv("WECHAT_SECRET", ""),
-            wechat_multi_template_id=os.getenv("WECHAT_MULTI_TEMPLATE_ID", ""),
             wecom_corpid=os.getenv("WECOM_CORPID", ""),
             wecom_agent_id=os.getenv("WECOM_AGENT_ID", ""),
             wecom_app_secret=os.getenv("WECOM_APP_SECRET", ""),

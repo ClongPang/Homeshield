@@ -34,13 +34,13 @@ class StubWecomChannel:
     async def send_app_message(self, corp_userids, text):
         self.app_messages.append((corp_userids, text))
 
-    async def send_session_alert(self, openid, text):
+    async def send_session_message(self, openid, text):
         self.session_alerts.append((openid, text))
 
     async def download_media(self, media_id):
         return self.media[media_id]
 
-    async def kf_accounts(self):
+    async def list_kf_accounts(self):
         return [{"open_kfid": KFID, "name": "小盾"}]
 
     async def kf_sync_msg(self, open_kfid, cursor):
@@ -88,6 +88,7 @@ def test_enter_session_sends_backend_welcome():
     _run(wecom_api.handle_wecom_messages(deps, deps.verification, [event]))
     assert ch.welcomes == [("WC1", messages.WELCOME)]
     assert ch.sent == []  # 事件不产生判定回复
+    assert deps.repos.users.get_by_openid("wxkf:" + EID) is None  # 事件不建身份
 
 
 def test_relation_command_invite():
@@ -208,10 +209,59 @@ def test_wecom_alert_delivery_matrix():
     assert len(ch.session_alerts) == 1 and "高危预警" in ch.session_alerts[0][1]
 
 
-def test_template_path_skips_wxkf_openids():
-    """模板路径的合成账号跳过清单应包含 wxkf: 前缀(否则对客服身份发模板必然失败)。"""
-    from homeshield.api import wechat as wechat_transport
-    from homeshield.core.notifier import AlertRouter, AlertBroker
-    import inspect
-    src = inspect.getsource(AlertRouter._send_alert_notifications)
-    assert '"wxkf:"' in src
+def test_bare_dangerous_query_records_verdict_without_alerts():
+    deps, ch = _deps()
+    _run(wecom_api.handle_wecom_messages(deps, deps.verification, [_text_msg("别告诉家人，马上转账5万")]))
+    user = deps.repos.users.get_by_openid("wxkf:" + EID)
+    query = deps.conn.execute("SELECT * FROM query WHERE user_id=?", (user.id,)).fetchone()
+    assert query is not None and query["content_type"] == "text"
+    assert deps.conn.execute("SELECT COUNT(*) FROM verdict WHERE query_id=?", (query["id"],)).fetchone()[0] == 1
+    assert deps.conn.execute("SELECT COUNT(*) FROM alert").fetchone()[0] == 0  # 无联防关系
+
+
+def test_url_text_message_inferred_as_url():
+    deps, ch = _deps()
+    _run(wecom_api.handle_wecom_messages(deps, deps.verification, [_text_msg("https://example.com/refund", "url1")]))
+    user = deps.repos.users.get_by_openid("wxkf:" + EID)
+    query = deps.conn.execute("SELECT * FROM query WHERE user_id=?", (user.id,)).fetchone()
+    assert query["content_type"] == "url"  # intake 依内容推断,通道不声明 text 锁死
+
+
+def test_invite_bind_direction_and_old_group_hint():
+    deps, ch = _deps()
+    _run(wecom_api.handle_wecom_messages(deps, deps.verification, [_text_msg("邀请 妈妈", "invite1")]))
+    code = ch.sent[0][2].split("邀请码：", 1)[1].splitlines()[0]
+    bind_msg = {"origin": 3, "external_userid": "wmOther", "open_kfid": KFID, "msgid": "bind1",
+                "msgtype": "text", "text": {"content": f"绑定 {code}"}}
+    _run(wecom_api.handle_wecom_messages(deps, deps.verification, [bind_msg]))
+    bind_reply = next(t for _, _, t in ch.sent if "已建立联防关系" in t)
+    assert "解除" in bind_reply and "投票查看" in bind_reply
+    old_msg = dict(bind_msg, msgid="old1", text={"content": "我的群"})
+    _run(wecom_api.handle_wecom_messages(deps, deps.verification, [old_msg]))
+    assert next(t for _, _, t in ch.sent if t.startswith("命令已更新"))
+    protector = deps.repos.users.get_by_openid("wxkf:" + EID)
+    protected = deps.repos.users.get_by_openid("wxkf:wmOther")
+    rel = deps.conn.execute("SELECT * FROM guard_relation WHERE protector_user_id=? AND protected_user_id=?",
+                            (protector.id, protected.id)).fetchone()
+    assert rel and rel["name"] == "妈妈"
+
+
+def test_my_relations_empty_shows_guidance_and_link():
+    deps, ch = _deps()
+    _run(wecom_api.handle_wecom_messages(deps, deps.verification, [_text_msg("我的联防", "mine1")]))
+    mine = next(t for _, _, t in ch.sent if "还没有联防" in t)
+    assert "console?token=" in mine
+
+
+def test_kf_notify_triggers_pull_and_serializes():
+    """回调通知触发一次拉取;游标存模块状态,第二次通知拉不到新消息不再派发。"""
+    from homeshield.api import wecom as wecom_api
+    wecom_api._CURSORS.clear()
+    deps, ch = _deps()
+    ch.next_sync = {"errcode": 0, "msg_list": [_text_msg("第一轮", "n1")], "next_cursor": "c1"}
+    asyncio.run(wecom_api.handle_kf_notify(deps, deps.verification))
+    first = len(ch.sent)
+    assert wecom_api._CURSORS[KFID] == "c1"
+    ch.next_sync = {"errcode": 0, "msg_list": [], "next_cursor": "c1"}
+    asyncio.run(wecom_api.handle_kf_notify(deps, deps.verification))
+    assert len(ch.sent) == first  # 同游标空拉取,无重复处理

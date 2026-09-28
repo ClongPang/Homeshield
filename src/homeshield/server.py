@@ -1,9 +1,8 @@
 """
 HTTP composition root: assemble dependencies and routes; domain logic is in core.
-User tokens authorize personal query and directed relation data. WeChat callback
-uses platform signature validation; text and image queries receive a quick ACK
-then run through the existing verification pipeline.
-Routes: api/relations.py (personal data) and api/wechat.py (WeChat callback).
+User tokens authorize personal query and directed relation data. The WeCom
+customer-service channel pulls messages on a poller and replies via kf API.
+Routes: api/relations.py (personal data) and api/wecom.py (WeCom channel).
 """
 import asyncio
 import os
@@ -19,7 +18,6 @@ except ImportError:  # 非 POSIX 平台跳过护栏(部署目标为 Linux/macOS)
     fcntl = None
 
 from homeshield.api.relations import build_relation_router
-from homeshield.api.wechat import build_wechat_router
 from homeshield.api.wecom import build_wecom_router, wecom_poller
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps
@@ -84,9 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             CorrectionService(deps.repos, settings.correction_window_days),
         )
     )
-    # 注册微信公众号回调接口
-    app.include_router(build_wechat_router(deps, deps.verification))
-    # 注册企业微信(微信客服)回调接口
+    # 注册企业微信(微信客服)通道:回调验活 + 消息拉取轮询
     app.include_router(build_wecom_router(deps))
 
     @app.get("/")

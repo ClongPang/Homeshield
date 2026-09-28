@@ -23,6 +23,7 @@ DOMAIN_FILES = [
     "src/homeshield/core/annotate.py",
     "src/homeshield/core/relations.py",
     "src/homeshield/core/verification.py",
+    "src/homeshield/core/commands.py",
 ]
 
 FORBIDDEN_ROOTS = {"openai", "fastapi", "httpx", "sqlite3", "uvicorn", "requests", "flask"}
@@ -49,7 +50,7 @@ def test_adapters_are_the_only_infra_users():
     adapters = [
         "src/homeshield/core/db.py",
         "src/homeshield/core/repo.py",
-        "src/homeshield/core/channels/wechat.py",
+        "src/homeshield/core/channels/wecom.py",
     ]
     infra = {"sqlite3", "httpx"}
     for rel in adapters:

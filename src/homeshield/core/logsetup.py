@@ -10,3 +10,6 @@ def setup_logging(level: int = logging.INFO) -> None:
         level=level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # httpx 的 INFO 请求日志带完整 URL(含 access_token),降为 WARN 防止密钥落盘
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

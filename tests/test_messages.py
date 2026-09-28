@@ -1,4 +1,4 @@
-"""WeChat copy states private results, relation direction and available help."""
+"""Session copy states private results, relation direction and available help."""
 from homeshield.core import messages
 
 
@@ -12,6 +12,6 @@ def test_welcome_discloses_private_results_and_official_fallback():
 
 
 def test_binding_copy_warns_about_query_sharing():
-    from homeshield.api.wechat import OLD_COMMAND_HINT
+    from homeshield.core.commands import OLD_COMMAND_HINT
 
     assert "邀请 称呼" in OLD_COMMAND_HINT and "我的联防" in OLD_COMMAND_HINT

@@ -1,4 +1,4 @@
-"""Template delivery uses the active relation's immutable alert snapshot."""
+"""WeCom alert delivery: app message with snapshot, session fallback, and re-checks."""
 import asyncio
 
 from homeshield.core.events import VerdictCompleted
@@ -6,67 +6,83 @@ from homeshield.core.models import ContentType, JudgeOutput, Level, Message, Mod
 from homeshield.core.notifier import AlertBroker, AlertRouter
 
 
-class FakeTemplateSender:
+class FakeWecomSender:
     def __init__(self):
-        self.sent = []
+        self.app_messages = []
+        self.session_alerts = []
 
-    async def send_template(self, openid, data, url=None, template_id=None):
-        self.sent.append((openid, data, url, template_id))
+    async def send_app_message(self, corp_userids, text):
+        self.app_messages.append((corp_userids, text))
+
+    async def send_session_message(self, openid, text):
+        self.session_alerts.append((openid, text))
 
 
-def _fanout(deps, suffix, names=("妈妈",)):
-    queryer = deps.repos.users.get_or_create(f"notifier:queryer:{suffix}")
-    recipients = []
+def _dangerous_fanout(deps, suffix, names=("妈妈",)):
+    """queryer(wxkf 身份) + protectors(指定称呼,发邀请方),返回 (recipients, protectors)。"""
+    queryer = deps.repos.users.get_or_create(f"wxkf:notifier:queryer:{suffix}")
+    protectors = []
     for index, name in enumerate(names):
-        protector = deps.repos.users.get_or_create(f"notifier:protector:{suffix}:{index}")
+        protector = deps.repos.users.get_or_create(f"wxkf:notifier:protector:{suffix}:{index}")
         invite = deps.relations.issue_invite(protector.id, name)
-        relation_id = deps.relations.join(queryer.openid, invite["code"])[1]
-        recipients.append((protector, relation_id))
+        deps.relations.join(queryer.openid, invite["code"])
+        protectors.append(protector)
     query_id = deps.repos.query.insert(queryer.id, "text", "原始查询内容", None)
     verdict_id = deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "理由", "回复", 1, Mode.MOCK)
     fanout = deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
-    return fanout["recipients"], recipients
+    return fanout["recipients"], protectors
 
 
-def test_template_fields_clip_and_use_alert_name_snapshot(deps):
-    name_at_alert = "关系称呼超过二十个字符的模板测试用例超过限制"
-    recipients, relations = _fanout(deps, "fields", (name_at_alert,))
-    protector, relation_id = relations[0]
-    deps.repos.relation.update(relation_id, protector.id, name="改过的称呼")
-    sender = FakeTemplateSender()
-    router = AlertRouter(AlertBroker(), deps.repos, "https://shield.test", "template-id")
-    router.wechat = sender
+def test_app_message_uses_alert_name_snapshot(deps):
+    long_name = "关系称呼超过二十个字符的应用消息测试用例超过限制"
+    recipients, protectors = _dangerous_fanout(deps, "snapshot", (long_name,))
+    deps.repos.relation.update(recipients[0]["relation_id"], protectors[0].id, name="改过的称呼")
+    deps.repos.wecom_member.link(protectors[0].id, "CorpZhang")
+    sender = FakeWecomSender()
+    router = AlertRouter(AlertBroker(), deps.repos, "https://shield.test")
+    router.wecom = sender
 
-    asyncio.run(router._send_alert_notifications(recipients, "风险摘要" * 6))
+    asyncio.run(router._send_wecom_alerts(recipients, "风险摘要" * 6))
 
-    assert len(sender.sent) == 1
-    openid, data, url, template_id = sender.sent[0]
-    assert openid == protector.openid and template_id == "template-id"
-    assert data["thing1"]["value"] == "风险摘要" * 4 + "风险摘…"
-    assert len(data["thing1"]["value"]) <= 20
-    assert data["phrase1"]["value"] == "高危预警"
-    assert data["thing2"]["value"] == name_at_alert[:19] + "…"
-    assert len(data["thing2"]["value"]) <= 20
-    assert url == f"https://shield.test/alert/{recipients[0]['alert_id']}?token={protector.token}"
+    assert len(sender.app_messages) == 1
+    corp, text = sender.app_messages[0]
+    assert corp == ["CorpZhang"]
+    assert long_name in text            # 快照称呼,不受后续改名影响
+    assert "改过的称呼" not in text
+    assert f"https://shield.test/alert/{recipients[0]['alert_id']}?token={protectors[0].token}" in text
 
 
-def test_template_send_rechecks_mute_and_relation_activity(deps):
-    recipients, relations = _fanout(deps, "permissions", ("妈妈", "爸爸"))
-    muted_user, muted_relation = relations[0]
-    ended_user, ended_relation = relations[1]
-    deps.repos.relation.update(muted_relation, muted_user.id, mute=True)
-    deps.relations.end(ended_user.id, ended_relation)
-    sender = FakeTemplateSender()
-    router = AlertRouter(AlertBroker(), deps.repos, "https://shield.test", "template-id")
-    router.wechat = sender
+def test_app_message_rechecks_mute_and_relation_activity(deps):
+    recipients, protectors = _dangerous_fanout(deps, "permissions", ("妈妈", "爸爸"))
+    for protector in protectors:
+        deps.repos.wecom_member.link(protector.id, f"Corp{protector.id}")
+    deps.repos.relation.update(recipients[0]["relation_id"], protectors[0].id, mute=True)
+    deps.relations.end(protectors[1].id, recipients[1]["relation_id"])
+    sender = FakeWecomSender()
+    router = AlertRouter(AlertBroker(), deps.repos, "https://shield.test")
+    router.wecom = sender
 
-    asyncio.run(router._send_alert_notifications(recipients, "危险内容"))
+    asyncio.run(router._send_wecom_alerts(recipients, "危险内容"))
 
-    assert sender.sent == []
+    assert sender.app_messages == []  # push_context 对静音/已解除返回 None
 
 
-def _event(deps, queryer, query_id, verdict_id) -> VerdictCompleted:
-    message = Message(user_id=queryer.id, content_type=ContentType.TEXT, content="危险内容", channel="wechat")
+def test_session_fallback_for_unmapped_wxkf_protector(deps):
+    recipients, _ = _dangerous_fanout(deps, "fallback", ("妈妈",))
+    sender = FakeWecomSender()
+    router = AlertRouter(AlertBroker(), deps.repos, "")
+    router.wecom = sender
+
+    asyncio.run(router._send_wecom_alerts(recipients, "危险内容"))
+
+    assert sender.app_messages == []
+    assert len(sender.session_alerts) == 1
+    openid, text = sender.session_alerts[0]
+    assert openid.startswith("wxkf:") and "高危预警" in text
+
+
+def _event(queryer, query_id, verdict_id) -> VerdictCompleted:
+    message = Message(user_id=queryer.id, content_type=ContentType.TEXT, content="危险内容", channel="wecom")
     return VerdictCompleted(message=message, verdict=JudgeOutput(level=Level.DANGEROUS, confidence=90),
                             reply="回复", query_id=query_id, verdict_id=verdict_id)
 
@@ -83,7 +99,7 @@ def test_queryer_notice_uses_inverse_names_and_only_active_relations(deps):
     deps.repos.relation.update(drop_relation, queryer.id, mute=True)
     query_id = deps.repos.query.insert(queryer.id, "text", "危险内容", None)
     verdict_id = deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "理由", "回复", 1, Mode.MOCK)
-    event = _event(deps, queryer, query_id, verdict_id)
+    event = _event(queryer, query_id, verdict_id)
 
     router = AlertRouter(AlertBroker(), deps.repos)
     asyncio.run(router(event))

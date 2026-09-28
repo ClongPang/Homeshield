@@ -58,7 +58,7 @@ class Message(BaseModel):
     relation_ids: list[int] = Field(default_factory=list)
     content_type: ContentType
     content: str
-    channel: str = "web"  # wechat | web
+    channel: str = "web"  # wecom | web
     msg_id: str | None = None  # 幂等键(微信 MsgId / 网页客户端生成)
     created_at: int = Field(default_factory=utc_timestamp)
 
@@ -168,7 +168,7 @@ class JudgeOutput(BaseModel):
 
 
 class User(BaseModel):
-    """A person's global identity. openid maps to WeChat; token authenticates the console."""
+    """A person's global identity. openid maps the channel identity; token authenticates the console."""
 
     id: int
     openid: str

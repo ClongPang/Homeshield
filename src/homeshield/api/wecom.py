@@ -1,9 +1,9 @@
 """企业微信(微信客服)通道:回调验活 + sync_msg 轮询 + 消息派发。
 
 消息获取走拉取模式(轮询器带游标,不依赖回调推送;回调仅作验活与
-后续实时性增强)。身份复用 user.openid,external_userid 加 wxkf: 前缀,
-与合成账号的 demo:/test: 前缀同一约定;关系指令处理直接复用
-api/wechat 的 _handle_relation_command。判定业务在 verification/pipeline。
+后续实时性增强)。身份复用 user.openid,external_userid 加 wxkf: 前缀,与合成账号的
+demo:/test: 前缀同一约定;关系指令处理在 core/commands(通道无关)。判定业务
+在 verification/pipeline。
 """
 import asyncio
 import base64
@@ -19,12 +19,27 @@ from homeshield.core.deps import Deps
 from homeshield.core.errors import DuplicateMessage
 from homeshield.core.triage import classify
 from homeshield.core.verification import VerificationService
-# 公众号通道的关系指令处理(邀请/绑定/我的联防/解除)与企微完全同构,直接复用
-from homeshield.api.wechat import _handle_relation_command
+from homeshield.core.commands import handle_relation_command
 
 logger = logging.getLogger(__name__)
 OPENID_PREFIX = "wxkf:"
-POLL_SECONDS = 5
+FALLBACK_POLL_SECONDS = 60  # 漏报兜底周期;正常路径由回调通知即时触发拉取
+
+# 拉取状态:游标 + 串行锁。单进程部署由 server 的启动锁保证唯一,状态随进程存活,
+# 重启后游标清空靠 ingest 的 msg_id 幂等去重安全重放。
+_CURSORS: dict[str, str] = {}
+_PULL_LOCK = asyncio.Lock()
+
+
+async def handle_kf_notify(deps: Deps, verification: VerificationService) -> None:
+    """回调收到 kf_msg_or_event 后的即时拉取;与兜底轮询共用游标和锁。"""
+    if deps.wecom is None or not deps.wecom.api_ready:
+        return
+    async with _PULL_LOCK:
+        try:
+            await poll_once(deps, verification, _CURSORS)
+        except Exception:
+            logger.warning("wecom notify-pull failed", exc_info=True)
 
 
 def build_wecom_router(deps: Deps) -> APIRouter:
@@ -65,6 +80,8 @@ def build_wecom_router(deps: Deps) -> APIRouter:
                 data = ET.fromstring(ch.decrypt(encrypt))
                 kind = data.findtext("Event") or data.findtext("MsgType") or "?"
                 logger.info("wecom event kind=%s", kind)
+                if kind == "kf_msg_or_event":
+                    asyncio.create_task(handle_kf_notify(deps, deps.verification))
             except (WeComCryptoError, ET.ParseError):
                 logger.warning("wecom callback: decrypt/parse failed", exc_info=True)
         return PlainTextResponse("success")
@@ -73,20 +90,19 @@ def build_wecom_router(deps: Deps) -> APIRouter:
 
 
 async def wecom_poller(deps: Deps, verification: VerificationService) -> None:
-    """每 POLL_SECONDS 拉一轮全部客服账号;游标仅存内存,重启后靠
-    ingest 的 msg_id 幂等去重安全重放。"""
-    cursors: dict[str, str] = {}
+    """漏报兜底:每 FALLBACK_POLL_SECONDS 拉一轮(正常路径由回调通知即时触发,
+    两者共用游标与锁)。重启后游标清空,靠 ingest 的 msg_id 幂等去重安全重放。"""
     while True:
         try:
-            await poll_once(deps, verification, cursors)
+            await handle_kf_notify(deps, verification)
         except Exception:
             logger.warning("wecom poll cycle failed", exc_info=True)
-        await asyncio.sleep(POLL_SECONDS)
+        await asyncio.sleep(FALLBACK_POLL_SECONDS)
 
 
 async def poll_once(deps: Deps, verification: VerificationService, cursors: dict[str, str]) -> None:
     ch = deps.wecom
-    for account in await ch.kf_accounts():
+    for account in await ch.list_kf_accounts():
         kfid = account.get("open_kfid", "")
         if not kfid:
             continue
@@ -102,12 +118,12 @@ async def poll_once(deps: Deps, verification: VerificationService, cursors: dict
 async def handle_wecom_messages(deps: Deps, verification: VerificationService, msgs: list[dict]) -> None:
     for m in msgs:
         try:
-            await _handle_one(deps, verification, m)
+            await _handle_message(deps, verification, m)
         except Exception:
             logger.warning("wecom message handling failed", exc_info=True)
 
 
-async def _handle_one(deps: Deps, verification: VerificationService, m: dict) -> None:
+async def _handle_message(deps: Deps, verification: VerificationService, m: dict) -> None:
     ch = deps.wecom
     if m.get("msgtype") == "event":
         if m.get("event_type") == "enter_session" and m.get("welcome_code"):
@@ -136,17 +152,17 @@ async def _handle_one(deps: Deps, verification: VerificationService, m: dict) ->
 
     if m.get("msgtype") == "text":
         text = m.get("text", {}).get("content", "")
-        response = _handle_relation_command(deps, user.id, openid, "text", text)
+        response = handle_relation_command(deps.relations, deps.repos, deps.settings, user, "text", text)
         if response is not None:
             await reply(response)
-            await _send_first_link(deps, ch, kfid, eid, user.token,
+            await _send_console_link(deps, ch, kfid, eid, user.token,
                                    first_message and text.strip() != "我的联防")
             return
         triage = classify(text)
         if triage == "reset":
             deps.repos.incident.close_open_incident(user.id, msg_id=m.get("msgid"))
             await reply(messages.SESSION_RESET_REPLY)
-            await _send_first_link(deps, ch, kfid, eid, user.token, first_message)
+            await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
             return
         if triage == "ack":
             try:
@@ -155,10 +171,10 @@ async def _handle_one(deps: Deps, verification: VerificationService, m: dict) ->
             except Exception:
                 logger.warning("wecom ack persistence failed", exc_info=True)
             await reply(messages.ACK_QUERY_REPLY)
-            await _send_first_link(deps, ch, kfid, eid, user.token, first_message)
+            await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
             return
-        await _run_query(deps, verification, ch, kfid, eid, user, text, "text", m.get("msgid"))
-        await _send_first_link(deps, ch, kfid, eid, user.token, first_message)
+        await _run_query(deps, verification, ch, kfid, eid, user, text, None, m.get("msgid"))
+        await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
         return
 
     if m.get("msgtype") == "image":
@@ -172,7 +188,7 @@ async def _handle_one(deps: Deps, verification: VerificationService, m: dict) ->
             await reply(messages.LOOK_FAILED)
             return
         await _run_query(deps, verification, ch, kfid, eid, user, content, "image", m.get("msgid"))
-        await _send_first_link(deps, ch, kfid, eid, user.token, first_message)
+        await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
         return
 
     if m.get("msgtype") == "link":
@@ -180,15 +196,15 @@ async def _handle_one(deps: Deps, verification: VerificationService, m: dict) ->
         content = "\n".join(filter(None, [link.get("title", ""), link.get("description", ""),
                                           link.get("url", "")]))
         if content:
-            await _run_query(deps, verification, ch, kfid, eid, user, content, "text", m.get("msgid"))
-            await _send_first_link(deps, ch, kfid, eid, user.token, first_message)
+            await _run_query(deps, verification, ch, kfid, eid, user, content, None, m.get("msgid"))
+            await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
             return
 
     if m.get("msgtype") == "merged_msg":
         content = _flatten_merged(m.get("merged_msg", {}))
         if content:
             await _run_query(deps, verification, ch, kfid, eid, user, content, "text", m.get("msgid"))
-            await _send_first_link(deps, ch, kfid, eid, user.token, first_message)
+            await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
             return
 
     await reply(messages.UNSUPPORTED_TYPE)
@@ -232,7 +248,7 @@ async def _run_query(deps: Deps, verification: VerificationService, ch, kfid: st
         logger.warning("wecom reply failed", exc_info=True)
 
 
-async def _send_first_link(deps: Deps, ch, kfid: str, eid: str, token: str, first_message: bool) -> None:
+async def _send_console_link(deps: Deps, ch, kfid: str, eid: str, token: str, first_message: bool) -> None:
     if not first_message or not deps.settings.public_base_url:
         return
     url = f"{deps.settings.public_base_url.rstrip('/')}/console?token={token}"

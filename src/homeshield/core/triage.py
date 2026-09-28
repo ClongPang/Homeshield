@@ -1,5 +1,5 @@
 """
-Entry priority: relation commands → WeChat reset → acknowledgement → full verdict.
+Entry priority: relation commands → session reset → acknowledgement → full verdict.
 调用方只对 text 类型调用;URL 与图片一律进入完整判定。
 把收到的文字分成三类，它本身不判断是否诈骗
 """

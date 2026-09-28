@@ -96,7 +96,7 @@ class WeComChannel:
         self._token_exp = time.time() + int(data.get("expires_in", 7200))
         return self._token
 
-    async def kf_accounts(self, max_age_seconds: int = 600) -> list[dict]:
+    async def list_kf_accounts(self, max_age_seconds: int = 600) -> list[dict]:
         """客服账号列表;短缓存避免每个轮询周期重复拉取。"""
         cached_at, cached = self._accounts
         if cached and time.time() - cached_at < max_age_seconds:
@@ -140,13 +140,13 @@ class WeComChannel:
             raise RuntimeError(f"wecom media/get failed: {data.get('errcode')} {data.get('errmsg')}")
         return resp.content
 
-    async def send_session_alert(self, openid: str, text: str) -> bool:
+    async def send_session_message(self, openid: str, text: str) -> bool:
         """告警回落:未登记成员映射的 wxkf 联防者,向其客服会话直发(best-effort,
         受 48h 窗口约束)。成功返回 True。"""
         if not openid.startswith("wxkf:"):
             return False
         eid = openid[len("wxkf:"):]
-        accounts = await self.kf_accounts()
+        accounts = await self.list_kf_accounts()
         if not accounts:
             return False
         res = await self.kf_send_msg(accounts[0]["open_kfid"], eid, text)

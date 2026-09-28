@@ -1,4 +1,4 @@
-"""User facing WeChat and console copy."""
+"""User facing session(企微客服会话/网页)and console copy."""
 
 WELCOME = (
     "你好，我是小盾，家庭反诈助手。\n"
