@@ -563,9 +563,13 @@ class CorrectionRepo(_Repo):
 
 @_pool_repo_access
 class WecomMemberRepo(_Repo):
-    """wxkf 用户 ↔ 企业微信成员 userid 的映射;应用消息告警按此触达微信插件。"""
+    """wxkf 用户 ↔ 企业微信成员 userid 的映射;应用消息告警按此触达微信插件。
 
-    async def link(self, user_id: int, corp_userid: str) -> None:
+    绑定生命周期由 bound_via/bound_at/verified_at/last_fail_* 表达,四态语义
+    (未绑定/已绑定未确认/送达就绪/异常)在 core/push.py 计算;重绑一律重开确认窗口。
+    """
+
+    async def link(self, user_id: int, corp_userid: str, via: str = "cli") -> None:
         # corp_userid 亦有 UNIQUE 约束:成员改绑到另一用户时先腾出旧映射。
         # The savepoint keeps the transaction usable if another worker wins the unique race.
         async with self.conn.transaction():
@@ -574,9 +578,13 @@ class WecomMemberRepo(_Repo):
                     async with self.conn.transaction():
                         await self.conn.execute("DELETE FROM wecom_member WHERE corp_userid=%s AND user_id<>%s",
                                           (corp_userid, user_id))
-                        await self.conn.execute("INSERT INTO wecom_member(user_id,corp_userid) VALUES(%s,%s) "
-                                          "ON CONFLICT(user_id) DO UPDATE SET corp_userid=excluded.corp_userid",
-                                          (user_id, corp_userid))
+                        await self.conn.execute(
+                            "INSERT INTO wecom_member(user_id,corp_userid,bound_via,bound_at) "
+                            "VALUES(%s,%s,%s,to_timestamp(%s)) "
+                            "ON CONFLICT(user_id) DO UPDATE SET corp_userid=excluded.corp_userid,"
+                            "bound_via=excluded.bound_via,bound_at=excluded.bound_at,"
+                            "verified_at=NULL,last_fail_at=NULL,last_fail_reason=NULL",
+                            (user_id, corp_userid, via, utc_timestamp()))
                     return
                 except UniqueViolation as exc:
                     if exc.diag.constraint_name != "wecom_member_corp_userid_key" or attempt:
@@ -586,6 +594,30 @@ class WecomMemberRepo(_Repo):
         row = await (await self.conn.execute("SELECT corp_userid FROM wecom_member WHERE user_id=%s",
                                 (user_id,))).fetchone()
         return row["corp_userid"] if row else None
+
+    async def get_member(self, user_id: int) -> dict | None:
+        row = await (await self.conn.execute(
+            "SELECT user_id,corp_userid,bound_via,bound_at,verified_at,last_fail_at,last_fail_reason "
+            "FROM wecom_member WHERE user_id=%s", (user_id,))).fetchone()
+        return dict(row) if row else None
+
+    async def unbind(self, user_id: int) -> bool:
+        cur = await self.conn.execute("DELETE FROM wecom_member WHERE user_id=%s", (user_id,))
+        return cur.rowcount > 0
+
+    async def mark_verified(self, user_id: int) -> None:
+        await self.conn.execute("UPDATE wecom_member SET verified_at=to_timestamp(%s) WHERE user_id=%s",
+                          (utc_timestamp(), user_id))
+
+    async def mark_failed(self, user_id: int, reason: str) -> None:
+        await self.conn.execute("UPDATE wecom_member SET last_fail_at=to_timestamp(%s),last_fail_reason=%s "
+                          "WHERE user_id=%s", (utc_timestamp(), reason[:200], user_id))
+
+    async def touch_confirm(self, user_id: int) -> None:
+        """重测:刷新确认窗口起点并清除失败信号,状态回到已绑定（未确认）。"""
+        await self.conn.execute("UPDATE wecom_member SET bound_at=to_timestamp(%s),"
+                          "last_fail_at=NULL,last_fail_reason=NULL WHERE user_id=%s",
+                          (utc_timestamp(), user_id))
 
 
 @_pool_repo_access

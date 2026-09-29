@@ -2,13 +2,32 @@
   {
     "number": 1,
     "category": "阶段 0 · 企微后台与真机前置验证",
-    "task": "一次性配置与两项真机验证（不通过则触发提案风险预案）",
+    "task": "一次性配置、两项真机验证与未验证企业权限面核验（不通过则触发提案降级预案）",
     "steps": [
-      { "step": "管理后台确认「我的企业 → 微信插件」可生成邀请二维码，真机扫码关注并收到一条应用消息；结果（含截图）记入《架构技术》changelog", "completed": false },
-      { "step": "自建应用配置「网页授权及JS-SDK可信域名」：ICP 备案域名 + 上传 WW_verify 归属校验文件并校验通过", "completed": false },
-      { "step": "部署机出口 IP 加入企业可信 IP；自建应用可见范围覆盖目标联防者成员", "completed": false },
-      { "step": "真机验证微信端 OAuth：snsapi_base 链接在微信内打开，auth/getuserinfo 返回 userid；若仅返回 openid/external_userid 则按提案风险预案转手机号路径决策", "completed": false },
-      { "step": "（可选，自助入录）「管理工具 → 通讯录同步」开启 API 接口同步，secret 注入 .env（不入仓）", "completed": false }
+      {
+        "step": "管理后台确认「我的企业 → 微信插件」可生成邀请二维码，真机扫码关注并收到一条应用消息；结果（含截图）记入《架构技术》changelog",
+        "completed": false
+      },
+      {
+        "step": "自建应用配置「网页授权及JS-SDK可信域名」：ICP 备案域名 + 上传 WW_verify 归属校验文件并校验通过",
+        "completed": false
+      },
+      {
+        "step": "部署机出口 IP 加入企业可信 IP；自建应用可见范围覆盖目标联防者成员",
+        "completed": false
+      },
+      {
+        "step": "未验证企业权限面核验（主体为个人、企微必然未验证）：通讯录同步助手/user-create 可用性（决定自助入录开关是否强制关闭）、可信域名与可信 IP 配置入口是否开放；结论回写交接约定 #4，不可用面按降级规则处理",
+        "completed": false
+      },
+      {
+        "step": "真机验证微信端 OAuth：snsapi_base 链接在微信内打开，auth/getuserinfo 对插件关注者返回 userid；若仅返回 openid/external_userid 则全员转手机号辅映射（关注前置重排后流程仍成立，仅放弃零输入卖点）",
+        "completed": false
+      },
+      {
+        "step": "（可选，自助入录）「管理工具 → 通讯录同步」开启 API 接口同步，secret 注入 .env（不入仓）",
+        "completed": false
+      }
     ],
     "passes": false
   },
@@ -17,109 +36,230 @@
     "category": "阶段 1 · 数据与配置基座",
     "task": "wecom_member 加列与新增配置项",
     "steps": [
-      { "step": "wecom_member 加列：bound_via TEXT NOT NULL DEFAULT 'cli'、bound_at、verified_at、last_fail_at（update-postgres-storage 已合入则进其 PG 终态 DDL + 迁移脚本，否则 SQLite ALTER）", "completed": false },
-      { "step": "既有行迁移标记 bound_via='cli'，迁移语句幂等（重复执行无副作用）", "completed": false },
-      { "step": "Settings 新增：wecom_contact_secret（可选）、push_self_enroll（默认 false）、push_state_ttl（默认 600 秒），.env 模板与 README 同步", "completed": false },
-      { "step": "全量测试绿（含 update-postgres-storage 的 PG 版 conftest 场景，如适用）", "completed": false }
+      {
+        "step": "wecom_member 加列：bound_via TEXT NOT NULL DEFAULT 'cli'、bound_at、verified_at、last_fail_at（update-postgres-storage 已合入则进其 PG 终态 DDL + 迁移脚本，否则 SQLite ALTER）",
+        "completed": true
+      },
+      {
+        "step": "既有行迁移标记 bound_via='cli'，迁移语句幂等（重复执行无副作用）",
+        "completed": true
+      },
+      {
+        "step": "Settings 新增：wecom_contact_secret（可选）、push_self_enroll（默认 false）、push_state_ttl（默认 600 秒），.env 模板与 README 同步",
+        "completed": true
+      },
+      {
+        "step": "全量测试绿（含 update-postgres-storage 的 PG 版 conftest 场景，如适用）",
+        "completed": true
+      }
     ],
-    "passes": false
+    "passes": true
   },
   {
     "number": 3,
     "category": "阶段 1 · 绑定状态机（repo 层）",
     "task": "绑定/解绑/状态与一次性凭证的持久化方法",
     "steps": [
-      { "step": "WecomMemberRepo：link 增加 bound_via 记录（复用先删后插换绑语义）、unbind、get_status（未绑定/已绑定/已确认/异常）、mark_verified、mark_failed（记录原因与时间）", "completed": false },
-      { "step": "OAuth state 一次性凭证存取：短期存储 + 过期与已用校验（沿用单进程假设，超 TTL 视为无效）", "completed": false },
-      { "step": "单测：换绑 corp_userid UNIQUE 冲突路径、state 过期/重放拒绝、状态迁移未绑定→已绑定→已确认→异常→（重绑）已绑定", "completed": false }
+      {
+        "step": "WecomMemberRepo：link 增加 bound_via 记录（复用先删后插换绑语义）、unbind、get_status（未绑定/已绑定/已确认/异常）、mark_verified、mark_failed（记录原因与时间）",
+        "completed": true
+      },
+      {
+        "step": "OAuth state 一次性凭证存取：短期存储 + 过期与已用校验（沿用单进程假设，超 TTL 视为无效）",
+        "completed": true
+      },
+      {
+        "step": "单测：换绑 corp_userid UNIQUE 冲突路径、state 过期/重放拒绝、状态迁移未绑定→已绑定→已确认→异常→（重绑）已绑定",
+        "completed": true
+      }
     ],
-    "passes": false
+    "passes": true
   },
   {
     "number": 4,
-    "category": "阶段 2 · OAuth 一键绑定",
-    "task": "授权链接构造、回调换取与仅-userid 绑定",
+    "category": "阶段 2 · 插件关注前置（第一屏二维码）",
+    "task": "关注插件先于绑定：客服会话图片消息与控制台首屏兜底",
     "steps": [
-      { "step": "WeComChannel：get_oauth_url(state)（snsapi_base、agentid、redirect_uri=PUBLIC_BASE_URL+/wecom/oauth/callback、urlencode）与 exchange_code(code)（GET /cgi-bin/auth/getuserinfo）", "completed": false },
-      { "step": "GET /wecom/oauth/start?token=：校验控制台 token，生成一次性 state 并 302 跳转企微授权页", "completed": false },
-      { "step": "GET /wecom/oauth/callback：state 校验（一次性+TTL）→ code 换身份 → 仅当返回 userid 时 link(user, userid, via='oauth') → 跳回控制台带结果", "completed": false },
-      { "step": "错误分支文案：非成员身份（无 userid）、invalid code（40029）、可信域名不匹配（50001）分别呈现原因与检查项", "completed": false },
-      { "step": "单测（mock 企微 HTTP）：成功绑定、非成员不绑定、state 重放/过期拒绝、三种换取失败各自文案", "completed": false }
+      {
+        "step": "WeComChannel：upload_media（POST /cgi-bin/media/upload?type=image）与 kf_send_image(open_kfid, external_userid, media_id)",
+        "completed": true
+      },
+      {
+        "step": "插件邀请二维码图片资产入库（deploy/assets 或配置路径指向），运营者可替换",
+        "completed": true
+      },
+      {
+        "step": "开通页首屏即呈现二维码：打开带 token 开通链接后，系统经该用户客服会话下发二维码图片 +「扫码关注后即可在微信收到预警」文案——关注插件先于绑定触发，不再依赖绑定成功事件",
+        "completed": true
+      },
+      {
+        "step": "openid 非 wxkf: 前缀、窗口失效或发送失败 → 控制台首屏兜底展示同一二维码图片与文字指引（qr_available 标记），不报错中断",
+        "completed": true
+      },
+      {
+        "step": "单测：首屏触发下发、发送失败降级、非 wxkf 用户跳过、未关注插件时通道状态不得为送达就绪",
+        "completed": true
+      }
     ],
-    "passes": false
+    "passes": true
   },
   {
     "number": 5,
-    "category": "阶段 3 · 手机号自助绑定与入录",
-    "task": "手机号探测、自助入录开关与失败护栏",
+    "category": "阶段 3 · OAuth 身份映射（主映射）",
+    "task": "授权链接构造、回调换取与仅-userid 绑定",
     "steps": [
-      { "step": "WeComChannel：get_userid_by_mobile(mobile)（POST /cgi-bin/user/getuserid，自建应用 token）与 create_member(mobile)（POST /cgi-bin/user/create，通讯录同步 token、系统生成合规 userid、name 取脱敏默认值）", "completed": false },
-      { "step": "POST /api/push/enroll-mobile：格式预校验（不计数）→ getuserid 命中即 link(via='mobile')；未命中按 push_self_enroll 分支（开启则 create 后绑定，未开启则返回引导文案）", "completed": false },
-      { "step": "create 因手机号已存在而失败 → 以 getuserid 降级重试一次；仍失败则可诊断文案", "completed": false },
-      { "step": "失败计数护栏：探测未命中累计超阈值（常量，默认取企业人数上限 20% 以下）后临时拒绝并提示稍后再试", "completed": false },
-      { "step": "单测：命中绑定、未命中×开关两态、降级重试、护栏触发、格式非法不计数", "completed": false }
+      {
+        "step": "WeComChannel：get_oauth_url(state)（snsapi_base、agentid、redirect_uri=PUBLIC_BASE_URL+/wecom/oauth/callback、urlencode）与 exchange_code(code)（GET /cgi-bin/auth/getuserinfo）",
+        "completed": true
+      },
+      {
+        "step": "GET /wecom/oauth/start?token=：校验开通链接 token 确定内部 user_id，写入一次性 state 并 302 跳转企微授权页",
+        "completed": true
+      },
+      {
+        "step": "GET /wecom/oauth/callback：state 校验（一次性+TTL）→ code 换身份 → 仅当返回 userid 时 link(user, userid, via='oauth') → 跳回控制台带结果",
+        "completed": true
+      },
+      {
+        "step": "错误分支文案：非成员身份（无 userid，转手机号辅映射）、invalid code（40029）、可信域名不匹配（50001）分别呈现原因与检查项",
+        "completed": true
+      },
+      {
+        "step": "单测（mock 企微 HTTP）：成功绑定、非成员不绑定、state 重放/过期拒绝、三种换取失败各自文案",
+        "completed": true
+      }
     ],
-    "passes": false
+    "passes": true
   },
   {
     "number": 6,
-    "category": "阶段 4 · 插件二维码下发",
-    "task": "客服会话图片消息与控制台兜底",
+    "category": "阶段 4 · 手机号辅映射",
+    "task": "手机号探测、自助入录开关与失败护栏",
     "steps": [
-      { "step": "WeComChannel：upload_media（POST /cgi-bin/media/upload?type=image）与 kf_send_image(open_kfid, external_userid, media_id)", "completed": false },
-      { "step": "插件邀请二维码图片资产入库（deploy/assets 或配置路径指向），运营者可替换", "completed": false },
-      { "step": "绑定成功后触发下发：经该用户客服会话发二维码图片 +「扫码关注后即可在微信收到预警」文案；openid 非 wxkf: 前缀时跳过并依赖控制台兜底", "completed": false },
-      { "step": "窗口失效或发送失败 → GET /api/push/status 返回 qr_available 标记，控制台展示同一二维码图片与文字指引，不报错中断", "completed": false },
-      { "step": "单测：窗口内发送成功、发送失败降级、非 wxkf 用户跳过", "completed": false }
+      {
+        "step": "WeComChannel：get_userid_by_mobile(mobile)（POST /cgi-bin/user/getuserid，自建应用 token）与 create_member(mobile)（POST /cgi-bin/user/create，通讯录同步 token、系统生成合规 userid、name 取脱敏默认值）",
+        "completed": true
+      },
+      {
+        "step": "POST /api/push/enroll-mobile：格式预校验（不计数）→ getuserid 命中即 link(via='mobile')；未命中按 push_self_enroll 分支（开启则 create 后绑定，未开启则返回引导文案）",
+        "completed": true
+      },
+      {
+        "step": "create 因手机号已存在而失败 → 以 getuserid 降级重试一次；仍失败则可诊断文案",
+        "completed": true
+      },
+      {
+        "step": "失败计数护栏：探测未命中累计超阈值（常量，默认取企业人数上限 20% 以下）后临时拒绝并提示稍后再试",
+        "completed": true
+      },
+      {
+        "step": "未验证企业下通讯录同步助手不可用 → push_self_enroll 强制关闭、入录路径整体隐藏",
+        "completed": true
+      },
+      {
+        "step": "单测：命中绑定、未命中×开关两态、降级重试、护栏触发、格式非法不计数",
+        "completed": true
+      }
     ],
-    "passes": false
+    "passes": true
   },
   {
     "number": 7,
-    "category": "阶段 4 · 送达确认闭环",
-    "task": "测试消息、用户确认、失败事件双信号",
+    "category": "阶段 5 · 送达确认单信号闭环",
+    "task": "测试消息、用户确认、同步报错与超时为异常入口",
     "steps": [
-      { "step": "绑定完成后发送测试应用消息（send_app_message，含 PUBLIC_BASE_URL 确认链接与说明文案）", "completed": false },
-      { "step": "POST /api/push/verify：校验 token 后 mark_verified；控制台呈现「送达就绪」", "completed": false },
-      { "step": "POST /wecom/callback 增加企微消息发送失败事件分支：解析并 mark_failed（原因落 last_fail_at/备注），控制台呈现异常态与下一步", "completed": false },
-      { "step": "notifier：send_app_message 报错或失败清单非空时记录失败信号（回落客服会话行为不变，告警不中断）", "completed": false },
-      { "step": "超时未确认：get_status 按 bound_at 超过阈值且未 verified 呈现「未确认」提示与重测入口（计算态，不引入定时器）", "completed": false },
-      { "step": "单测：确认就绪、失败事件入异常态、超时呈现、异常/未确认时告警仍走客服会话回落", "completed": false }
+      {
+        "step": "绑定完成后发送测试应用消息（send_app_message，含 PUBLIC_BASE_URL 确认链接与说明文案）",
+        "completed": true
+      },
+      {
+        "step": "POST /api/push/verify：校验 token 后 mark_verified；控制台呈现「送达就绪」",
+        "completed": true
+      },
+      {
+        "step": "发送同步报错即异常入口：send_app_message 返回 errcode≠0（如 43004 未关注插件）或 fail_list 非空 → mark_failed（原因落 last_fail_at），控制台呈现异常态与下一步；官方无投递失败回调，不订阅任何「发送失败事件」",
+        "completed": true
+      },
+      {
+        "step": "notifier：send_app_message 报错或失败清单非空时记录失败信号（回落客服会话行为不变，告警不中断）",
+        "completed": true
+      },
+      {
+        "step": "超时未确认：get_status 按 bound_at 超过阈值且未 verified 呈现「未确认」提示与重测入口（计算态，不引入定时器）",
+        "completed": true
+      },
+      {
+        "step": "单测：确认就绪、同步报错入异常态、超时呈现、异常/未确认时告警仍走客服会话回落",
+        "completed": true
+      }
     ],
-    "passes": false
+    "passes": true
   },
   {
     "number": 8,
-    "category": "阶段 5 · 控制台 API 与 UI",
+    "category": "阶段 6 · 控制台 API 与 UI",
     "task": "推送通道设置区（状态灯 + 开通 + 解绑）",
     "steps": [
-      { "step": "GET /api/push/status（状态四态 + 下一步动作标记 + qr_available）、POST /api/push/unbind（解除绑定）；状态变更经既有 SSE 流推送", "completed": false },
-      { "step": "console.html 新增「推送通道」设置区：状态灯四态、开通推送按钮（OAuth 跳转；可信域名未配置时隐藏）、手机号表单（按开关/降级态显示）、确认收到入口、二维码兜底图、关闭推送", "completed": false },
-      { "step": "文案核检：与既有提醒文案口径一致，不夸大送达（仅送达就绪态如实呈现已确认）", "completed": false },
-      { "step": "浏览器手动走通四态展示与各入口，记录截图", "completed": false }
+      {
+        "step": "GET /api/push/status（状态四态 + 下一步动作标记 + qr_available）、POST /api/push/unbind（解除绑定）；状态变更经既有 SSE 流推送",
+        "completed": true
+      },
+      {
+        "step": "console.html 新增「推送通道」设置区：状态灯四态、开通页首屏二维码（客服会话下发失败时兜底展示）、OAuth 授权按钮（可信域名未配置时隐藏，退手机号表单）、手机号表单（按开关/降级态显示）、确认收到入口、关闭推送",
+        "completed": true
+      },
+      {
+        "step": "文案核检：与既有提醒文案口径一致，不夸大送达（仅送达就绪态如实呈现已确认）",
+        "completed": true
+      },
+      {
+        "step": "浏览器手动走通四态展示与各入口，记录截图",
+        "completed": true
+      }
     ],
-    "passes": false
+    "passes": true
   },
   {
     "number": 9,
-    "category": "阶段 5 · CLI 退役与文档",
+    "category": "阶段 7 · CLI 退役与文档",
     "task": "wecom-link 子命令退役与既有映射收编",
     "steps": [
-      { "step": "移除 cli.py 的 wecom-link 子命令及其测试；WecomMemberRepo.link 保留为自助流程内部 API", "completed": false },
-      { "step": "README 与《产品定位》FR-6 补推送开通注记；《架构技术》changelog 记录本变更", "completed": false },
-      { "step": "全量测试绿", "completed": false }
+      {
+        "step": "移除 cli.py 的 wecom-link 子命令及其测试；WecomMemberRepo.link 保留为自助流程内部 API",
+        "completed": true
+      },
+      {
+        "step": "README 与《产品定位》FR-6 补推送开通注记；《架构技术》changelog 记录本变更",
+        "completed": true
+      },
+      {
+        "step": "全量测试绿",
+        "completed": true
+      }
     ],
-    "passes": false
+    "passes": true
   },
   {
     "number": 10,
-    "category": "阶段 6 · 端到端验收",
+    "category": "阶段 8 · 端到端验收",
     "task": "EARS 场景映射与真机全流程验收",
     "steps": [
-      { "step": "spec-delta 18 个 EARS 场景逐一映射到自动化测试或真机操作脚本，形成验收清单并核对无遗漏", "completed": false },
-      { "step": "真机端到端：新联防者从客服会话取得控制台链接 → 开通推送（OAuth）→ 扫码关注插件 → 确认测试消息 → 触发一次高危告警验证应用消息到达", "completed": false },
-      { "step": "真机回归：解绑后告警仅客服会话回落；重新开通换绑生效；手机号路径与自助入录开关两态各走一遍", "completed": false },
-      { "step": "验收结果与遗留项记入文档 changelog，提交归档评审", "completed": false }
+      {
+        "step": "spec-delta 22 个 EARS 场景逐一映射到自动化测试或真机操作脚本，形成验收清单并核对无遗漏",
+        "completed": true
+      },
+      {
+        "step": "真机端到端：新联防者从客服会话取得开通链接 → 首屏扫码关注插件 → OAuth 绑定 → 收到测试应用消息并确认 → 触发一次高危告警验证应用消息到达",
+        "completed": false
+      },
+      {
+        "step": "真机回归：解绑后告警仅客服会话回落；重新开通换绑生效；手机号路径与自助入录开关两态各走一遍",
+        "completed": false
+      },
+      {
+        "step": "验收结果与遗留项记入文档 changelog，提交归档评审",
+        "completed": false
+      }
     ],
     "passes": false
   }

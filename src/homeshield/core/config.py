@@ -35,6 +35,10 @@ class Settings:
     wecom_kf_secret: str = ""  # 微信客服自身密钥(可选,优先级高于应用密钥)
     wecom_token: str = ""
     wecom_aes_key: str = ""
+    wecom_contact_secret: str = ""  # 通讯录同步助手密钥(自助入录写通讯录用,可选)
+    push_self_enroll: bool = False  # 手机号未命中时是否自助入录;通讯录写权限属企业级信任决策,默认关
+    push_state_ttl: int = 600  # OAuth 绑定凭证有效期(秒),一次性防重放
+    wecom_plugin_qr_path: str = "deploy/assets/wecom_plugin_qr.png"  # 微信插件邀请二维码资产,运营者可替换
     public_base_url: str = ""
     max_relations: int = 10
     invite_code_ttl_days: int = 7
@@ -76,6 +80,10 @@ class Settings:
             wecom_kf_secret=os.getenv("WECOM_KF_SECRET", ""),
             wecom_token=os.getenv("WECOM_TOKEN", ""),
             wecom_aes_key=os.getenv("WECOM_AES_KEY", ""),
+            wecom_contact_secret=os.getenv("WECOM_CONTACT_SECRET", ""),
+            push_self_enroll=os.getenv("PUSH_SELF_ENROLL", "false").strip().lower() in ("1", "true", "yes", "on"),
+            push_state_ttl=int(os.getenv("PUSH_STATE_TTL", "600")),
+            wecom_plugin_qr_path=os.getenv("WECOM_PLUGIN_QR_PATH", "deploy/assets/wecom_plugin_qr.png"),
             public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
             max_relations=int(os.getenv("MAX_RELATIONS", "10")),
             invite_code_ttl_days=int(os.getenv("INVITE_CODE_TTL_DAYS", "7")),

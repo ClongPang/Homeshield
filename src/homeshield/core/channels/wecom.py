@@ -11,9 +11,11 @@ send_msg;欢迎语走事件响应(welcome_code,不占 48h 窗口)。
 import base64
 import hashlib
 import logging
+import secrets
 import struct
 import time
 from secrets import token_bytes
+from urllib.parse import quote
 
 import httpx
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -28,6 +30,10 @@ class WeComCryptoError(ValueError):
     """回调密文解密失败(密钥不符 / 填充非法 / receive_id 不匹配)。"""
 
 
+class WeComDuplicateMobile(RuntimeError):
+    """自助入录时手机号已存在于通讯录(视为"已入录"信号,调用方降级 getuserid)。"""
+
+
 class WeComChannel:
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None):
         self.s = settings
@@ -35,6 +41,8 @@ class WeComChannel:
         self._key = base64.b64decode(settings.wecom_aes_key + "=") if settings.wecom_aes_key else b""
         self._token = ""
         self._token_exp = 0.0
+        self._contact_token = ""
+        self._contact_exp = 0.0
         self._accounts: tuple[float, list[dict]] = (0.0, [])
 
     # ---- 状态 ---------------------------------------------------------
@@ -160,3 +168,82 @@ class WeComChannel:
                                              "agentid": int(self.s.wecom_agent_id or 0),
                                              "text": {"content": text[:2000]}})
         return resp.json()
+
+    # ---- 推送开通(OAuth 身份映射 / 插件二维码 / 手机号辅映射) ---------
+    def get_oauth_url(self, state: str) -> str:
+        """企微网页授权链接(snsapi_base 静默);须已配置可信域名,否则回调 50001。"""
+        base = self.s.public_base_url.rstrip("/")
+        redirect = quote(f"{base}/wecom/oauth/callback", safe="")
+        return ("https://open.weixin.qq.com/connect/oauth2/authorize?appid=" + self.s.wecom_corpid
+                + f"&redirect_uri={redirect}&response_type=code&scope=snsapi_base"
+                + f"&state={state}&agentid={self.s.wecom_agent_id}#wechat_redirect")
+
+    async def exchange_code(self, code: str) -> dict:
+        """网页授权 code 换身份:成员返回 userid;非成员返回 openid(+external_userid)。
+
+        返回原始应答,错误语义(40029/50001/非成员)由领域层解释。"""
+        token = await self.get_access_token()
+        resp = await self._client.get(f"{API}/auth/getuserinfo",
+                                      params={"access_token": token, "code": code})
+        return resp.json()
+
+    async def upload_media(self, image: bytes, filename: str = "qr.png") -> str:
+        token = await self.get_access_token()
+        resp = await self._client.post(f"{API}/media/upload",
+                                       params={"access_token": token, "type": "image"},
+                                       files={"media": (filename, image, "image/png")})
+        data = resp.json()
+        if data.get("errcode"):
+            raise RuntimeError(f"wecom media/upload failed: {data.get('errcode')} {data.get('errmsg')}")
+        return data["media_id"]
+
+    async def kf_send_image(self, open_kfid: str, external_userid: str, media_id: str) -> dict:
+        token = await self.get_access_token()
+        resp = await self._client.post(f"{API}/kf/send_msg", params={"access_token": token},
+                                       json={"touser": external_userid, "open_kfid": open_kfid,
+                                             "msgtype": "image", "image": {"media_id": media_id}})
+        return resp.json()
+
+    async def get_userid_by_mobile(self, mobile: str) -> str | None:
+        """手机号换成员 userid(自建应用 token,需通讯录查看权限);查无返回 None(46004)。
+
+        错误率风控(超企业人数 20% 封 1 天)由调用方护栏约束。"""
+        token = await self.get_access_token()
+        resp = await self._client.post(f"{API}/user/getuserid", params={"access_token": token},
+                                       json={"mobile": mobile})
+        data = resp.json()
+        if data.get("errcode") == 46004:
+            return None
+        if data.get("errcode"):
+            raise RuntimeError(f"wecom getuserid failed: {data.get('errcode')} {data.get('errmsg')}")
+        return data["userid"]
+
+    async def get_contact_token(self) -> str:
+        """通讯录同步助手 token(自助入录写通讯录用);未配置即抛错。"""
+        if not self.s.wecom_contact_secret:
+            raise RuntimeError("WECOM_CONTACT_SECRET 未配置,自助入录不可用")
+        if self._contact_token and time.time() < self._contact_exp - 60:
+            return self._contact_token
+        resp = await self._client.get(f"{API}/gettoken",
+                                      params={"corpid": self.s.wecom_corpid,
+                                              "corpsecret": self.s.wecom_contact_secret})
+        data = resp.json()
+        if data.get("errcode"):
+            raise RuntimeError(f"wecom gettoken(contact) failed: {data.get('errcode')} {data.get('errmsg')}")
+        self._contact_token = data["access_token"]
+        self._contact_exp = time.time() + int(data.get("expires_in", 7200))
+        return self._contact_token
+
+    async def create_member(self, mobile: str) -> str:
+        """自助入录:创建成员并返回其 userid;手机号已存在抛 WeComDuplicateMobile。"""
+        token = await self.get_contact_token()
+        userid = "hs" + secrets.token_hex(5)  # 合规 userid:字母开头,限字母数字._-,企业内唯一
+        resp = await self._client.post(f"{API}/user/create", params={"access_token": token},
+                                       json={"userid": userid, "name": f"联防-{mobile[-4:]}",
+                                             "mobile": mobile})
+        data = resp.json()
+        if data.get("errcode"):
+            if data.get("errcode") == 60103:  # mobile 已存在 → "已入录"信号,调用方降级 getuserid
+                raise WeComDuplicateMobile(data.get("errmsg", "mobile exists"))
+            raise RuntimeError(f"wecom user/create failed: {data.get('errcode')} {data.get('errmsg')}")
+        return userid

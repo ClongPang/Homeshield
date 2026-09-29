@@ -10,14 +10,15 @@ import base64
 import logging
 import xml.etree.ElementTree as ET
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse, RedirectResponse
 
 from homeshield.core import messages
 from homeshield.core.channels.wecom import WeComCryptoError
 from homeshield.core.deps import Deps
 from homeshield.core.errors import DuplicateMessage
 from homeshield.core.pg_events import KF_PULL_CHANNEL
+from homeshield.core.push import PushService, oauth_error_text
 from homeshield.core.triage import classify
 from homeshield.core.verification import VerificationService
 from homeshield.core.commands import handle_relation_command
@@ -43,8 +44,40 @@ async def handle_kf_notify(deps: Deps) -> None:
         logger.warning("kf pull wakeup broadcast failed", exc_info=True)
 
 
-def build_wecom_router(deps: Deps) -> APIRouter:
+def build_wecom_router(deps: Deps, push: PushService | None = None) -> APIRouter:
     router = APIRouter()
+
+    @router.get("/wecom/oauth/start")
+    async def oauth_start(token: str = Query("")):
+        """开通推送入口:个人 token 定位用户 → 插件二维码第一屏下发 → 302 企微静默授权。"""
+        if push is None or push.channel is None:
+            raise HTTPException(404, "push provisioning unavailable")
+        user = await deps.repos.users.get_by_token(token or "")
+        if user is None: raise HTTPException(401, "invalid token")
+        state = push.states.issue(user.id)
+        try:
+            await push.deliver_plugin_qr(user)  # 关注插件是触达前提,先于绑定无条件下发
+        except Exception:
+            logger.warning("push qr first-screen delivery failed", exc_info=True)
+        return RedirectResponse(push.channel.get_oauth_url(state))
+
+    @router.get("/wecom/oauth/callback")
+    async def oauth_callback(code: str = Query(""), state: str = Query("")):
+        """code 换身份并绑定;换取失败与拒绝绑定都以 push_error 回控制台如实呈现。"""
+        if push is None or push.channel is None:
+            raise HTTPException(404, "push provisioning unavailable")
+        user_id = push.states.consume(state)
+        if user_id is None:
+            return PlainTextResponse("开通链接已失效。请回到个人控制台重新点击「开通推送」。")
+        user = await deps.repos.users.get(user_id)
+        if user is None:
+            return PlainTextResponse("账号不存在，请联系运营者。")
+        outcome = await push.bind_oauth(user, code)
+        if not outcome["ok"]:
+            logger.info("push oauth bind rejected user=%s reason=%s", user.id, outcome["reason"])
+            return RedirectResponse(f"/console?token={user.token}&push_error={outcome['reason']}")
+        sent = await push.send_test_message(user)
+        return RedirectResponse(f"/console?token={user.token}&push={'bound' if sent else 'error'}")
 
     @router.get("/wecom/callback")
     async def wecom_verify(request: Request):

@@ -24,6 +24,7 @@ DOMAIN_FILES = [
     "src/homeshield/core/relations.py",
     "src/homeshield/core/verification.py",
     "src/homeshield/core/commands.py",
+    "src/homeshield/core/push.py",
 ]
 
 FORBIDDEN_ROOTS = {"openai", "fastapi", "httpx", "sqlite3", "uvicorn", "requests", "flask"}
@@ -69,6 +70,7 @@ async def test_http_route_handlers_are_async():
         "src/homeshield/server.py",
         "src/homeshield/api/relations.py",
         "src/homeshield/api/wecom.py",
+        "src/homeshield/api/push.py",
     ):
         tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
         for node in ast.walk(tree):

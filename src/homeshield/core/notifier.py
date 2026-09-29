@@ -49,7 +49,7 @@ class AlertBroker:
 
 
 class AppMessageSender(Protocol):
-    async def send_app_message(self, corp_userids: list[str], text: str) -> None: ...
+    async def send_app_message(self, corp_userids: list[str], text: str) -> dict | None: ...
 
 
 class AlertRouter:
@@ -91,9 +91,17 @@ class AlertRouter:
                 + (f"\n详情：{detail}" if detail else "")
             if corp_userid:
                 try:
-                    await self.wecom.send_app_message([corp_userid], text)
+                    res = await self.wecom.send_app_message([corp_userid], text)
                 except Exception:
                     logger.warning("wecom app message failed corp=%s", corp_userid, exc_info=True)
+                    await self.repos.wecom_member.mark_failed(alert["user_id"], "应用消息发送异常")
+                    continue
+                # 官方无投递失败回调,errcode=0 仅代表提交成功;同步拒绝即写失败信号,
+                # 通道转异常态呈现(送达闭环只认用户确认),客服会话回落行为不变。
+                if isinstance(res, dict) and (res.get("errcode") not in (0, None) or res.get("fail_list")):
+                    logger.warning("wecom app message rejected corp=%s res=%s", corp_userid, res)
+                    await self.repos.wecom_member.mark_failed(
+                        alert["user_id"], f"应用消息发送失败 errcode={res.get('errcode')}")
             elif alert["openid"].startswith("wxkf:"):
                 # 未登记成员映射的 wxkf 联防者:回落其客服会话(48h 窗口内 best-effort)
                 try:

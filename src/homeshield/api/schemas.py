@@ -13,6 +13,11 @@ class TokenIn(PayloadModel):
     token: str
 
 
+class MobileIn(PayloadModel):
+    token: str
+    mobile: str
+
+
 class InviteIn(PayloadModel):
     token: str
     name: str = "家人"

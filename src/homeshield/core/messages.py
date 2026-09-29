@@ -13,6 +13,13 @@ UNSUPPORTED_TYPE = "这类消息我暂时看不了，请把内容打成文字或
 LOOK_FAILED = "这条消息我暂时看不了，请让家人帮忙看看。"
 SESSION_RESET_REPLY = "好，有新问题直接发我。"
 ACK_QUERY_REPLY = "收到～有新的可疑消息随时发我。"
+# 推送开通:二维码前置下发的引导文案 + 测试消息(确认链接占位 {url})
+PUSH_QR_TEXT = "第一步：扫码识别二维码关注企业微信插件，关注后预警提醒才能送达你的微信。"
+PUSH_TEST_TEXT = (
+    "推送通道测试：这是一条测试消息。\n"
+    "点击确认你能正常收到：{url}\n"
+    "确认后，你护着的家人的查询预警会第一时间送达这里。"
+)
 # 判定降级但规则下限仍成立时的口径(下限语义:isolation≥suspicious,isolation+transfer=dangerous):
 # 只陈述规则层确定命中的特征,不担保整体结论,不做发送者身份断言;dangerous 固定露出 96110。
 DEGRADED_FLOOR_DANGEROUS = (

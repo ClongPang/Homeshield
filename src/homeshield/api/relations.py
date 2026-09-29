@@ -186,6 +186,9 @@ def build_relation_router(deps: Deps, verification: VerificationService,
                     try: item = await asyncio.wait_for(queue.get(), timeout=20)
                     except asyncio.TimeoutError:
                         yield ": keepalive\n\n"; continue
+                    if item.get("kind") == "push_status":
+                        yield "event: push_status\ndata: " + json.dumps(item, ensure_ascii=False) + "\n\n"
+                        continue
                     verdict_id = int(item["verdict_id"])
                     if verdict_id in sent: continue
                     if await deps.repos.alert.event_context(int(item["alert_id"])) is None: continue

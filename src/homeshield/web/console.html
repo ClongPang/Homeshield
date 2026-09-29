@@ -16,7 +16,7 @@ main{max-width:850px;margin:auto;padding:20px}.top{display:flex;justify-content:
 <div id="streamNote" class="notice hidden"></div>
 <nav class="tabs">
   <button data-tab="relations" class="active">联防关系</button><button data-tab="alerts">我收到的提醒</button>
-  <button data-tab="queries">我的查询</button><button data-tab="votes">待我投票</button>
+  <button data-tab="queries">我的查询</button><button data-tab="votes">待我投票</button><button data-tab="push">推送通道</button>
 </nav>
 <section id="relations" class="section active">
   <div id="relationEmpty" class="card hidden">还没有联防关系。可以回复「邀请 称呼」邀请家人，收到邀请码后回复「绑定 邀请码」接受；也可以直接转发可疑消息给小盾查证。</div>
@@ -27,6 +27,12 @@ main{max-width:850px;margin:auto;padding:20px}.top{display:flex;justify-content:
 <section id="alerts" class="section"><h2>我收到的提醒</h2><div id="alertList"></div><div id="alertDetail"></div></section>
 <section id="queries" class="section"><h2>我的查询</h2><div id="queryList"></div><div id="queryDetail"></div></section>
 <section id="votes" class="section"><h2>待我投票</h2><div id="voteList"></div></section>
+<section id="push" class="section">
+  <div class="card"><h2>推送通道</h2><div id="pushStatus"></div><div id="pushReason" class="notice hidden"></div><div id="pushActions" class="actions"></div>
+  <p class="muted">开通后，你护着的家人的查询预警会经「服务通知」实时送达你的微信，不再依赖客服会话窗口。</p></div>
+  <div id="pushQrCard" class="card hidden"><h2>第一步：关注微信插件</h2><div id="pushQrImg"></div><p class="muted">扫码或长按识别关注插件；这是接收预警的入口，关注后请继续完成绑定。</p></div>
+  <div id="pushMobileCard" class="card hidden"><h2>改用手机号开通</h2><div class="row"><input id="pushMobile" type="text" maxlength="11" placeholder="你在企业通讯录里的手机号"/><button id="pushEnroll">提交</button></div><div id="pushMobileMsg" class="muted"></div><p class="muted">微信授权走不通时的备用方式：填你在企业通讯录里的手机号即可绑定。</p></div>
+</section>
 </main><script>
 const token=new URLSearchParams(location.search).get("token")||"";const $=id=>document.getElementById(id);let relations={guardings:[],guardians:[]},eventSource=null;
 const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n};
@@ -46,9 +52,23 @@ async function loadQueries(){const d=await api("/api/my-queries");const box=$("q
 async function showQuery(id){const d=await api(`/api/my-queries/${id}`);const box=$("queryDetail");box.replaceChildren();const c=card();c.append(node("h3",`我的查询 · ${word(d.level)}`),node("div",d.content,"content"),node("div",d.reply,"content"));if(d.correction_status)c.append(node("p",`纠正状态：${word(d.correction_status)}${d.resolved_label?" · 已确认："+word(d.resolved_label):""}`));if(!d.queryer_label){c.append(node("p","提交后，查询内容会提供给本次仍有效的联防者投票。你的反馈本身不计入投票。","muted"));const note=node("textarea");note.placeholder="补充说明（可选）";c.append(note);const actions=node("div",undefined,"actions");actions.append(btn("这是真骗局",async()=>{await submitQueryFeedback(id,"real",note.value);await showQuery(id)}),btn("这是误报",async()=>{await submitQueryFeedback(id,"false_positive",note.value);await showQuery(id)},"secondary"));c.append(actions)}else c.append(node("p",`你提交的反馈：${word(d.queryer_label)}${d.queryer_note?" · "+d.queryer_note:""}`));box.append(c)}
 async function submitQueryFeedback(verdict_id,label,note){await api("/api/corrections",{method:"POST",body:{verdict_id,label,note}});msg("反馈已提交")}
 async function loadVotes(){const d=await api("/api/corrections");const box=$("voteList");box.replaceChildren();if(!d.corrections.length){box.append(node("div","目前没有待投票的纠正。","empty"));return}for(const q of d.corrections){const c=card();c.append(node("b",`待投票 · 判定 #${q.verdict_id}`),node("div",q.content,"content"),node("div",`截止：${new Date(q.closes_at*1000).toLocaleString()} · 需 ${q.required_votes}/${q.eligible_count} 票`,`meta`));if(q.my_vote)c.append(node("p",`你已投：${word(q.my_vote)}`));else{const a=node("div",undefined,"actions");a.append(btn("是真骗局",async()=>{await submitVote(q.verdict_id,"real");await loadVotes()}),btn("是误报",async()=>{await submitVote(q.verdict_id,"false_positive");await loadVotes()},"secondary"));c.append(a)}box.append(c)}}
-async function loadTab(name){msg("");if(name==="relations")await loadRelations();if(name==="alerts")await loadAlerts();if(name==="queries")await loadQueries();if(name==="votes")await loadVotes()}
+const pushErrors={not_member:"未检测到企业成员身份。请确认你已被加入企业通讯录并关注了微信插件，或改用手机号开通。",invalid_code:"授权已失效，请重新点击「开通推送」。",domain_mismatch:"可信域名未配置或与本服务不一致，请联系运营者。",oauth_failed:"授权没有完成，请稍后重试。",error:"绑定完成，但测试消息发送失败，请在「推送通道」里重发测试。"};
+async function loadPush(){const d=await api("/api/push/status");const box=$("pushStatus");box.replaceChildren(node("b",d.text));if(d.bound_via)box.append(node("div",`绑定方式：${d.bound_via==="oauth"?"微信授权":"手机号"}`,"meta"));
+const reason=$("pushReason");if(d.reason){reason.textContent=d.reason;reason.classList.remove("hidden")}else reason.classList.add("hidden");
+const act=$("pushActions");act.replaceChildren();
+if(d.next==="provision"){if(d.oauth_available)act.append(btn("开通推送",async()=>{location.href=`/wecom/oauth/start?token=${encodeURIComponent(token)}`}));else box.append(node("div","推送开通暂未启用（企微后台配置未就绪）。","muted"));if(d.mobile_available)$("pushMobileCard").classList.remove("hidden");else $("pushMobileCard").classList.add("hidden")}
+if(d.next==="confirm")act.append(btn("我已收到测试消息，确认",async()=>{const r=await api("/api/push/verify",{method:"POST",body:{}});msg(r.text);await loadPush()}));
+if(d.next==="retest")act.append(btn("重发测试消息",async()=>{const r=await api("/api/push/retest",{method:"POST",body:{}});msg(r.text);await loadPush()}));
+if(d.status!=="unbound")act.append(btn("关闭推送",async()=>{if(!confirm("关闭后，预警将不再主动推送到你的微信，确定？"))return;const r=await api("/api/push/unbind",{method:"POST",body:{}});msg(r.text);await loadPush()},"secondary"));
+if(d.next!=="provision")$("pushMobileCard").classList.add("hidden");
+const qr=$("pushQrCard");if(d.qr_available&&d.status!=="verified"){qr.classList.remove("hidden");const img=node("img");img.src=`/api/push/qr?token=${encodeURIComponent(token)}`;img.alt="微信插件邀请二维码";img.style.maxWidth="240px";$("pushQrImg").replaceChildren(img)}else qr.classList.add("hidden")}
+$("pushEnroll").onclick=async()=>{try{const r=await api("/api/push/enroll-mobile",{method:"POST",body:{mobile:$("pushMobile").value}});$("pushMobileMsg").textContent=r.text||"";msg(r.text||"");await loadPush()}catch(e){$("pushMobileMsg").textContent=e.message}};
+async function loadTab(name){msg("");if(name==="relations")await loadRelations();if(name==="alerts")await loadAlerts();if(name==="queries")await loadQueries();if(name==="votes")await loadVotes();if(name==="push")await loadPush()}
 function streamNote(text){const box=$("streamNote");box.textContent=text;box.classList.toggle("hidden",!text)}
-function connectStream(){eventSource=new EventSource(`/api/stream?token=${encodeURIComponent(token)}`);eventSource.addEventListener("ready",()=>streamNote(""));eventSource.addEventListener("alert",()=>loadAlerts().catch(e=>msg(e.message)));eventSource.onerror=()=>{if(!eventSource||eventSource.readyState===EventSource.CLOSED)streamNote("实时提醒连接已失效，请刷新页面重新打开控制台。");else streamNote("实时提醒连接断开，正在重连…")}}
+function connectStream(){eventSource=new EventSource(`/api/stream?token=${encodeURIComponent(token)}`);eventSource.addEventListener("ready",()=>streamNote(""));eventSource.addEventListener("alert",()=>loadAlerts().catch(e=>msg(e.message)));eventSource.addEventListener("push_status",()=>loadPush().catch(()=>{}));eventSource.onerror=()=>{if(!eventSource||eventSource.readyState===EventSource.CLOSED)streamNote("实时提醒连接已失效，请刷新页面重新打开控制台。");else streamNote("实时提醒连接断开，正在重连…")}}
 document.querySelectorAll(".tabs button").forEach(b=>b.onclick=async()=>{document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("active",x===b));document.querySelectorAll(".section").forEach(x=>x.classList.toggle("active",x.id===b.dataset.tab));await loadTab(b.dataset.tab).catch(e=>msg(e.message))});
+const pushFlag=new URLSearchParams(location.search).get("push"),pushErrorKey=new URLSearchParams(location.search).get("push_error");
+if(pushErrorKey)msg(pushErrors[pushErrorKey]||"开通没有完成，请重试。");else if(pushFlag==="verified")msg("确认完成，预警提醒将从这里送达。");
+if(pushFlag||pushErrorKey)history.replaceState(null,"",location.pathname+"?token="+encodeURIComponent(token));
 if(!token)msg("需要使用个人链接打开控制台。请在微信中回复「我的联防」取得链接。");else{connectStream();loadTab("relations").catch(e=>msg(e.message))}
 </script></body></html>

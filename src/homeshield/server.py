@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
+from homeshield.api.push import build_push_router
 from homeshield.api.relations import build_relation_router
 from homeshield.api.wecom import build_wecom_router, wecom_poller
 from homeshield.core.config import Settings
@@ -18,6 +19,7 @@ from homeshield.core.deps import build_deps, initialize_deps
 from homeshield.core.feedback import CorrectionService
 from homeshield.core.logsetup import setup_logging
 from homeshield.core.pg_events import notification_bridge
+from homeshield.core.push import PushService
 
 WEB_DIR = pathlib.Path(__file__).parent / "web"
 
@@ -56,8 +58,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             CorrectionService(deps.repos, settings.correction_window_days),
         )
     )
-    # 注册企业微信(微信客服)通道:回调验活 + 消息拉取轮询
-    app.include_router(build_wecom_router(deps))
+    # 注册企业微信(微信客服)通道:回调验活 + 消息拉取轮询 + 推送开通 OAuth
+    push_service = PushService(deps.repos, settings, deps.wecom)
+    app.include_router(build_wecom_router(deps, push_service))
+    # 注册推送通道自助开通:状态/二维码/手机号辅映射/确认/重测/解绑
+    app.include_router(build_push_router(deps, push_service))
+    app.state.push = push_service
 
     @app.get("/")
     async def index():

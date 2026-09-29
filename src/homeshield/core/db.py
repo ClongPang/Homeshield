@@ -12,13 +12,14 @@ from psycopg_pool import AsyncConnectionPool
 
 DB_POOL_MAX_SIZE = 10
 DB_STATEMENT_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA_INIT_LOCK_KEY = 0x484F4D455343484D  # Dedicated transaction advisory lock: "HOMESCHM".
 
 _TIMESTAMP_FIELDS = {
     "created_at", "opened_at", "last_query_at", "closed_at", "ended_at", "expires_at",
     "used_at", "revoked_at", "delivered_at", "read_at", "queryer_feedback_at", "closes_at",
     "resolved_at", "voted_at", "verdict_at", "query_at", "current_created_at",
+    "bound_at", "verified_at", "last_fail_at",
 }
 _JSON_FIELDS = {"cited_ids", "features", "context_snapshot"}
 
@@ -169,8 +170,18 @@ CREATE TABLE IF NOT EXISTS correction_vote (
 CREATE INDEX IF NOT EXISTS ix_correction_vote_relation ON correction_vote(relation_id,case_id);
 CREATE TABLE IF NOT EXISTS wecom_member (
     user_id BIGINT PRIMARY KEY REFERENCES "user"(id),
-    corp_userid TEXT NOT NULL UNIQUE
+    corp_userid TEXT NOT NULL UNIQUE,
+    bound_via TEXT NOT NULL DEFAULT 'cli',
+    bound_at TIMESTAMPTZ,
+    verified_at TIMESTAMPTZ,
+    last_fail_at TIMESTAMPTZ,
+    last_fail_reason TEXT
 );
+ALTER TABLE wecom_member ADD COLUMN IF NOT EXISTS bound_via TEXT NOT NULL DEFAULT 'cli';
+ALTER TABLE wecom_member ADD COLUMN IF NOT EXISTS bound_at TIMESTAMPTZ;
+ALTER TABLE wecom_member ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+ALTER TABLE wecom_member ADD COLUMN IF NOT EXISTS last_fail_at TIMESTAMPTZ;
+ALTER TABLE wecom_member ADD COLUMN IF NOT EXISTS last_fail_reason TEXT;
 CREATE TABLE IF NOT EXISTS kf_cursor (
     kfid TEXT PRIMARY KEY,
     cursor TEXT NOT NULL,

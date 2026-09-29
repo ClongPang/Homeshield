@@ -22,9 +22,6 @@ def main() -> None:
     incident.add_argument("--user-id", type=int, required=True)
     preview = sub.add_parser("supply-preview", help="read-only preview of query context")
     preview.add_argument("--query-id", type=int, required=True)
-    wlink = sub.add_parser("wecom-link", help="map a user to their WeCom corp userid (alert delivery)")
-    wlink.add_argument("--user-id", type=int, required=True)
-    wlink.add_argument("--corp-userid", required=True)
     asyncio.run(_run(parser.parse_args()))
 
 
@@ -38,10 +35,6 @@ async def _run(args) -> None:
             user = await deps.repos.users.get(args.user_id)
             if user is None: raise SystemExit("user not found")
             print(user.entry_url(args.base_url))
-        elif args.cmd == "wecom-link":
-            if await deps.repos.users.get(args.user_id) is None: raise SystemExit("user not found")
-            await deps.repos.wecom_member.link(args.user_id, args.corp_userid)
-            print("linked", args.user_id, "->", args.corp_userid)
         elif args.cmd == "incident":
             rows = await deps.repos.incident.list_for_user(args.user_id)
             print(json.dumps(rows, ensure_ascii=False, indent=2))
