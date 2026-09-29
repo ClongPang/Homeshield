@@ -1,0 +1,84 @@
+"""领域模块禁止直接依赖外部技术栈;依赖方向被破坏时本测试失败。"""
+import ast
+import pathlib
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+# 领域模块(端口与纯逻辑);适配器与组合根(src/homeshield/core/db.py、repo.py、
+# llm.py、deps.py、channels/*)不在列
+DOMAIN_FILES = [
+    "src/homeshield/core/config.py",
+    "src/homeshield/core/models.py",
+    "src/homeshield/core/errors.py",
+    "src/homeshield/core/events.py",
+    "src/homeshield/core/messages.py",
+    "src/homeshield/core/intake.py",
+    "src/homeshield/core/features.py",
+    "src/homeshield/core/retrieval.py",
+    "src/homeshield/core/judge.py",
+    "src/homeshield/core/reply.py",
+    "src/homeshield/core/notifier.py",
+    "src/homeshield/core/feedback.py",
+    "src/homeshield/core/pipeline.py",
+    "src/homeshield/core/annotate.py",
+    "src/homeshield/core/relations.py",
+    "src/homeshield/core/verification.py",
+    "src/homeshield/core/commands.py",
+]
+
+FORBIDDEN_ROOTS = {"openai", "fastapi", "httpx", "sqlite3", "uvicorn", "requests", "flask"}
+
+
+def _imported_roots(path: pathlib.Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    mods: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            mods.add(node.module.split(".")[0])
+    return mods
+
+
+async def test_domain_modules_have_no_direct_infra_imports():
+    for rel in DOMAIN_FILES:
+        bad = _imported_roots(ROOT / rel) & FORBIDDEN_ROOTS
+        assert not bad, f"{rel} 违反依赖规则,直接导入了 {bad}"
+
+
+async def test_adapters_are_the_only_infra_users():
+    adapters = [
+        "src/homeshield/core/db.py",
+        "src/homeshield/core/repo.py",
+    ]
+    infra = {"psycopg", "psycopg_pool"}
+    for rel in adapters:
+        assert _imported_roots(ROOT / rel) & infra, f"{rel} 应通过 psycopg 访问 Postgres"
+
+
+async def test_sqlite_is_confined_to_offline_kbbuild():
+    for path in (ROOT / "src/homeshield").rglob("*.py"):
+        imports = _imported_roots(path)
+        if "sqlite3" in imports:
+            assert "kbbuild" in path.parts, f"{path.relative_to(ROOT)} 不得在生产链路导入 sqlite3"
+
+
+async def test_http_route_handlers_are_async():
+    methods = {"get", "post", "put", "patch", "delete"}
+    for rel in (
+        "src/homeshield/server.py",
+        "src/homeshield/api/relations.py",
+        "src/homeshield/api/wecom.py",
+    ):
+        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            route = any(
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr in methods
+                for decorator in node.decorator_list
+            )
+            if route:
+                assert isinstance(node, ast.AsyncFunctionDef), f"{rel}:{node.lineno} route must be async"

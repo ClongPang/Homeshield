@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+*.db
+*.db.server.lock
+.env
+backups/
+.pytest_cache/
+data/eval_out/
+data/raw/
+.DS_Store
+*.db-shm
+*.db-wal
+.zcode/
+data/samples/fraud_r1_*.jsonl
+data/samples/two_sided_v0.jsonl
+docs/reports/review_candidates.md

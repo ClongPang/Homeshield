@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: homeshield-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: homeshield
+      POSTGRES_USER: homeshield
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      TZ: UTC
+    command: ["postgres", "-c", "timezone=UTC"]
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - homeshield-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U homeshield -d homeshield"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  homeshield-postgres:
