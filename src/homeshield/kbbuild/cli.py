@@ -1,4 +1,4 @@
-"""离线素材库 CLI(开发者工具,与运行时 homeshield.cli 分离,不依赖 .env/LLM)。
+"""离线素材库 CLI(开发者工具,与运行时 homeshield.cli 分离,不依赖运行时 PG/LLM)。
 
 用法:
     uv run homeshield-kbcli init-db
@@ -12,6 +12,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+from homeshield.core.config import Settings
 from homeshield.kbbuild.db import OFFLINE_DB_PATH, connect, init_schema
 from homeshield.kbbuild.export import export_conversations, export_cross_message, export_eval
 from homeshield.kbbuild.importer import import_fraud_r1_dataset
@@ -134,7 +135,7 @@ def _cmd_export_cross_message(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser("kbbuild", description="离线素材库构建工具")
-    ap.add_argument("--db", default=OFFLINE_DB_PATH, help="离线库路径")
+    ap.add_argument("--db", default=Settings.load().db_path or OFFLINE_DB_PATH, help="离线库路径")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init-db", help="建库建表,幂等")

@@ -16,7 +16,7 @@ from homeshield.eval.contrast import infer_mechanics_from_markers, check_contras
 
 # ---- 注册表完整性 -------------------------------------------------------
 
-def test_registry_shape():
+async def test_registry_shape():
     assert len(MECHANIC_LIST) == 11
     assert {m.id for m in MECHANIC_LIST} == set(REGISTRY)
     for m in MECHANIC_LIST:
@@ -24,7 +24,7 @@ def test_registry_shape():
         assert m.definition and m.verification_path and m.markers
 
 
-def test_three_functions_populated():
+async def test_three_functions_populated():
     asks = {m.id for m in MECHANIC_LIST if m.function is Function.ASK}
     trusts = {m.id for m in MECHANIC_LIST if m.function is Function.TRUST_SUBSTITUTE}
     supps = {m.id for m in MECHANIC_LIST if m.function is Function.VERIFICATION_SUPPRESSION}
@@ -33,7 +33,7 @@ def test_three_functions_populated():
     assert supps == {"urgency", "isolation", "antiverify", "escape"}
 
 
-def test_no_duplicate_markers():
+async def test_no_duplicate_markers():
     seen: set[str] = set()
     for m in MECHANIC_LIST:
         dup = seen & set(m.markers)
@@ -41,13 +41,13 @@ def test_no_duplicate_markers():
         seen |= set(m.markers)
 
 
-def test_version_stamped():
+async def test_version_stamped():
     assert MECHANICS_VERSION == "1.0"
 
 
 # ---- 与运行时规则下限词表的一致性(机制层是词表的上级模型) -----------------
 
-def test_floor_lists_are_subsets_of_mechanics():
+async def test_floor_lists_are_subsets_of_mechanics():
     assert set(ISOLATION_WORDS) <= set(REGISTRY["isolation"].markers)
     assert set(URGENCY_WORDS) <= set(REGISTRY["urgency"].markers)
     assert set(IDENTITY_WORDS) <= set(REGISTRY["identity"].markers)
@@ -72,12 +72,12 @@ def mini_contrast(tmp_path: Path) -> Path:
     return p
 
 
-def test_infer_mechanics_from_markers():
+async def test_infer_mechanics_from_markers():
     assert "money" in infer_mechanics_from_markers("请立即转账到安全账户")
     assert infer_mechanics_from_markers("今天天气不错") == []
 
 
-def test_check_zones_and_auto_annotate(mini_contrast: Path):
+async def test_check_zones_and_auto_annotate(mini_contrast: Path):
     report = check_contrast_dataset_coverage(mini_contrast)
     assert report["rows"] == 3
     # T3 缺标注被自动推导:control+sensitive+money
@@ -87,14 +87,14 @@ def test_check_zones_and_auto_annotate(mini_contrast: Path):
     assert set(report["gaps"]) == {"sensitive"}  # mini 集内 sensitive 零覆盖
 
 
-def test_render_mentions_gaps(mini_contrast: Path):
+async def test_render_mentions_gaps(mini_contrast: Path):
     text = render_contrast_report(check_contrast_dataset_coverage(mini_contrast))
     assert "对照缺口" in text
 
 
 # ---- 真实对照集验收 ------------------------------------------------------
 
-def test_real_contrast_set_contract():
+async def test_real_contrast_set_contract():
     path = Path("data/samples/benign_hard.jsonl")
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(rows) >= 12
@@ -106,7 +106,7 @@ def test_real_contrast_set_contract():
     assert len(hard) >= 10  # ≥10 条多机制共现的"硬"样本
 
 
-def test_real_contrast_loads_via_eval_dataset():
+async def test_real_contrast_loads_via_eval_dataset():
     from homeshield.eval.dataset import load_dataset
 
     samples = load_dataset("data/samples/benign_hard.jsonl")

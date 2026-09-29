@@ -39,19 +39,19 @@ class Settings:
     max_relations: int = 10
     invite_code_ttl_days: int = 7
     correction_window_days: int = 7
-    db_path: str = "homeshield.db"
+    db_path: str = "data/kb_build.db"
+    database_url: str = "postgresql://homeshield:homeshield@localhost:5432/homeshield"
     judge_retries: int = 2  # 引用校验失败重试上限
     safe_confidence_floor: int = 60  # safe 判定最低置信(llm 模式生效);低于则降级"拿不准"
+    mock_judge_delay_seconds: float = 0  # 压测用 mock 延迟,正常运行保持 0
     incident_idle_seconds: int = 21600
     supply_window_seconds: int = 604800
     supply_max_items: int = 10
 
     @classmethod
     def load(cls, env_file: str | None = None) -> "Settings":
-        if env_file:
-            load_dotenv(env_file)
-        else:
-            load_dotenv()
+        # env_file 为 None 时 load_dotenv 自行向上查找 .env,与无参调用等价
+        load_dotenv(env_file)
         providers: dict[str, Provider] = {}
         for key, value in os.environ.items():
             match = re.fullmatch(r"([A-Z][A-Z0-9_]*)_API_KEY", key)
@@ -80,8 +80,12 @@ class Settings:
             max_relations=int(os.getenv("MAX_RELATIONS", "10")),
             invite_code_ttl_days=int(os.getenv("INVITE_CODE_TTL_DAYS", "7")),
             correction_window_days=int(os.getenv("CORRECTION_WINDOW_DAYS", "7")),
-            db_path=os.getenv("DB_PATH", "homeshield.db"),
+            db_path=os.getenv("DB_PATH", "data/kb_build.db"),
+            database_url=os.getenv(
+                "DATABASE_URL", "postgresql://homeshield:homeshield@localhost:5432/homeshield"
+            ),
             safe_confidence_floor=int(os.getenv("SAFE_CONFIDENCE_FLOOR", "60")),
+            mock_judge_delay_seconds=max(0.0, float(os.getenv("MOCK_JUDGE_DELAY_SECONDS", "0"))),
             incident_idle_seconds=int(os.getenv("INCIDENT_IDLE_SECONDS", "21600")),
             supply_window_seconds=int(os.getenv("SUPPLY_WINDOW_SECONDS", "604800")),
             supply_max_items=int(os.getenv("SUPPLY_MAX_ITEMS", "10")),

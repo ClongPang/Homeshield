@@ -42,11 +42,6 @@ def _build_mapped_case_pool(conn: sqlite3.Connection, lang: str) -> tuple[list[d
     return pool, unmapped
 
 
-def sample_cases_by_type(pool: list[dict], per_class: int, seed: int) -> list[dict]:
-    """按类均衡确定性抽样(export-eval 与 export-conversations 共用,保证案例集一致)。"""
-    return _sample_cases_by_scam_type(pool, per_class, seed)
-
-
 def _sample_cases_by_scam_type(pool: list[dict], per_class: int, seed: int) -> list[dict]:
     by_type: dict[str, list[dict]] = {}
     for item in pool:

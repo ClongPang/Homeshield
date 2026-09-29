@@ -59,10 +59,10 @@ class AlertRouter:
         self.wecom: AppMessageSender | None = None
 
     async def __call__(self, event: VerdictCompleted) -> None:
-        fanout = self.repos.alert.record_alerts_for_verdict(event.verdict_id, event.query_id)
+        fanout = await self.repos.alert.record_alerts_for_verdict(event.verdict_id, event.query_id)
         active_recipients = []
         for recipient in fanout["recipients"]:
-            current = self.repos.alert.event_context(recipient["alert_id"])
+            current = await self.repos.alert.event_context(recipient["alert_id"])
             if current is None: continue
             active_recipients.append(recipient)
             self.broker.publish_alert(recipient["user_id"], {
@@ -73,16 +73,17 @@ class AlertRouter:
             })
         names = [r["inverse_name"] or f"联防者 #{r['relation_id']}" for r in active_recipients]
         event.queryer_notice = "查询提醒已加入" + "、".join(names) + "的提醒列表" if names else ""
-        if self.wecom and active_recipients:
-            task = asyncio.create_task(self._send_wecom_alerts(active_recipients, event.verdict.level))
+        newly_created = [r for r in active_recipients if r.get("newly_created", True)]
+        if self.wecom and newly_created:
+            task = asyncio.create_task(self._send_wecom_alerts(newly_created, event.verdict.level))
             _BACKGROUND_TASKS.add(task)
             task.add_done_callback(_discard_task)
 
     async def _send_wecom_alerts(self, recipients: list[dict], level: Level) -> None:
         """应用消息 → 微信插件;仅触达已登记企微成员映射的联防者。"""
         for alert in recipients:
-            corp_userid = self.repos.wecom_member.get(alert["user_id"])
-            context = self.repos.alert.push_context(alert["alert_id"])
+            corp_userid = await self.repos.wecom_member.get(alert["user_id"])
+            context = await self.repos.alert.push_context(alert["alert_id"])
             if context is None:
                 continue
             detail = f"{self.base_url}/alert/{context['alert_id']}?token={context['token']}" if self.base_url else ""

@@ -1,6 +1,7 @@
 """kbbuild 离线库:导入幂等性、类目映射、导出口径。"""
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -8,8 +9,19 @@ from homeshield.kbbuild.db import connect, init_schema
 from homeshield.kbbuild.export import export_eval
 from homeshield.kbbuild.importer import import_fraud_r1_dataset
 from homeshield.kbbuild.mapping import map_scam_type
+from homeshield.kbbuild.cli import main as kbbuild_main
 
 POLICE_SUB = "public security, prosecution, judiciary, and government agencies"
+
+
+def test_cli_uses_db_path_environment_by_default(monkeypatch, tmp_path):
+    db_path = tmp_path / "configured-offline.db"
+    monkeypatch.setenv("DB_PATH", str(db_path))
+    monkeypatch.setattr(sys, "argv", ["homeshield-kbcli", "init-db"])
+
+    kbbuild_main()
+
+    assert db_path.is_file()
 
 
 def _base_items() -> list[dict]:
@@ -69,7 +81,7 @@ def _import(tmp_path: Path, raw_dir: Path):
     return conn, stats
 
 
-def test_mapping_rules():
+async def test_mapping_rules():
     assert map_scam_type("impersonation", POLICE_SUB, "x") == "impersonate_police"
     assert map_scam_type("impersonation", "acquaintances", "x") == "impersonate_relative"
     assert map_scam_type("impersonation", "acquaintances", "致张杨主管:采购框架协议") == "impersonate_boss"
@@ -84,7 +96,7 @@ def test_mapping_rules():
     assert map_scam_type("phishing", "phishing email", "请确认订阅信息以继续服务") is None
 
 
-def test_import_levels_and_idempotent(tmp_path, raw_dir):
+async def test_import_levels_and_idempotent(tmp_path, raw_dir):
     conn, stats = _import(tmp_path, raw_dir)
     # base 7 条中 6 条 ≥30 字全部入库;levelup round1 与 base 重复被去重,round2~4 入库
     assert stats["base"] == 7
@@ -104,7 +116,7 @@ def test_import_levels_and_idempotent(tmp_path, raw_dir):
     assert "arXiv:2502.12904" in row["provenance"] and "no redistribution" in row["license_note"]
 
 
-def test_export_eval_schema_and_gap(tmp_path, raw_dir):
+async def test_export_eval_schema_and_gap(tmp_path, raw_dir):
     conn, _ = _import(tmp_path, raw_dir)
     out_base = tmp_path / "base.jsonl"
     out_lvl = tmp_path / "level.jsonl"
@@ -133,7 +145,7 @@ def test_export_eval_schema_and_gap(tmp_path, raw_dir):
     assert len(load_dataset(out_lvl)) == 20
 
 
-def test_export_deterministic(tmp_path, raw_dir):
+async def test_export_deterministic(tmp_path, raw_dir):
     conn, _ = _import(tmp_path, raw_dir)
     export_eval(conn, tmp_path / "a.jsonl", tmp_path / "al.jsonl", per_class=1, seed=7)
     export_eval(conn, tmp_path / "b.jsonl", tmp_path / "bl.jsonl", per_class=1, seed=7)

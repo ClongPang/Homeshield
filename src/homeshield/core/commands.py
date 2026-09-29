@@ -13,7 +13,7 @@ from homeshield.core.repo import Repos
 OLD_COMMAND_HINT = "命令已更新：回复「邀请 称呼」发起联防，「我的联防」查看，「解除 称呼」停止。"
 
 
-def handle_relation_command(relations: RelationService, repos: Repos, settings: Settings,
+async def handle_relation_command(relations: RelationService, repos: Repos, settings: Settings,
                             user: User, kind: str, text: str) -> str | None:
     """关系指令的同步回复;非指令消息返回 None 交回判定链路。"""
     if kind != "text":
@@ -25,7 +25,7 @@ def handle_relation_command(relations: RelationService, repos: Repos, settings: 
     end_selector = parse_end_command(text)
     if code is not None:
         try:
-            _, relation_id, _ = relations.join(user.openid, code)
+            _, relation_id, _ = await relations.join(user.openid, code)
         except RelationError as exc:
             return {
                 "invalid": "这个邀请码无效。请让邀请者检查是否过期、已撤销或已使用。",
@@ -40,7 +40,7 @@ def handle_relation_command(relations: RelationService, repos: Repos, settings: 
                 "回复「我的联防」查看，回复「解除 #" + str(relation_id) + "」可停止。")
     if invite_name is not None:
         try:
-            invite = relations.issue_invite(user.id, invite_name)
+            invite = await relations.issue_invite(user.id, invite_name)
         except RelationError as exc:
             return f"活跃联防已达上限（{settings.max_relations} 条），请先解除一条再邀请。" if exc.reason == "limit" else "暂时无法生成邀请码。"
         url = f"{settings.public_base_url.rstrip('/')}/join/{invite['code']}" if settings.public_base_url else ""
@@ -48,7 +48,7 @@ def handle_relation_command(relations: RelationService, repos: Repos, settings: 
         return (f"邀请码：{invite['code']}{link}\nTA 绑定后，你将收到 TA 的查询提醒；"
                 "TA 主动纠正低风险判定时，原查询也会供你投票查看。")
     if text.strip() == "我的联防":
-        data = relations.list_for_user(user.id)
+        data = await relations.list_for_user(user.id)
         outgoing = [f"#{r['id']} {r['name']}" + ("（已静音）" if r["mute"] else "") for r in data["guardings"]]
         incoming = [f"#{r['id']} {r['name']}" for r in data["guardians"]]
         result = "我护着：" + ("、".join(outgoing) if outgoing else "暂无") + "\n护着我：" + ("、".join(incoming) if incoming else "暂无")
@@ -59,7 +59,7 @@ def handle_relation_command(relations: RelationService, repos: Repos, settings: 
             result += f"\n个人控制台：{url}"
         return result
     if end_selector is not None:
-        status, matches = relations.end_by_selector(user.id, end_selector)
+        status, matches = await relations.end_by_selector(user.id, end_selector)
         if status == "ambiguous":
             options = "、".join(f"#{r['id']} {r['display_name']}" for r in matches)
             return f"称呼重复，请用关系编号解除：{options}"

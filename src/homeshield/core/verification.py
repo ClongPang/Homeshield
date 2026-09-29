@@ -44,7 +44,7 @@ class VerificationService:
         kind = "query"
         if (content_type is None or content_type == "text") and classify(content) == "ack":
             kind = "ack"
-        intake = ingest(
+        intake = await ingest(
             self.repos,
             user_id=user.id,
             content=content,
@@ -54,7 +54,7 @@ class VerificationService:
             kind=kind,
         )
         if intake.duplicate:    # 消息已经存在且处理
-            previous = self.repos.query.get(intake.query_id or 0)
+            previous = await self.repos.query.get(intake.query_id or 0)
             return VerificationOutcome(query_id=intake.query_id or 0, duplicate=True, result=None,
                                        kind=previous["kind"] if previous else kind)
         if kind == "ack":       # 如果收到的是用户的确认型消息，只回复，固定的招呼语
@@ -65,7 +65,7 @@ class VerificationService:
                 kind="ack",
             )
         try:
-            self.repos.incident.attach_query_to_incident(
+            await self.repos.incident.attach_query_to_incident(
                 intake.query_id, user.id, self.pipeline.incident_idle_seconds,
                 expected_epoch=session_epoch,
             )
@@ -82,4 +82,9 @@ class VerificationService:
                 latency_ms=0,
                 degraded=True,
             )
+        if result.degraded:
+            try:
+                await self.repos.query.record_degraded_reply(intake.query_id, result.reply)
+            except Exception:
+                logger.warning("degraded reply persistence failed", exc_info=True)
         return VerificationOutcome(query_id=result.query_id, duplicate=False, result=result, kind="query")

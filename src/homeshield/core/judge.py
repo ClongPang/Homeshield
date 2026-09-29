@@ -6,6 +6,7 @@
 """
 import json
 import logging
+import asyncio
 from typing import Protocol
 
 from homeshield.core.errors import DegradeError
@@ -40,7 +41,12 @@ class Judge(Protocol):
 class MockJudge:
     mode = Mode.MOCK
 
+    def __init__(self, delay_seconds: float = 0):
+        self.delay_seconds = max(0.0, delay_seconds)
+
     async def judge(self, inp: JudgeInput, *, constrained: bool = False) -> JudgeOutput:
+        if self.delay_seconds:
+            await asyncio.sleep(self.delay_seconds)
         scored = sorted(
             ((MOCK_WEIGHTS.get(f.type, 0), f) for f in inp.features),
             key=lambda x: x[0],

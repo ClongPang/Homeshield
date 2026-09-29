@@ -4,6 +4,7 @@ __pycache__/
 *.db
 *.db.server.lock
 .env
+backups/
 .pytest_cache/
 data/eval_out/
 data/raw/

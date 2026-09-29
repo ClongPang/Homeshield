@@ -67,11 +67,3 @@ REGISTRY: dict[str, ScamType] = {
                  "包治百病的药不存在,买药去医院和正规药店;'专家讲座/免费体检'套路多,大额消费先和子女商量。"),
     ]
 }
-
-
-def list_scam_types() -> list[ScamType]:
-    return list(REGISTRY.values())
-
-
-def get_scam_type(type_id: str) -> ScamType | None:
-    return REGISTRY.get(type_id)

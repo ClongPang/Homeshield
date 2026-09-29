@@ -181,7 +181,7 @@ class Pipeline:
             text = await self._extract_message_text(message)
             if message.content_type.value == "image":
                 try:
-                    self.repos.query.update_transcript(query_id, text)
+                    await self.repos.query.update_transcript(query_id, text)
                 except Exception:
                     logger.warning("image transcript persistence failed", exc_info=True)
             conversation = _to_conversation(text, message.content_type.value)
@@ -189,7 +189,7 @@ class Pipeline:
         except DegradeError as de:
             # 阶段1-2 失败(如图片转写):尚无任何确定性结论,整体降级
             return self._build_degraded_result(query_id, de.user_message, t0)
-        supplied = self._supply(message, query_id, text) if self.config.supply_features else []
+        supplied = await self._supply(message, query_id, text) if self.config.supply_features else []
         try:
             verdict = await self._judge_conversation(conversation, extraction)
         except DegradeError as de:
@@ -254,9 +254,9 @@ class Pipeline:
             rule_specs=rule_specs,
         )
 
-    def _supply(self, message: Message, query_id: int, current_text: str) -> list[SupplyItem]:
+    async def _supply(self, message: Message, query_id: int, current_text: str) -> list[SupplyItem]:
         try:
-            rows = self.repos.query.supply_context(
+            rows = await self.repos.query.supply_context(
                 query_id, message.user_id, self.supply_window_seconds
             )
             current_values = extract_strong_values(current_text)
@@ -420,7 +420,7 @@ class Pipeline:
                            "matched_values": item.matched_values} for item in supplied],
                 "synthetic_ids": [f.id for f in synthetic], "floor_level": cross_floor.value,
             }, ensure_ascii=False)
-        verdict_id = self.repos.verdict.insert(
+        verdict_id = await self.repos.verdict.insert(
             query_id,
             verdict.level,
             cited,

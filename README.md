@@ -5,14 +5,29 @@
 ## 开发
 
 ```bash
+cp .env.example .env  # 修改 POSTGRES_PASSWORD，并同步 DATABASE_URL 中的口令
 uv sync
-uv run pytest
+docker compose up -d --wait postgres
 uv run homeshield-cli init-db
 uv run uvicorn homeshield.server:app --reload
 uv run homeshield-eval
 ```
 
-复制 `.env.example` 到 `.env`。`MODE=mock` 无需外部 API；`MODE=llm` 时配置兼容 OpenAI 的供应商参数。
+运行服务需要 Docker Postgres 16；默认只监听本机 `127.0.0.1:5432`，数据放在命名卷。运行数据经 `DATABASE_URL` 访问 Postgres；`DB_PATH` 配置离线 `kbbuild` SQLite 素材库（默认 `data/kb_build.db`，也可用 `--db` 覆盖）。`.env` 不得提交。`MODE=mock` 无需外部 API；`MODE=llm` 时配置兼容 OpenAI 的供应商参数。
+
+测试使用独立的 `homeshield_test` 库（`TEST_DATABASE_URL`），不会清空 `DATABASE_URL` 指向的业务库：
+
+```bash
+./scripts/test.sh
+```
+
+`homeshield-eval` 同样只写隔离评测库：默认取 `TEST_DATABASE_URL`（未设置时派生 `<主库名>_test` 并自动建库），可用 `--database-url` 覆盖；目标与 `DATABASE_URL` 同名会拒绝运行。
+
+单机开发可用 `--reload`；多 worker 部署使用 `uv run uvicorn homeshield.server:app --workers 2`。每个 worker 使用独立连接池，企微 poller 由 Postgres advisory lock 选主，客服回调经 Postgres `LISTEN/NOTIFY` 唤醒 leader 所在进程立即拉取，告警亦经 `LISTEN/NOTIFY` 广播到各 worker 的 SSE broker。
+
+本服务作为多家庭共用入口运行；当前企微侧只有一个微信客服账号承载收发。代码按 `list_kf_accounts` 返回值逐账号维护游标，不限定未来账号数量。
+
+Postgres 备份与空库恢复脚本：`scripts/backup_postgres.sh`、`scripts/restore_postgres.sh`。备份默认保留 14 天；生产切换与回滚步骤见 [`deploy/postgres-cutover.md`](deploy/postgres-cutover.md)。
 
 家人在微信客服会话(企微)中首次发送文字、URL 或图片时自动创建个人身份,并完整进入查证流程;首次进入会话由后端发送欢迎语。查询结果只回复查询者，不要求建立联防关系。用户可回复「邀请 称呼」发出单向邀请、「绑定 邀请码」接受邀请、「我的联防」查看关系、「解除 #关系ID」解除关系。
 
@@ -35,8 +50,8 @@ src/homeshield/
   api/wecom.py              企微客服回调、拉取轮询与消息派发
   core/commands.py          会话关系指令(通道无关)
   core/relations.py         单向关系和邀请规则
-  core/repo.py              SQLite 仓储与事务
-  core/db.py                当前数据库 schema
+  core/repo.py              Postgres async 仓储与事务
+  core/db.py                Postgres schema 与连接池
   core/{pipeline,features,judge,reply}.py  查证管线
   web/                      查询页、控制台、提醒页、邀请页
   eval/                     离线评测

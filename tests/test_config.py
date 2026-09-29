@@ -14,27 +14,27 @@ def _settings(**kw) -> Settings:
     return Settings(providers=providers, **kw)
 
 
-def test_role_routing():
+async def test_role_routing():
     s = _settings(chat_provider_name="DEEPSEEK", embed_provider_name="QWEN")
     assert s.get_chat_provider().model == "deepseek-chat"
     assert s.get_embedding_provider().model == "qwen-embed"
     assert s.get_transcription_provider().model == "deepseek-chat"  # 未配置转写,回落 chat
 
 
-def test_unspecified_chat_falls_back_to_first_provider():
+async def test_unspecified_chat_falls_back_to_first_provider():
     s = _settings()
     assert s.get_chat_provider().name == "DEEPSEEK"
     assert s.get_embedding_provider() is None  # 未指名 embed → 检索退化为纯关键词
 
 
-def test_unknown_provider_fails_fast():
+async def test_unknown_provider_fails_fast():
     with pytest.raises(ValueError, match="CHAT_PROVIDER"):
         _settings(chat_provider_name="TYPPO").get_chat_provider()
     with pytest.raises(ValueError, match="EMBED_PROVIDER"):
         _settings(embed_provider_name="TYPPO").get_embedding_provider()
 
 
-def test_load_scans_env(monkeypatch, tmp_path):
+async def test_load_scans_env(monkeypatch, tmp_path):
     # 与真实 .env 彻底隔离:清掉可能泄漏的变量,并指向一个空环境文件
     for var in ("DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
                 "QWEN_API_KEY", "CHAT_PROVIDER", "EMBED_PROVIDER"):
@@ -49,7 +49,7 @@ def test_load_scans_env(monkeypatch, tmp_path):
     assert s.get_embedding_provider() is None
 
 
-def test_load_reads_relation_and_correction_limits_from_env_file(monkeypatch, tmp_path):
+async def test_load_reads_relation_and_correction_limits_from_env_file(monkeypatch, tmp_path):
     names = ("MAX_RELATIONS", "INVITE_CODE_TTL_DAYS", "CORRECTION_WINDOW_DAYS")
     for name in names:
         monkeypatch.delenv(name, raising=False)
@@ -68,7 +68,7 @@ def test_load_reads_relation_and_correction_limits_from_env_file(monkeypatch, tm
     assert settings.correction_window_days == 9
 
 
-def test_llm_routes_tasks_to_providers():
+async def test_llm_routes_tasks_to_providers():
     from homeshield.core.llm import OpenAICompatLLM
 
     llm = OpenAICompatLLM(

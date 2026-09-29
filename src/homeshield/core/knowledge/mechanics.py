@@ -97,11 +97,3 @@ REGISTRY: dict[str, Mechanic] = {
 }
 
 MECHANIC_LIST: list[Mechanic] = list(REGISTRY.values())
-
-
-def list_mechanics_by_function(function: Function) -> list[Mechanic]:
-    return [m for m in MECHANIC_LIST if m.function is function]
-
-
-def get_mechanic(mechanic_id: str) -> Mechanic | None:
-    return REGISTRY.get(mechanic_id)

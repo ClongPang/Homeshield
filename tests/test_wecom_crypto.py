@@ -17,14 +17,14 @@ def _channel(token: str = "tok") -> WeComChannel:
     )
 
 
-def test_roundtrip():
+async def test_roundtrip():
     ch = _channel()
     assert ch.configured
     cipher = ch.encrypt("你好，小盾")
     assert ch.decrypt(cipher) == "你好，小盾"
 
 
-def test_signature():
+async def test_signature():
     ch = _channel(token="tok")
     good = hashlib.sha1("".join(sorted(["tok", "111", "nonce", "cipher"])).encode()).hexdigest()
     assert ch.verify_signature(good, "111", "nonce", "cipher")
@@ -32,7 +32,7 @@ def test_signature():
     assert not ch.verify_signature("bad" * 10, "111", "nonce", "cipher")
 
 
-def test_decrypt_rejects_wrong_corpid():
+async def test_decrypt_rejects_wrong_corpid():
     ch = _channel()
     cipher = ch.encrypt("hello")
     other = WeComChannel(
@@ -42,13 +42,13 @@ def test_decrypt_rejects_wrong_corpid():
         other.decrypt(cipher)
 
 
-def test_decrypt_rejects_garbage():
+async def test_decrypt_rejects_garbage():
     ch = _channel()
     with pytest.raises(WeComCryptoError):
         ch.decrypt(base64.b64encode(b"short").decode())
 
 
-def test_unconfigured_channel():
+async def test_unconfigured_channel():
     ch = WeComChannel(Settings())
     assert not ch.configured
     with pytest.raises(WeComCryptoError):

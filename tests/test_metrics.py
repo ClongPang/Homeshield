@@ -2,7 +2,7 @@
 from homeshield.eval.metrics import confusion3x3, fpr, user_visible_false_positive_rate, latency_percentiles, recall, threshold_sweep
 
 
-def test_confusion_recall_fpr():
+async def test_confusion_recall_fpr():
     y = ["scam", "scam", "edge", "benign"]
     p = ["dangerous", "safe", "suspicious", "safe"]
     assert recall(y, p) == 0.5
@@ -13,12 +13,12 @@ def test_confusion_recall_fpr():
     assert m["edge"]["suspicious"] == 1 and m["benign"]["safe"] == 1
 
 
-def test_latency_percentiles():
+async def test_latency_percentiles():
     assert latency_percentiles([]) == {"p50": 0, "p95": 0}
     assert latency_percentiles([10, 20, 100]) == {"p50": 20, "p95": 100}
 
 
-def test_threshold_sweep_recall_monotonic():
+async def test_threshold_sweep_recall_monotonic():
     y = ["scam", "scam", "benign"]
     scores = [80, 60, 60]
     pts = threshold_sweep(y, scores)
@@ -26,7 +26,7 @@ def test_threshold_sweep_recall_monotonic():
     assert recalls == sorted(recalls, reverse=True) or recalls == sorted(recalls)
 
 
-def test_report_labels_mock_as_plumbing_only():
+async def test_report_labels_mock_as_plumbing_only():
     """报告标注数据构成,并声明 mock/合成口径仅验证管道。"""
     from homeshield.eval.report import render_report
 

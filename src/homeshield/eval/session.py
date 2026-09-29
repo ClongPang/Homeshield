@@ -1,16 +1,35 @@
 """跨消息弧的逐条回放与预注册门检查。mock 数字仅验证管道。"""
-import asyncio
 import dataclasses
 import json
+import os
 from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlsplit, urlunsplit
 
 from homeshield.core.config import Settings
-from homeshield.core.deps import build_deps, make_pipeline
+from homeshield.core.deps import build_deps, initialize_deps, make_pipeline
 from homeshield.core.models import LEVEL_RANK, Level
 from homeshield.core.pipeline import PipelineConfig
 from homeshield.eval.metrics import latency_percentiles
+
+
+def resolve_eval_database_url(override: str | None = None) -> str:
+    """评测会写入合成用户与判定,必须落在与 DATABASE_URL 业务库隔离的库。
+
+    解析顺序:显式参数 > TEST_DATABASE_URL > 主库名加 _test 派生(与测试约定一致)。
+    """
+    settings = Settings.load()
+    main_db = urlsplit(settings.database_url).path.rsplit("/", 1)[-1]
+    url = (override or os.environ.get("TEST_DATABASE_URL") or "").strip()
+    if not url:
+        main = urlsplit(settings.database_url)
+        url = urlunsplit((main.scheme, main.netloc, main.path + "_test", main.query, main.fragment))
+    if urlsplit(url).path.rsplit("/", 1)[-1] == main_db:
+        raise SystemExit(
+            f"评测数据库不能与业务库同名({main_db!r}):请设置 TEST_DATABASE_URL 或 --database-url"
+        )
+    return url
 
 
 def load_arcs(path: str | Path) -> list[dict]:
@@ -18,7 +37,8 @@ def load_arcs(path: str | Path) -> list[dict]:
 
 
 async def run_arm(arcs: list[dict], settings: Settings, enabled: bool) -> list[dict]:
-    deps = build_deps(dataclasses.replace(settings, db_path=":memory:"))
+    deps = build_deps(settings)
+    await initialize_deps(deps)
     deps.verification.pipeline = make_pipeline(
         deps, dataclasses.replace(PipelineConfig.product_default(), supply_features=enabled)
     )
@@ -33,7 +53,7 @@ async def run_arm(arcs: list[dict], settings: Settings, enabled: bool) -> list[d
     deps.verification.pipeline.judge.judge = counted_judge
     results = []
     for arc in arcs:
-        user = deps.repos.users.get_or_create(f"eval:{arc['arc_id']}")
+        user = await deps.repos.users.get_or_create(f"eval:{arc['arc_id']}")
         now = 1_800_000_000
         final = None
         calls_before = judge_calls
@@ -44,7 +64,7 @@ async def run_arm(arcs: list[dict], settings: Settings, enabled: bool) -> list[d
                     user=user, content=message["text"], content_type="text"
                 )
         result = final.result
-        stored = deps.repos.verdict.get(result.verdict_id) if result.verdict_id else None
+        stored = await deps.repos.verdict.get(result.verdict_id) if result.verdict_id else None
         results.append({
             "arc_id": arc["arc_id"], "stratum": arc["stratum"],
             "label": arc["final_label"],
@@ -59,7 +79,7 @@ async def run_arm(arcs: list[dict], settings: Settings, enabled: bool) -> list[d
             "reason": result.verdict.reason if result.verdict else "",
             "reply": result.reply,
         })
-    deps.conn.close()
+    await deps.pool.close()
     return results
 
 
@@ -160,9 +180,10 @@ def evaluate_pairs(arcs: list[dict], off: list[dict], on: list[dict], mode: str,
     return result, "\n".join(report)
 
 
-async def fault_injection_check() -> bool:
-    deps = build_deps(Settings(mode="mock", db_path=":memory:"))
-    user = deps.repos.users.get_or_create("fault:test")
+async def fault_injection_check(settings: Settings) -> bool:
+    deps = build_deps(dataclasses.replace(settings, mode="mock"))
+    await initialize_deps(deps)
+    user = await deps.repos.users.get_or_create("fault:test")
     deps.verification.pipeline = make_pipeline(deps, PipelineConfig(supply_features=True))
     await deps.verification.verify(user=user, content="这是机密，别告诉家人")
     seen = []
@@ -178,7 +199,7 @@ async def fault_injection_check() -> bool:
         failed = await deps.verification.verify(user=user, content="请转账")
     deps.verification.pipeline = make_pipeline(deps, PipelineConfig(supply_features=False))
     baseline = await deps.verification.verify(user=user, content="请转账")
-    deps.conn.close()
+    await deps.pool.close()
     return (seen[-2] == seen[-1]
             and failed.result.verdict.model_dump() == baseline.result.verdict.model_dump()
             and failed.result.reply == baseline.result.reply)
@@ -193,7 +214,7 @@ async def run_session_evaluation(dataset: str, settings: Settings, supply: str, 
         Path(out).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return payload
     on = await run_arm(arcs, settings, True)
-    fault_passed = await fault_injection_check()
+    fault_passed = await fault_injection_check(settings)
     metrics, report = evaluate_pairs(arcs, off, on, settings.mode, fault_passed)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     Path(out).write_text(report, encoding="utf-8")

@@ -16,6 +16,8 @@
     <string>0.0.0.0</string>
     <string>--port</string>
     <string>8000</string>
+    <string>--workers</string>
+    <string>2</string>
   </array>
   <key>KeepAlive</key>
   <true/>

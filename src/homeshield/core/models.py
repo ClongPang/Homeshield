@@ -27,16 +27,10 @@ class Mode(StrEnum):
 
 
 class CorrectionLabel(StrEnum):
-    """提交时的用户主张,永不改写;"是否已核实"由 CorrectionStatus 表达。"""
+    """提交时的用户主张,永不改写;"是否已核实"由 correction_case.status 表达。"""
 
     REAL = "real"                       # 漏报主张:判轻了,实际是诈骗
     FALSE_POSITIVE = "false_positive"   # 误报主张:判重了,实际不是诈骗
-
-
-class CorrectionStatus(StrEnum):
-    PENDING = "pending"
-    CONFIRMED = "confirmed"
-    NO_CONSENSUS = "no_consensus"       # 未达成共识
 
 
 LEVEL_RANK: dict[Level, int] = {

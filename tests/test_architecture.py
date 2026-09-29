@@ -40,18 +40,45 @@ def _imported_roots(path: pathlib.Path) -> set[str]:
     return mods
 
 
-def test_domain_modules_have_no_direct_infra_imports():
+async def test_domain_modules_have_no_direct_infra_imports():
     for rel in DOMAIN_FILES:
         bad = _imported_roots(ROOT / rel) & FORBIDDEN_ROOTS
         assert not bad, f"{rel} 违反依赖规则,直接导入了 {bad}"
 
 
-def test_adapters_are_the_only_infra_users():
+async def test_adapters_are_the_only_infra_users():
     adapters = [
         "src/homeshield/core/db.py",
         "src/homeshield/core/repo.py",
-        "src/homeshield/core/channels/wecom.py",
     ]
-    infra = {"sqlite3", "httpx"}
+    infra = {"psycopg", "psycopg_pool"}
     for rel in adapters:
-        assert _imported_roots(ROOT / rel) & infra, f"{rel} 应作为适配器持有基础设施导入"
+        assert _imported_roots(ROOT / rel) & infra, f"{rel} 应通过 psycopg 访问 Postgres"
+
+
+async def test_sqlite_is_confined_to_offline_kbbuild():
+    for path in (ROOT / "src/homeshield").rglob("*.py"):
+        imports = _imported_roots(path)
+        if "sqlite3" in imports:
+            assert "kbbuild" in path.parts, f"{path.relative_to(ROOT)} 不得在生产链路导入 sqlite3"
+
+
+async def test_http_route_handlers_are_async():
+    methods = {"get", "post", "put", "patch", "delete"}
+    for rel in (
+        "src/homeshield/server.py",
+        "src/homeshield/api/relations.py",
+        "src/homeshield/api/wecom.py",
+    ):
+        tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            route = any(
+                isinstance(decorator, ast.Call)
+                and isinstance(decorator.func, ast.Attribute)
+                and decorator.func.attr in methods
+                for decorator in node.decorator_list
+            )
+            if route:
+                assert isinstance(node, ast.AsyncFunctionDef), f"{rel}:{node.lineno} route must be async"

@@ -1,5 +1,4 @@
 """双 Judge 契约测试与引用校验降级。"""
-import asyncio
 
 import pytest
 
@@ -25,20 +24,20 @@ JUDGES = [MockJudge(), LLMJudge(MockLLM())]
 
 
 @pytest.mark.parametrize("judge", JUDGES, ids=lambda j: j.mode.value)
-def test_judge_contract(judge):
-    out = asyncio.run(judge.judge(_input(), constrained=True))
+async def test_judge_contract(judge):
+    out = await judge.judge(_input(), constrained=True)
     assert out.level in Level
     assert 0 <= out.confidence <= 100
     assert set(out.cited_ids) <= {f.id for f in _input().features}
     assert out.reason
 
 
-def test_citations_valid_rejects_fabricated():
+async def test_citations_valid_rejects_fabricated():
     out = JudgeOutput(level=Level.SUSPICIOUS, confidence=50, cited_ids=["F99"], reason="x")
     assert not citations_valid(out, {"F01"})
 
 
-def test_validation_retries_then_degrade():
+async def test_validation_retries_then_degrade():
     class BadJudge:
         mode = Mode.LLM
 
@@ -47,7 +46,7 @@ def test_validation_retries_then_degrade():
 
     inp = JudgeInput(text="t", features=[Feature(id="F01", type="url", value="x")], cases=[])
     with pytest.raises(DegradeError):
-        asyncio.run(judge_with_validation(inp, BadJudge(), constrained=True, retries=2))
+        await judge_with_validation(inp, BadJudge(), constrained=True, retries=2)
 
 
 class FixedJudge:
@@ -64,37 +63,35 @@ class FixedJudge:
         return self.out
 
 
-def test_safe_confidence_floor_degrades_low_confidence():
+async def test_safe_confidence_floor_degrades_low_confidence():
     """低置信 safe 重试耗尽后降级"拿不准",不得出 safe。"""
     judge = FixedJudge(JudgeOutput(level=Level.SAFE, confidence=40, cited_ids=[], reason="x"))
     with pytest.raises(DegradeError):
-        asyncio.run(
-            judge_with_validation(_input(), judge, constrained=True, retries=2, safe_confidence_floor=60)
-        )
+        await judge_with_validation(_input(), judge, constrained=True, retries=2, safe_confidence_floor=60)
     assert judge.calls == 3
 
 
-def test_safe_confidence_floor_passes_high_confidence():
+async def test_safe_confidence_floor_passes_high_confidence():
     judge = FixedJudge(JudgeOutput(level=Level.SAFE, confidence=70, cited_ids=["F01"], reason="x"))
-    out = asyncio.run(judge_with_validation(_input(), judge, constrained=True, safe_confidence_floor=60))
+    out = await judge_with_validation(_input(), judge, constrained=True, safe_confidence_floor=60)
     assert out.level is Level.SAFE
 
 
-def test_safe_confidence_floor_spares_non_safe():
+async def test_safe_confidence_floor_spares_non_safe():
     """门槛只守 safe 下限:dangerous 低置信照常出库(宁误报不漏报)。"""
     judge = FixedJudge(JudgeOutput(level=Level.DANGEROUS, confidence=10, cited_ids=[], reason="x"))
-    out = asyncio.run(judge_with_validation(_input(), judge, constrained=True, safe_confidence_floor=60))
+    out = await judge_with_validation(_input(), judge, constrained=True, safe_confidence_floor=60)
     assert out.level is Level.DANGEROUS
 
 
-def test_safe_confidence_floor_disabled_when_zero():
+async def test_safe_confidence_floor_disabled_when_zero():
     judge = FixedJudge(JudgeOutput(level=Level.SAFE, confidence=5, cited_ids=[], reason="x"))
-    out = asyncio.run(judge_with_validation(_input(), judge, constrained=True, safe_confidence_floor=0))
+    out = await judge_with_validation(_input(), judge, constrained=True, safe_confidence_floor=0)
     assert out.level is Level.SAFE
 
 
-def test_safe_confidence_floor_independent_of_constrained():
+async def test_safe_confidence_floor_independent_of_constrained():
     """门槛是产品安全策略,不受引用约束开关影响。"""
     judge = FixedJudge(JudgeOutput(level=Level.SAFE, confidence=10, cited_ids=["F99"], reason="x"))
     with pytest.raises(DegradeError):
-        asyncio.run(judge_with_validation(_input(), judge, constrained=False, safe_confidence_floor=60))
+        await judge_with_validation(_input(), judge, constrained=False, safe_confidence_floor=60)

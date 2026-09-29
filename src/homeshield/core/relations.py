@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import re
 
 from homeshield.core.errors import HomeshieldError, ValidationError
-from homeshield.core.repo import Repos, WRITE_LOCK
+from homeshield.core.repo import Repos
 
 INVITE_RE = re.compile(r"^(?:绑定|綁定)\s*[::]?\s*([0-9A-Za-z]{4,16})$")
 INVITE_CREATE_RE = re.compile(r"^邀请(?:\s+(.+))?$")
@@ -41,31 +41,28 @@ class RelationService:
         self.max_relations = max_relations
         self.invite_ttl_days = invite_ttl_days
 
-    def issue_invite(self, user_id: int, name: str = "家人") -> dict:
+    async def issue_invite(self, user_id: int, name: str = "家人") -> dict:
         name = name.strip() or "家人"
-        with WRITE_LOCK:
-            try:
-                return self.repos.invite.create(user_id, name, self.invite_ttl_days, self.max_relations)
-            except ValidationError as exc:
-                if str(exc) == "relation limit reached": raise RelationError("limit") from exc
-                raise
+        try:
+            return await self.repos.invite.create(user_id, name, self.invite_ttl_days, self.max_relations)
+        except ValidationError as exc:
+            if str(exc) == "relation limit reached": raise RelationError("limit") from exc
+            raise
 
-    def join(self, openid: str, code: str) -> tuple[int, int, str]:
-        with WRITE_LOCK:
-            user = self.repos.users.get_or_create(openid)
-            reason, relation_id = self.repos.invite.claim(code, user.id, self.max_relations)
-            if reason == "created": return user.id, int(relation_id), reason
-            raise RelationError(reason)
+    async def join(self, openid: str, code: str) -> tuple[int, int, str]:
+        user = await self.repos.users.get_or_create(openid)
+        reason, relation_id = await self.repos.invite.claim(code, user.id, self.max_relations)
+        if reason == "created": return user.id, int(relation_id), reason
+        raise RelationError(reason)
 
-    def list_for_user(self, user_id: int) -> dict:
-        return self.repos.relation.list_for_user(user_id)
+    async def list_for_user(self, user_id: int) -> dict:
+        return await self.repos.relation.list_for_user(user_id)
 
-    def end(self, user_id: int, relation_id: int) -> str:
-        with WRITE_LOCK:
-            return self.repos.relation.end(relation_id, user_id)
+    async def end(self, user_id: int, relation_id: int) -> str:
+        return await self.repos.relation.end(relation_id, user_id)
 
-    def end_by_selector(self, user_id: int, selector: str) -> tuple[str, list[dict]]:
-        data = self.repos.relation.list_for_user(user_id)
+    async def end_by_selector(self, user_id: int, selector: str) -> tuple[str, list[dict]]:
+        data = await self.repos.relation.list_for_user(user_id)
         all_rows = []
         for row in data["guardings"]:
             all_rows.append({**row, "role": "protector", "display_name": row["name"]})
@@ -76,7 +73,7 @@ class RelationService:
         else:
             matches = [r for r in all_rows if r["display_name"] == selector]
         if len(matches) != 1: return ("ambiguous" if matches else "not_found", matches)
-        return self.end(user_id, matches[0]["id"]), matches
+        return await self.end(user_id, matches[0]["id"]), matches
 
     @staticmethod
     def join_preview(invite: dict) -> dict:

@@ -17,6 +17,7 @@ from homeshield.core import messages
 from homeshield.core.channels.wecom import WeComCryptoError
 from homeshield.core.deps import Deps
 from homeshield.core.errors import DuplicateMessage
+from homeshield.core.pg_events import KF_PULL_CHANNEL
 from homeshield.core.triage import classify
 from homeshield.core.verification import VerificationService
 from homeshield.core.commands import handle_relation_command
@@ -24,22 +25,22 @@ from homeshield.core.commands import handle_relation_command
 logger = logging.getLogger(__name__)
 OPENID_PREFIX = "wxkf:"
 FALLBACK_POLL_SECONDS = 60  # 漏报兜底周期;正常路径由回调通知即时触发拉取
-
-# 拉取状态:游标 + 串行锁。单进程部署由 server 的启动锁保证唯一,状态随进程存活,
-# 重启后游标清空靠 ingest 的 msg_id 幂等去重安全重放。
-_CURSORS: dict[str, str] = {}
-_PULL_LOCK = asyncio.Lock()
+POLLER_LOCK_KEY = 0x484F4D4553484945  # "HOMESHE", process-independent PostgreSQL advisory lock.
+POLLER_RETRY_SECONDS = 2
 
 
-async def handle_kf_notify(deps: Deps, verification: VerificationService) -> None:
-    """回调收到 kf_msg_or_event 后的即时拉取;与兜底轮询共用游标和锁。"""
+async def handle_kf_notify(deps: Deps) -> None:
+    """唤醒 leader poller 立即拉取:本进程信号即时生效;leader 在别的 worker 时,
+    经 Postgres NOTIFY 跨进程送达(worker 都在 bridge 里 LISTEN 同一通道)。
+    非 leader 收到 NOTIFY 只置位无人等待的 poll_signal,不会重复拉取。"""
     if deps.wecom is None or not deps.wecom.api_ready:
         return
-    async with _PULL_LOCK:
-        try:
-            await poll_once(deps, verification, _CURSORS)
-        except Exception:
-            logger.warning("wecom notify-pull failed", exc_info=True)
+    deps.poll_signal.set()
+    try:
+        async with deps.pool.connection() as conn:
+            await conn.execute("SELECT pg_notify(%s, '')", (KF_PULL_CHANNEL,))
+    except Exception:
+        logger.warning("kf pull wakeup broadcast failed", exc_info=True)
 
 
 def build_wecom_router(deps: Deps) -> APIRouter:
@@ -81,7 +82,7 @@ def build_wecom_router(deps: Deps) -> APIRouter:
                 kind = data.findtext("Event") or data.findtext("MsgType") or "?"
                 logger.info("wecom event kind=%s", kind)
                 if kind == "kf_msg_or_event":
-                    asyncio.create_task(handle_kf_notify(deps, deps.verification))
+                    asyncio.create_task(handle_kf_notify(deps))
             except (WeComCryptoError, ET.ParseError):
                 logger.warning("wecom callback: decrypt/parse failed", exc_info=True)
         return PlainTextResponse("success")
@@ -89,38 +90,73 @@ def build_wecom_router(deps: Deps) -> APIRouter:
     return router
 
 
-async def wecom_poller(deps: Deps, verification: VerificationService) -> None:
-    """漏报兜底:每 FALLBACK_POLL_SECONDS 拉一轮(正常路径由回调通知即时触发,
-    两者共用游标与锁)。重启后游标清空,靠 ingest 的 msg_id 幂等去重安全重放。"""
+async def _try_poller_lock(conn) -> bool:
+    row = await (await conn.execute("SELECT pg_try_advisory_lock(%s) AS acquired", (POLLER_LOCK_KEY,))).fetchone()
+    return bool(row["acquired"])
+
+
+async def _release_poller_lock(conn) -> None:
+    await conn.execute("SELECT pg_advisory_unlock(%s)", (POLLER_LOCK_KEY,))
+
+
+async def wecom_poller(deps: Deps, verification: VerificationService, *,
+                       poll_interval: float = FALLBACK_POLL_SECONDS,
+                       retry_interval: float = POLLER_RETRY_SECONDS) -> None:
+    """Only the worker holding a session advisory lock polls; peers retry for handoff."""
     while True:
         try:
-            await handle_kf_notify(deps, verification)
+            async with deps.pool.connection() as lock_conn:
+                if not await _try_poller_lock(lock_conn):
+                    await asyncio.sleep(retry_interval)
+                    continue
+                try:
+                    while True:
+                        deps.poll_signal.clear()
+                        await poll_once(deps, verification)
+                        try:
+                            await asyncio.wait_for(deps.poll_signal.wait(), timeout=poll_interval)
+                        except asyncio.TimeoutError:
+                            pass
+                finally:
+                    await _release_poller_lock(lock_conn)
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            logger.warning("wecom poll cycle failed", exc_info=True)
-        await asyncio.sleep(FALLBACK_POLL_SECONDS)
+            logger.warning("wecom poller failed; retrying leader election", exc_info=True)
+            await asyncio.sleep(retry_interval)
 
 
-async def poll_once(deps: Deps, verification: VerificationService, cursors: dict[str, str]) -> None:
+async def poll_once(deps: Deps, verification: VerificationService) -> None:
     ch = deps.wecom
+    if ch is None or not ch.api_ready:
+        return
     for account in await ch.list_kf_accounts():
         kfid = account.get("open_kfid", "")
         if not kfid:
             continue
-        res = await ch.kf_sync_msg(kfid, cursors.get(kfid, ""))
+        cursor = await deps.repos.kf_cursor.get(kfid) or ""
+        res = await ch.kf_sync_msg(kfid, cursor)
         if res.get("errcode") != 0:
             logger.warning("wecom sync_msg failed %s %s", res.get("errcode"), res.get("errmsg"))
             continue
-        cursors[kfid] = res.get("next_cursor") or cursors.get(kfid, "")
+        next_cursor = res.get("next_cursor") or cursor
+        processed = True
         if res.get("msg_list"):
-            await handle_wecom_messages(deps, verification, res["msg_list"])
+            processed = await handle_wecom_messages(deps, verification, res["msg_list"])
+        if processed:
+            if next_cursor and next_cursor != cursor:
+                await deps.repos.kf_cursor.set(kfid, str(next_cursor))
 
 
-async def handle_wecom_messages(deps: Deps, verification: VerificationService, msgs: list[dict]) -> None:
+async def handle_wecom_messages(deps: Deps, verification: VerificationService, msgs: list[dict]) -> bool:
+    processed = True
     for m in msgs:
         try:
             await _handle_message(deps, verification, m)
         except Exception:
             logger.warning("wecom message handling failed", exc_info=True)
+            processed = False
+    return processed
 
 
 async def _handle_message(deps: Deps, verification: VerificationService, m: dict) -> None:
@@ -140,8 +176,8 @@ async def _handle_message(deps: Deps, verification: VerificationService, m: dict
         return
 
     openid = OPENID_PREFIX + eid
-    existing = deps.repos.users.get_by_openid(openid)
-    user = existing or deps.repos.users.get_or_create(openid)
+    existing = await deps.repos.users.get_by_openid(openid)
+    user = existing or await deps.repos.users.get_or_create(openid)
     first_message = existing is None
 
     async def reply(text: str) -> None:
@@ -152,7 +188,7 @@ async def _handle_message(deps: Deps, verification: VerificationService, m: dict
 
     if m.get("msgtype") == "text":
         text = m.get("text", {}).get("content", "")
-        response = handle_relation_command(deps.relations, deps.repos, deps.settings, user, "text", text)
+        response = await handle_relation_command(deps.relations, deps.repos, deps.settings, user, "text", text)
         if response is not None:
             await reply(response)
             await _send_console_link(deps, ch, kfid, eid, user.token,
@@ -160,7 +196,7 @@ async def _handle_message(deps: Deps, verification: VerificationService, m: dict
             return
         triage = classify(text)
         if triage == "reset":
-            deps.repos.incident.close_open_incident(user.id, msg_id=m.get("msgid"))
+            await deps.repos.incident.close_open_incident(user.id, msg_id=m.get("msgid"))
             await reply(messages.SESSION_RESET_REPLY)
             await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
             return
@@ -225,7 +261,7 @@ def _flatten_merged(merged: dict) -> str:
 
 async def _run_query(deps: Deps, verification: VerificationService, ch, kfid: str, eid: str,
                      user, content: str, ctype: str, msg_id: str | None) -> None:
-    session_epoch = deps.repos.incident.current_epoch(user.id)
+    session_epoch = await deps.repos.incident.current_epoch(user.id)
     try:
         outcome = await verification.verify(user=user, content=content, content_type=ctype,
                                             channel="wecom", msg_id=msg_id, session_epoch=session_epoch)

@@ -1,5 +1,5 @@
-import asyncio
 import json
+from dataclasses import replace
 import pytest
 
 from homeshield.core.config import Settings
@@ -8,7 +8,7 @@ from homeshield.kbbuild.db import connect
 from homeshield.kbbuild.export import export_cross_message
 
 
-def test_cross_message_export_counts(tmp_path):
+async def test_cross_message_export_counts(tmp_path):
     # 使用现有离线库时验证分层下限;空库由导出器明确报错。
     from pathlib import Path
     source = Path("data/kb_build.db")
@@ -25,7 +25,7 @@ def test_cross_message_export_counts(tmp_path):
     assert all(row["messages"][0]["delay_seconds"] == 0 for row in rows)
 
 
-def test_session_pair_gate_detects_mismerge(tmp_path):
+async def test_session_pair_gate_detects_mismerge(tmp_path):
     arcs = [
         {"arc_id": "fear-1", "stratum": "fear", "messages": [
             {"text": "案件保密", "delay_seconds": 0},
@@ -36,12 +36,13 @@ def test_session_pair_gate_detects_mismerge(tmp_path):
             {"text": "给孩子转账生活费", "delay_seconds": 300}],
          "final_label": "benign", "source": "author_draft:unreviewed"},
     ]
-    settings = Settings(mode="mock", db_path=":memory:")
+    settings = replace(Settings.load(), mode="mock", wecom_corpid="", wecom_agent_id="",
+                       wecom_app_secret="", wecom_kf_secret="", wecom_token="", wecom_aes_key="")
 
     async def paired():
         return await run_arm(arcs, settings, False), await run_arm(arcs, settings, True)
 
-    off, on = asyncio.run(paired())
+    off, on = await paired()
     metrics, _ = evaluate_pairs(arcs, off, on, "mock")
     assert not metrics["default_enable"]
     assert metrics["gates"]["monotonic"]

@@ -9,10 +9,10 @@ class CorrectionService:
         self.repos = repos
         self.window_days = window_days
 
-    def submit(self, verdict_id: int, user_id: int, label: str, note: str = "") -> dict:
+    async def submit(self, verdict_id: int, user_id: int, label: str, note: str = "") -> dict:
         if label not in {item.value for item in CorrectionLabel}:
             raise ValidationError("label must be real or false_positive")
-        return self.repos.correction.submit(verdict_id, user_id, label, note.strip(), self.window_days)
+        return await self.repos.correction.submit(verdict_id, user_id, label, note.strip(), self.window_days)
 
-    def pending_for_user(self, user_id: int) -> list[dict]:
-        return self.repos.correction.list_pending_for_user(user_id)
+    async def pending_for_user(self, user_id: int) -> list[dict]:
+        return await self.repos.correction.list_pending_for_user(user_id)

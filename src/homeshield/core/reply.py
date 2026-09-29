@@ -164,7 +164,3 @@ def _parse_reply_sections(text: str) -> tuple[str, str] | None:
     if not basis or not advice:
         return None
     return basis, advice
-
-
-def create_reply_generator(settings, llm: LLMPort) -> ReplyGenerator:
-    return LLMReply(llm) if settings.llm_enabled else TemplateReply()
