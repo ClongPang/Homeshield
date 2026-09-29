@@ -52,6 +52,10 @@ def build_wecom_router(deps: Deps, push: PushService | None = None) -> APIRouter
         """开通推送入口:个人 token 定位用户 → 插件二维码第一屏下发 → 302 企微静默授权。"""
         if push is None or push.channel is None:
             raise HTTPException(404, "push provisioning unavailable")
+        if not deps.settings.public_base_url.startswith("https://"):
+            return PlainTextResponse(
+                "微信授权需要 HTTPS（已备案域名的可信域名配置完成）。\n"
+                "当前为 HTTP 过渡模式，请在控制台「推送通道」页使用手机号开通。")
         user = await deps.repos.users.get_by_token(token or "")
         if user is None: raise HTTPException(401, "invalid token")
         state = push.states.issue(user.id)

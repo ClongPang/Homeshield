@@ -341,6 +341,28 @@ async def test_provisioning_degrades_when_channel_absent(client):
     assert (await client.get("/wecom/oauth/start", params={"token": user.token})).status_code == 404
 
 
+async def test_oauth_hidden_over_http_transition(tmp_path):
+    """HTTP 过渡模式:OAuth 按钮如实隐藏,start 入口给手机号路径指引。"""
+    qr_path = tmp_path / "qr.png"
+    qr_path.write_bytes(QR_BYTES)
+    settings = replace(Settings.load(), mode="mock",
+                       wecom_corpid="ww1", wecom_agent_id="1000002", wecom_app_secret="s1",
+                       wecom_kf_secret="", wecom_token="", wecom_aes_key="",
+                       public_base_url="http://shield.example", wecom_plugin_qr_path=str(qr_path))
+    app = create_app(settings)
+    app.state.deps.wecom = StubPushChannel()
+    from httpx import AsyncClient as AC
+    from httpx import ASGITransport
+    async with app.router.lifespan_context(app):
+        async with AC(transport=ASGITransport(app=app), base_url="http://shield.example") as c:
+            user = await app.state.deps.repos.users.get_or_create("wxkf:http-mode")
+            status = (await c.get("/api/push/status", params={"token": user.token})).json()
+            assert status["oauth_available"] is False
+            assert status["mobile_available"] is True
+            resp = await c.get("/wecom/oauth/start", params={"token": user.token})
+            assert resp.status_code == 200 and "手机号开通" in resp.text
+
+
 # ---- Requirement: 插件关注前置(资产缺失降级) ------------------------------
 
 async def test_qr_asset_missing_degrades_to_console_fallback(client):

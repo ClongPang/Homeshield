@@ -32,9 +32,11 @@ def build_push_router(deps: Deps, push: PushService) -> APIRouter:
     async def _status(user_id: int) -> dict:
         result = await push.status_for(user_id)
         result["qr_available"] = push.qr_available()
+        # OAuth 依赖可信域名（需备案）；HTTP 过渡期如实隐藏，避免按钮点了必失败
         result["oauth_available"] = bool(
             deps.wecom is not None and deps.wecom.api_ready
-            and deps.settings.public_base_url and deps.settings.wecom_agent_id)
+            and deps.settings.public_base_url.startswith("https://")
+            and deps.settings.wecom_agent_id)
         result["mobile_available"] = bool(deps.wecom is not None and deps.wecom.api_ready)
         result["self_enroll"] = bool(deps.settings.push_self_enroll and push.contact_available)
         return result
@@ -50,7 +52,8 @@ def build_push_router(deps: Deps, push: PushService) -> APIRouter:
         from pathlib import Path
         path = Path(push.s.wecom_plugin_qr_path)
         if not path.is_file(): raise HTTPException(404, "qr asset missing")
-        return FileResponse(path, media_type="image/png")
+        media_type = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+        return FileResponse(path, media_type=media_type)
 
     @router.post("/api/push/enroll-mobile")
     async def enroll_mobile(body: MobileIn):
