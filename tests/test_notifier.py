@@ -1,8 +1,11 @@
-"""WeCom alert delivery: app message with snapshot, session fallback, and re-checks."""
+"""WeCom alert delivery through the durable outbound ledger."""
+
+from dataclasses import replace
 
 from homeshield.core.events import VerdictCompleted
 from homeshield.core.models import ContentType, JudgeOutput, Level, Message, Mode
 from homeshield.core.notifier import AlertBroker, AlertRouter
+from homeshield.core.repo import repository_transaction
 
 
 class FakeWecomSender:
@@ -12,12 +15,14 @@ class FakeWecomSender:
 
     async def send_app_message(self, corp_userids, text):
         self.app_messages.append((corp_userids, text))
+        return {"errcode": 0}
 
-    async def send_session_message(self, openid, text):
+    async def send_session_message_result(self, openid, text):
         self.session_alerts.append((openid, text))
+        return {"errcode": 0}
 
 
-async def _fanout(deps, suffix, names=("妈妈",)):
+async def _fanout(deps, suffix, names=("妈妈",), level=Level.DANGEROUS):
     """queryer(wxkf 身份) + protectors(指定称呼,发邀请方),返回 (recipients, protectors)。"""
     queryer = await deps.repos.users.get_or_create(f"wxkf:notifier:queryer:{suffix}")
     protectors = []
@@ -27,9 +32,21 @@ async def _fanout(deps, suffix, names=("妈妈",)):
         await deps.relations.join(queryer.openid, invite["code"])
         protectors.append(protector)
     query_id = await deps.repos.query.insert(queryer.id, "text", "原始查询内容", None)
-    verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "理由", "回复", 1, Mode.MOCK)
-    fanout = await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
+    async with repository_transaction(deps.repos):
+        verdict_id = await deps.repos.verdict.insert(query_id, level, [], [], "理由", "回复", 1, Mode.MOCK)
+        fanout = await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
+        for recipient in fanout["recipients"]:
+            recipient["query_id"] = query_id
+            recipient["outbound_id"] = await deps.repos.outbound.create_push(
+                query_id, recipient["alert_id"], recipient["user_id"])
     return fanout["recipients"], protectors
+
+
+async def _dispatch(deps, sender, recipients, base_url=""):
+    deps.wecom = sender
+    deps.recovery.settings = replace(deps.settings, public_base_url=base_url)
+    for recipient in recipients:
+        await deps.recovery.dispatch(recipient["outbound_id"])
 
 
 async def test_app_message_uses_alert_name_snapshot(deps):
@@ -38,10 +55,7 @@ async def test_app_message_uses_alert_name_snapshot(deps):
     await deps.repos.relation.update(recipients[0]["relation_id"], protectors[0].id, name="改过的称呼")
     await deps.repos.wecom_member.link(protectors[0].id, "CorpZhang")
     sender = FakeWecomSender()
-    router = AlertRouter(AlertBroker(), deps.repos, "https://shield.test")
-    router.wecom = sender
-
-    await router._send_wecom_alerts(recipients, Level.DANGEROUS)
+    await _dispatch(deps, sender, recipients, "https://shield.test")
 
     assert len(sender.app_messages) == 1
     corp, text = sender.app_messages[0]
@@ -58,21 +72,17 @@ async def test_app_message_rechecks_mute_and_relation_activity(deps):
     await deps.repos.relation.update(recipients[0]["relation_id"], protectors[0].id, mute=True)
     await deps.relations.end(protectors[1].id, recipients[1]["relation_id"])
     sender = FakeWecomSender()
-    router = AlertRouter(AlertBroker(), deps.repos, "https://shield.test")
-    router.wecom = sender
-
-    await router._send_wecom_alerts(recipients, Level.DANGEROUS)
+    await _dispatch(deps, sender, recipients, "https://shield.test")
 
     assert sender.app_messages == []  # push_context 对静音/已解除返回 None
+    rows = await deps.repos.outbound.for_query(recipients[0]["query_id"])
+    assert {row["last_error"] for row in rows} == {"relation_muted", "relation_ended"}
 
 
 async def test_session_fallback_for_unmapped_wxkf_protector(deps):
     recipients, _ = await _fanout(deps, "fallback", ("妈妈",))
     sender = FakeWecomSender()
-    router = AlertRouter(AlertBroker(), deps.repos, "")
-    router.wecom = sender
-
-    await router._send_wecom_alerts(recipients, Level.DANGEROUS)
+    await _dispatch(deps, sender, recipients)
 
     assert sender.app_messages == []
     assert len(sender.session_alerts) == 1
@@ -86,7 +96,9 @@ def _event(queryer, query_id, verdict_id, level=Level.DANGEROUS) -> VerdictCompl
                             reply="回复", query_id=query_id, verdict_id=verdict_id)
 
 
-async def test_queryer_notice_uses_inverse_names_and_only_active_relations(deps):
+async def test_delivery_notice_uses_inverse_names_of_commit_time_relations(deps):
+    """delivery_notice 是提交事务里固化的快照:静音关系仍入账提示,
+    已解除关系不入账;解除发生在提交后不回改提示,补发回复沿用原文案。"""
     queryer = await deps.repos.users.get_or_create("notifier:notice:queryer")
     keep = await deps.repos.users.get_or_create("notifier:notice:keep")
     drop = await deps.repos.users.get_or_create("notifier:notice:drop")
@@ -96,17 +108,13 @@ async def test_queryer_notice_uses_inverse_names_and_only_active_relations(deps)
     drop_relation = (await deps.relations.join(queryer.openid, invite["code"]))[1]
     await deps.repos.relation.update(keep_relation, queryer.id, inverse_name="儿子")
     await deps.repos.relation.update(drop_relation, queryer.id, mute=True)
-    query_id = await deps.repos.query.insert(queryer.id, "text", "危险内容", None)
-    verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "理由", "回复", 1, Mode.MOCK)
-    event = _event(queryer, query_id, verdict_id)
 
-    router = AlertRouter(AlertBroker(), deps.repos)
-    await router(event)
-    assert event.queryer_notice == "查询提醒已加入儿子、联防者 #%d的提醒列表" % drop_relation
-
+    result = await deps.verification.verify(user=queryer, content="请转账")
+    query = await deps.repos.query.get(result.query_id)
+    assert query["delivery_notice"] == "查询提醒已加入儿子、联防者 #%d的提醒列表" % drop_relation
     assert await deps.relations.end(drop.id, drop_relation) == "by_protector"
-    await router(event)
-    assert event.queryer_notice == "查询提醒已加入儿子的提醒列表"
+    assert (await deps.repos.query.get(result.query_id))["delivery_notice"] == \
+        "查询提醒已加入儿子、联防者 #%d的提醒列表" % drop_relation
 
 
 async def test_fanout_is_query_driven_not_level_gated(deps):
@@ -116,28 +124,33 @@ async def test_fanout_is_query_driven_not_level_gated(deps):
     invite = await deps.relations.issue_invite(protector.id, "妈妈")
     relation_id = (await deps.relations.join(queryer.openid, invite["code"]))[1]
     await deps.repos.relation.update(relation_id, queryer.id, inverse_name="儿子")
-    router = AlertRouter(AlertBroker(), deps.repos)
+    broker = AlertBroker()
+    router = AlertRouter(broker, deps.repos)
+    queue = broker.subscribe(protector.id)
     for level in (Level.SAFE, Level.SUSPICIOUS):
         query_id = await deps.repos.query.insert(queryer.id, "text", "原始查询内容", None)
-        verdict_id = await deps.repos.verdict.insert(query_id, level, [], [], "理由", "回复", 1, Mode.MOCK)
+        async with repository_transaction(deps.repos):
+            verdict_id = await deps.repos.verdict.insert(query_id, level, [], [], "理由", "回复", 1, Mode.MOCK)
+            await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
         event = _event(queryer, query_id, verdict_id, level)
 
         await router(event)
 
         assert (await (await deps.conn.execute('SELECT COUNT(*) FROM alert WHERE verdict_id=%s',
                                  (verdict_id,))).fetchone())[0] == 1
-        assert event.queryer_notice == "查询提醒已加入儿子的提醒列表"
+        payload = queue.get_nowait()  # 每个等级都扇出,SSE 载荷等级与判定一致
+        assert payload["level"] == level.value and payload["alert_id"]
 
 
 async def test_alert_wording_follows_verdict_level(deps):
-    recipients, protectors = await _fanout(deps, "wording", ("妈妈",))
-    await deps.repos.wecom_member.link(protectors[0].id, "CorpZhang")
+    safe_recipients, safe_protectors = await _fanout(deps, "wording-safe", ("妈妈",), Level.SAFE)
+    suspicious_recipients, suspicious_protectors = await _fanout(
+        deps, "wording-suspicious", ("妈妈",), Level.SUSPICIOUS)
+    await deps.repos.wecom_member.link(safe_protectors[0].id, "CorpSafe")
+    await deps.repos.wecom_member.link(suspicious_protectors[0].id, "CorpSuspicious")
     sender = FakeWecomSender()
-    router = AlertRouter(AlertBroker(), deps.repos, "https://shield.test")
-    router.wecom = sender
-
-    await router._send_wecom_alerts(recipients, Level.SAFE)
-    await router._send_wecom_alerts(recipients, Level.SUSPICIOUS)
+    await _dispatch(deps, sender, safe_recipients + suspicious_recipients,
+                    "https://shield.test")
 
     safe_text, suspicious_text = (m[1] for m in sender.app_messages)
     assert "未发现典型骗术特征" in safe_text and "⚠️" not in safe_text and "高危预警" not in safe_text

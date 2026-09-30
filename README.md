@@ -13,6 +13,8 @@ uv run uvicorn homeshield.server:app --reload
 uv run homeshield-eval
 ```
 
+评测数据集在 `data/`（构成、字段与再生成见 [data/README.md](data/README.md)）。
+
 运行服务需要 Docker Postgres 16；默认只监听本机 `127.0.0.1:5432`，数据放在命名卷。运行数据经 `DATABASE_URL` 访问 Postgres；`DB_PATH` 配置离线 `kbbuild` SQLite 素材库（默认 `data/kb_build.db`，也可用 `--db` 覆盖）。`.env` 不得提交。`MODE=mock` 无需外部 API；`MODE=llm` 时配置兼容 OpenAI 的供应商参数。
 
 测试使用独立的 `homeshield_test` 库（`TEST_DATABASE_URL`），不会清空 `DATABASE_URL` 指向的业务库：

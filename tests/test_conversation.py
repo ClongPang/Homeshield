@@ -71,7 +71,7 @@ async def test_sample_turns_feed_conversation():
     """评测样本 turns 字段 → 轮次标记 content → 会话解析。"""
     from homeshield.eval.dataset import load_dataset
 
-    s = load_dataset("data/samples/fraud_r1_conversations.jsonl")[0]
+    s = load_dataset("data/datasets/derived/fraud_r1/conversations.jsonl")[0]
     assert s.turns and len(s.turns) == 4
     content = "\n".join(f"【第{i}轮】{t}" for i, t in enumerate(s.turns, 1))
     c = Conversation.from_marked(content)

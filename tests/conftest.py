@@ -10,7 +10,7 @@ import pytest
 import pytest_asyncio
 
 from homeshield.core.config import Settings
-from homeshield.core.db import init_schema, make_pool, utc_epoch_dict_row
+from homeshield.core.db import init_schema, make_pool, migrate_crash_recovery, utc_epoch_dict_row
 from homeshield.core.deps import build_deps
 
 def _test_url(production_url: str) -> str:
@@ -59,6 +59,7 @@ def _test_row_factory(cursor):
 async def pg_pool():
     pool = make_pool(_TEST_DATABASE_URL)
     await pool.open(wait=True)
+    await migrate_crash_recovery(pool)
     await init_schema(pool)
     yield pool
     await pool.close()
@@ -68,7 +69,7 @@ async def pg_pool():
 async def clean_postgres(pg_pool):
     async with pg_pool.connection() as conn:
         await conn.execute(
-            'TRUNCATE correction_vote, correction_case, alert, query_relation, verdict, query, '
+            'TRUNCATE correction_vote, correction_case, outbound, alert, query_relation, verdict, query, '
             'invite_code, guard_relation, incident, session_reset_msg, wecom_member, kf_cursor, "user" '
             'RESTART IDENTITY CASCADE'
         )
@@ -86,6 +87,7 @@ async def deps(settings, pg_pool):
     conn.row_factory = _test_row_factory
     result.conn = conn  # Raw SQL is test-only; production repositories expose only the pool.
     yield result
+    await result.recovery.close()
     await pg_pool.putconn(conn)
 
 

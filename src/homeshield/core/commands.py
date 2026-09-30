@@ -13,10 +13,23 @@ from homeshield.core.repo import Repos
 OLD_COMMAND_HINT = "命令已更新：回复「邀请 称呼」发起联防，「我的联防」查看，「解除 称呼」停止。"
 
 
+def is_relation_command(text: str) -> bool:
+    """是否为关系指令。通道层据此区分"命令执行失败"(记日志、按已处理推进游标,
+    命令不进持久账本)与"非命令的意外异常"(上抛阻塞游标);新增命令分支时
+    必须同步此谓词。"""
+    return bool(
+        is_old_group_command(text)
+        or parse_bind_command(text) is not None
+        or parse_invite_command(text) is not None
+        or text.strip() == "我的联防"
+        or parse_end_command(text) is not None
+    )
+
+
 async def handle_relation_command(relations: RelationService, repos: Repos, settings: Settings,
                             user: User, kind: str, text: str) -> str | None:
     """关系指令的同步回复;非指令消息返回 None 交回判定链路。"""
-    if kind != "text":
+    if kind != "text" or not is_relation_command(text):
         return None
     if is_old_group_command(text):
         return OLD_COMMAND_HINT
@@ -36,7 +49,8 @@ async def handle_relation_command(relations: RelationService, repos: Repos, sett
                 "already_exists": "这条联防关系已经建立，无需重复绑定。",
                 "limit": f"你或邀请者的活跃联防已达上限（{settings.max_relations} 条）。",
             }.get(exc.reason, "绑定暂时未完成，请稍后重试。")
-        return ("已建立联防关系。对方会收到你的查询提醒；你主动纠正其他判定时，原查询内容也会供对方投票查看。"
+        return ("已建立联防关系。对方会收到你的查询提醒，提醒里以 TA 给你的称呼指代你，可在控制台查看与设置；"
+                "你主动纠正其他判定时，原查询会供其投票查看；"
                 "回复「我的联防」查看，回复「解除 #" + str(relation_id) + "」可停止。")
     if invite_name is not None:
         try:
@@ -45,8 +59,9 @@ async def handle_relation_command(relations: RelationService, repos: Repos, sett
             return f"活跃联防已达上限（{settings.max_relations} 条），请先解除一条再邀请。" if exc.reason == "limit" else "暂时无法生成邀请码。"
         url = f"{settings.public_base_url.rstrip('/')}/join/{invite['code']}" if settings.public_base_url else ""
         link = f"\n邀请链接：{url}" if url else ""
-        return (f"邀请码：{invite['code']}{link}\nTA 绑定后，你将收到 TA 的查询提醒；"
-                "TA 主动纠正低风险判定时，原查询也会供你投票查看。")
+        return (f"邀请码：{invite['code']}{link}\n你把对方称作「{invite_name}」。"
+                f"TA 绑定后，TA 的查询提醒会以这个称呼发给你（如：你护着的「{invite_name}」查询了可疑消息），"
+                "称呼可随时在控制台修改。")
     if text.strip() == "我的联防":
         data = await relations.list_for_user(user.id)
         outgoing = [f"#{r['id']} {r['name']}" + ("（已静音）" if r["mute"] else "") for r in data["guardings"]]

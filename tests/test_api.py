@@ -8,6 +8,7 @@ from homeshield.api.relations import build_relation_router
 from homeshield.core.messages import ACK_QUERY_REPLY
 from homeshield.core.models import Level, Mode
 from homeshield.core.feedback import CorrectionService
+from homeshield.core.repo import repository_transaction
 
 from homeshield.core.config import Settings
 from homeshield.server import create_app
@@ -59,6 +60,29 @@ async def test_ack_api_keeps_ack_shape_without_verdict(client):
         "kind": "ack", "query_id": result.json()["query_id"], "verdict_id": None,
         "level": None, "cited_ids": [], "reply": ACK_QUERY_REPLY, "latency_ms": 0,
     }
+
+
+async def test_web_msg_id_collision_with_another_user_returns_409(client):
+    deps = client.app.state.deps
+    first = await _user(deps, "api:collision:first")
+    second = await _user(deps, "api:collision:second")
+    body = {"content": "请转账", "msg_id": "api-user-collision"}
+    assert (await client.post("/api/query", json={**body, "token": first.token})).status_code == 200
+    response = await client.post("/api/query", json={**body, "token": second.token})
+    assert response.status_code == 409
+
+
+async def test_web_response_survives_immediate_dispatch_lookup_failure(client, monkeypatch):
+    deps = client.app.state.deps
+    protected = await _user(deps, "api:dispatch-failure")
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("dispatch lookup unavailable")
+
+    monkeypatch.setattr(deps.recovery, "dispatch_query", fail)
+    response = await client.post("/api/query", json={"token": protected.token, "content": "请转账"})
+    assert response.status_code == 200
+    assert (await deps.repos.query.get(response.json()["query_id"]))["outcome_kind"] == "verdict"
 
 
 async def test_invite_preview_and_personal_relationship_management(client):
@@ -149,8 +173,10 @@ async def test_stream_event_is_user_scoped_and_contains_alert_relation_snapshot(
     protector, protected = await _user(deps, "api:stream-protector"), await _user(deps, "api:stream-protected")
     relation_id = await _relation(deps, protector, protected, "妈妈")
     query_id = await deps.repos.query.insert(protected.id, "text", "查询内容", None)
-    verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "理由", "回复", 1, Mode.MOCK)
-    alert = (await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id))["recipients"][0]
+    async with repository_transaction(deps.repos):
+        verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "理由", "回复", 1, Mode.MOCK)
+        fanout = await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
+    alert = fanout["recipients"][0]
     router = build_relation_router(deps, deps.verification,
                                   CorrectionService(deps.repos, deps.settings.correction_window_days))
     route = next(route for route in router.routes if route.path == "/api/stream")

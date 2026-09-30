@@ -10,11 +10,9 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from homeshield.core.config import Settings
-from homeshield.core.notifier import AlertBroker, AlertRouter
 from homeshield.core.push import (
-    CONFIRM_TIMEOUT_SECONDS, MOBILE_PROBE_FAILURE_LIMIT, PushService, compute_status,
+    CONFIRM_TIMEOUT_SECONDS, MOBILE_PROBE_FAILURE_LIMIT, compute_status,
 )
-from homeshield.core.models import Level, Mode
 from homeshield.server import create_app
 
 QR_BYTES = b"\x89PNG-fake-qr"
@@ -91,7 +89,6 @@ async def client(tmp_path):
     stub = StubPushChannel()
     deps = app.state.deps
     deps.wecom = stub
-    deps.alert_router.wecom = stub
     app.state.push.channel = stub
     async with app.router.lifespan_context(app):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="https://shield.example") as c:
@@ -284,21 +281,16 @@ async def test_alert_app_message_rejection_records_failure_signal(deps):
         async def send_app_message(self, corp_userids, text):
             return {"errcode": 43004}
 
-        async def send_session_message(self, openid, text):
-            self.session_alerts = getattr(self, "session_alerts", []) + [(openid, text)]
-
     queryer = await deps.repos.users.get_or_create("wxkf:pushfail:queryer")
     protector = await deps.repos.users.get_or_create("wxkf:pushfail:protector")
     invite = await deps.relations.issue_invite(protector.id, "妈妈")
     await deps.relations.join(queryer.openid, invite["code"])
     await deps.repos.wecom_member.link(protector.id, "CorpFail")
-    query_id = await deps.repos.query.insert(queryer.id, "text", "内容", None)
-    verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "理由", "回复", 1, Mode.MOCK)
-    fanout = await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
     sender = RejectingSender()
-    router = AlertRouter(AlertBroker(), deps.repos, "https://shield.test")
-    router.wecom = sender
-    await router._send_wecom_alerts(fanout["recipients"], Level.DANGEROUS)
+    deps.wecom = sender
+    result = await deps.verification.verify(user=queryer, content="请转账")
+    push = (await deps.repos.outbound.for_query(result.query_id))[0]
+    await deps.recovery.dispatch(push["id"])
     member = await deps.repos.wecom_member.get_member(protector.id)
     assert member["last_fail_at"] is not None and "43004" in member["last_fail_reason"]
 

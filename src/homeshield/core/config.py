@@ -51,6 +51,10 @@ class Settings:
     incident_idle_seconds: int = 21600
     supply_window_seconds: int = 604800
     supply_max_items: int = 10
+    recovery_stale_seconds: int = 300
+    recovery_sweep_seconds: int = 60
+    outbound_lease_seconds: int = 60
+    outbound_max_attempts: int = 5
 
     @classmethod
     def load(cls, env_file: str | None = None) -> "Settings":
@@ -97,7 +101,16 @@ class Settings:
             incident_idle_seconds=int(os.getenv("INCIDENT_IDLE_SECONDS", "21600")),
             supply_window_seconds=int(os.getenv("SUPPLY_WINDOW_SECONDS", "604800")),
             supply_max_items=int(os.getenv("SUPPLY_MAX_ITEMS", "10")),
+            recovery_stale_seconds=int(os.getenv("RECOVERY_STALE_SECONDS", "300")),
+            recovery_sweep_seconds=int(os.getenv("RECOVERY_SWEEP_SECONDS", "60")),
+            outbound_lease_seconds=int(os.getenv("OUTBOUND_LEASE_SECONDS", "60")),
+            outbound_max_attempts=int(os.getenv("OUTBOUND_MAX_ATTEMPTS", "5")),
         )
+
+    def validate_recovery(self) -> None:
+        if min(self.recovery_stale_seconds, self.recovery_sweep_seconds,
+               self.outbound_max_attempts) <= 0 or self.outbound_lease_seconds < 30:
+            raise ValueError("recovery intervals and attempts must be positive; outbound lease >= 30 seconds")
 
     def provider(self, name: str) -> Provider | None:
         return self.providers.get(name.upper()) if name else None

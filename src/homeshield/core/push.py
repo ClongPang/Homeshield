@@ -37,18 +37,6 @@ STATUS_TEXTS = {
     STATUS_ABNORMAL: "通道异常",
 }
 
-OAUTH_ERROR_TEXTS = {
-    "not_member": "未检测到企业成员身份。请确认你已被加入企业通讯录并关注了微信插件，或改用手机号开通。",
-    "invalid_code": "授权已失效，请回到控制台重新点击「开通推送」。",
-    "domain_mismatch": "可信域名未配置或与本服务不一致，请联系运营者检查企微后台设置。",
-    "oauth_failed": "授权没有完成，请稍后重试。",
-    "oauth_unavailable": "推送开通暂未启用。",
-}
-
-
-def oauth_error_text(reason: str | None) -> str:
-    return OAUTH_ERROR_TEXTS.get(reason or "", OAUTH_ERROR_TEXTS["oauth_failed"])
-
 MOBILE_GUIDE_TEXT = "这个手机号不在企业通讯录里。请联系运营者把你加入通讯录后重试，或改用微信授权开通。"
 
 
@@ -114,7 +102,7 @@ def compute_status(member: dict | None, now: float, confirm_timeout: int = CONFI
 class PushService:
     """开通流程编排:二维码前置下发 → OAuth/手机号映射 → 测试消息 → 用户确认。
 
-    通道适配器以协议注入(同 notifier.AppMessageSender 先例);channel 为 None 时
+    通道适配器以协议注入；channel 为 None 时
     全部能力降级为"未启用",状态仍可如实呈现。
     """
 

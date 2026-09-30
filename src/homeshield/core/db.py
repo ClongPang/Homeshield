@@ -12,14 +12,14 @@ from psycopg_pool import AsyncConnectionPool
 
 DB_POOL_MAX_SIZE = 10
 DB_STATEMENT_TIMEOUT_MS = 5_000
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SCHEMA_INIT_LOCK_KEY = 0x484F4D455343484D  # Dedicated transaction advisory lock: "HOMESCHM".
 
 _TIMESTAMP_FIELDS = {
     "created_at", "opened_at", "last_query_at", "closed_at", "ended_at", "expires_at",
     "used_at", "revoked_at", "delivered_at", "read_at", "queryer_feedback_at", "closes_at",
     "resolved_at", "voted_at", "verdict_at", "query_at", "current_created_at",
-    "bound_at", "verified_at", "last_fail_at",
+    "bound_at", "verified_at", "last_fail_at", "lease_until", "next_attempt_at", "sent_at",
 }
 _JSON_FIELDS = {"cited_ids", "features", "context_snapshot"}
 
@@ -76,9 +76,28 @@ CREATE TABLE IF NOT EXISTS query (
     incident_id BIGINT REFERENCES incident(id),
     transcript TEXT,
     degraded_reply TEXT,
-    kind TEXT NOT NULL DEFAULT 'query' CHECK(kind IN ('query','ack'))
+    kind TEXT NOT NULL DEFAULT 'query' CHECK(kind IN ('query','ack')),
+    channel TEXT NOT NULL DEFAULT 'web' CHECK(channel IN ('web','wecom','legacy')),
+    open_kfid TEXT,
+    session_epoch_at_claim BIGINT,
+    claim_token BIGINT,
+    lease_until TIMESTAMPTZ,
+    outcome_kind TEXT CHECK(outcome_kind IN ('verdict','degraded','ack')),
+    delivery_notice TEXT NOT NULL DEFAULT '',
+    CONSTRAINT ck_query_channel_delivery CHECK (
+        (channel IN ('web','legacy') AND open_kfid IS NULL AND claim_token IS NULL AND lease_until IS NULL)
+        OR (channel='wecom' AND NULLIF(msg_id,'') IS NOT NULL AND NULLIF(open_kfid,'') IS NOT NULL
+            AND claim_token IS NOT NULL AND claim_token>=1 AND lease_until IS NOT NULL)
+    )
 );
-CREATE UNIQUE INDEX IF NOT EXISTS uq_query_msg_id ON query(msg_id) WHERE msg_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_query_web_msg_id ON query(msg_id)
+    WHERE channel='web' AND msg_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_query_wecom_msg_id ON query(open_kfid,msg_id)
+    WHERE channel='wecom';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_query_legacy_msg_id ON query(msg_id)
+    WHERE channel='legacy' AND msg_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_query_recovery ON query(lease_until)
+    WHERE channel='wecom' AND outcome_kind IS NULL;
 ALTER TABLE query ADD COLUMN IF NOT EXISTS degraded_reply TEXT;
 CREATE INDEX IF NOT EXISTS ix_query_user_time ON query(user_id,created_at);
 CREATE INDEX IF NOT EXISTS ix_query_incident ON query(incident_id);
@@ -127,6 +146,7 @@ CREATE TABLE IF NOT EXISTS verdict (
     context_snapshot JSONB
 );
 CREATE INDEX IF NOT EXISTS ix_verdict_query ON verdict(query_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_verdict_query ON verdict(query_id);
 CREATE TABLE IF NOT EXISTS query_relation (
     query_id BIGINT NOT NULL REFERENCES query(id),
     relation_id BIGINT NOT NULL REFERENCES guard_relation(id),
@@ -142,6 +162,28 @@ CREATE TABLE IF NOT EXISTS alert (
     CONSTRAINT uq_alert_verdict_relation UNIQUE(verdict_id,relation_id)
 );
 CREATE INDEX IF NOT EXISTS ix_alert_relation_time ON alert(relation_id,delivered_at);
+CREATE TABLE IF NOT EXISTS outbound (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    kind TEXT NOT NULL CHECK(kind IN ('reply','push')),
+    query_id BIGINT NOT NULL REFERENCES query(id),
+    alert_id BIGINT REFERENCES alert(id),
+    to_user_id BIGINT NOT NULL REFERENCES "user"(id),
+    state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','leased','accepted','skipped','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+    lease_token BIGINT NOT NULL DEFAULT 0,
+    lease_until TIMESTAMPTZ,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    sent_at TIMESTAMPTZ,
+    last_error TEXT,
+    CHECK((kind='reply') = (alert_id IS NULL)),
+    CHECK((state='accepted') = (sent_at IS NOT NULL)),
+    CHECK((state='leased') = (lease_until IS NOT NULL))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_outbound_reply ON outbound(query_id) WHERE kind='reply';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_outbound_push ON outbound(alert_id) WHERE kind='push';
+CREATE INDEX IF NOT EXISTS ix_outbound_pending ON outbound(next_attempt_at,id) WHERE state='pending';
+CREATE INDEX IF NOT EXISTS ix_outbound_expired ON outbound(lease_until,id) WHERE state='leased';
 CREATE TABLE IF NOT EXISTS correction_case (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     verdict_id BIGINT NOT NULL UNIQUE REFERENCES verdict(id),
@@ -220,15 +262,77 @@ async def ensure_database(database_url: str) -> None:
         pass
 
 
+async def _apply_schema(conn) -> None:
+    for statement in SCHEMA.split(";"):
+        if statement.strip():
+            await conn.execute(statement)
+
+
+async def _query_has_channel_column(conn) -> bool:
+    row = await (await conn.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() "
+        "AND table_name='query' AND column_name='channel'"
+    )).fetchone()
+    return row is not None
+
+
 async def init_schema(pool: AsyncConnectionPool) -> None:
     if pool.closed:
         await pool.open(wait=True)
     async with pool.connection() as conn, conn.transaction():
         await conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_INIT_LOCK_KEY,))
-        for statement in SCHEMA.split(";"):
-            if statement.strip():
-                await conn.execute(statement)
+        old = await (await conn.execute(
+            "SELECT to_regclass('query') IS NOT NULL AS present"
+        )).fetchone()
+        if old["present"] and not await _query_has_channel_column(conn):
+            raise RuntimeError("schema v4 requires homeshield-cli migrate-crash-recovery before startup")
+        await _apply_schema(conn)
         await conn.execute(
             "INSERT INTO schema_version(version) VALUES(%s) ON CONFLICT(version) DO NOTHING",
             (SCHEMA_VERSION,),
         )
+
+
+async def migrate_crash_recovery(pool: AsyncConnectionPool) -> None:
+    """Explicit v4->v5 maintenance migration; callers must stop old application workers."""
+    if pool.closed:
+        await pool.open(wait=True)
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_INIT_LOCK_KEY,))
+        await conn.execute("SET LOCAL statement_timeout=0")
+        existing = await (await conn.execute("SELECT to_regclass('query') IS NOT NULL AS present")).fetchone()
+        if not existing["present"]:
+            await _apply_schema(conn)
+        else:
+            if not await _query_has_channel_column(conn):
+                bad = await (await conn.execute("""
+                    SELECT q.id FROM query q LEFT JOIN verdict v ON v.query_id=q.id
+                    GROUP BY q.id HAVING COUNT(v.id)>1
+                       OR (COUNT(v.id)>0 AND NULLIF(MAX(q.degraded_reply),'') IS NOT NULL)
+                       OR (MAX(q.kind)='ack' AND
+                           (COUNT(v.id)>0 OR NULLIF(MAX(q.degraded_reply),'') IS NOT NULL))
+                    LIMIT 10
+                """)).fetchall()
+                if bad:
+                    raise RuntimeError(f"historical query outcomes conflict: {[r['id'] for r in bad]}")
+                await conn.execute("ALTER TABLE query ADD COLUMN channel TEXT NOT NULL DEFAULT 'legacy'")
+                await conn.execute("ALTER TABLE query ALTER COLUMN channel SET DEFAULT 'web'")
+                await conn.execute("ALTER TABLE query ADD COLUMN open_kfid TEXT")
+                await conn.execute("ALTER TABLE query ADD COLUMN session_epoch_at_claim BIGINT")
+                await conn.execute("ALTER TABLE query ADD COLUMN claim_token BIGINT")
+                await conn.execute("ALTER TABLE query ADD COLUMN lease_until TIMESTAMPTZ")
+                await conn.execute("ALTER TABLE query ADD COLUMN outcome_kind TEXT")
+                await conn.execute("ALTER TABLE query ADD COLUMN delivery_notice TEXT NOT NULL DEFAULT ''")
+                await conn.execute("ALTER TABLE query ADD CONSTRAINT ck_query_channel CHECK(channel IN ('web','wecom','legacy'))")
+                await conn.execute("ALTER TABLE query ADD CONSTRAINT ck_query_outcome CHECK(outcome_kind IN ('verdict','degraded','ack'))")
+                await conn.execute("""ALTER TABLE query ADD CONSTRAINT ck_query_channel_delivery CHECK (
+                    (channel IN ('web','legacy') AND open_kfid IS NULL AND claim_token IS NULL AND lease_until IS NULL)
+                    OR (channel='wecom' AND NULLIF(msg_id,'') IS NOT NULL AND NULLIF(open_kfid,'') IS NOT NULL
+                        AND claim_token IS NOT NULL AND claim_token>=1 AND lease_until IS NOT NULL))""")
+                await conn.execute("""UPDATE query q SET outcome_kind=CASE
+                    WHEN EXISTS(SELECT 1 FROM verdict v WHERE v.query_id=q.id) THEN 'verdict'
+                    WHEN NULLIF(q.degraded_reply,'') IS NOT NULL THEN 'degraded'
+                    WHEN q.kind='ack' THEN 'ack' ELSE NULL END""")
+            await _apply_schema(conn)
+            await conn.execute("DROP INDEX IF EXISTS uq_query_msg_id")
+        await conn.execute("INSERT INTO schema_version(version) VALUES(%s) ON CONFLICT DO NOTHING", (SCHEMA_VERSION,))

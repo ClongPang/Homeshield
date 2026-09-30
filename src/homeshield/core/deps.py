@@ -1,7 +1,7 @@
 """组合根(Composition Root):唯一知道具体实现的地方。"""
 import json
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from psycopg_pool import AsyncConnectionPool
@@ -20,6 +20,7 @@ from homeshield.core.reply import LLMReply, ReplyGenerator, TemplateReply
 from homeshield.core.repo import Repos, make_repos
 from homeshield.core.retrieval import Retriever
 from homeshield.core.verification import VerificationService
+from homeshield.core.recovery import RecoveryService
 
 KB_PATH = Path(__file__).parent / "knowledge" / "cases.json"
 
@@ -46,10 +47,13 @@ class Deps:
     verification: VerificationService
     relations: RelationService
     poll_signal: asyncio.Event
+    # init=False:RecoveryService 需引用组装完成的 deps(取 wecom 通道),由 build_deps 在构造后立即赋值
+    recovery: RecoveryService = field(init=False)
 
 
 def build_deps(settings: Settings, pool: AsyncConnectionPool | None = None) -> Deps:
     """Build process-local services without opening the database pool."""
+    settings.validate_recovery()
     pool = pool or make_pool(settings.database_url)
     repos = make_repos(pool)
     bus = EventBus()
@@ -61,14 +65,12 @@ def build_deps(settings: Settings, pool: AsyncConnectionPool | None = None) -> D
     )
     judge: Judge = LLMJudge(llm) if settings.llm_enabled else MockJudge(settings.mock_judge_delay_seconds)
     reply: ReplyGenerator = LLMReply(llm) if settings.llm_enabled else TemplateReply()
-    router = wire_alerts(bus, broker, repos, base_url=settings.public_base_url)
-    if wecom is not None and wecom.api_ready and settings.wecom_agent_id:
-        router.wecom = wecom
+    router = wire_alerts(bus, broker, repos)
     pipeline = _assemble_pipeline(repos=repos, llm=llm, retriever=retriever, judge=judge,
                                   reply_gen=reply, bus=bus, settings=settings)
-    verification = VerificationService(repos, pipeline)
+    verification = VerificationService(repos, pipeline, settings.recovery_stale_seconds)
     relations = RelationService(repos, settings.max_relations, settings.invite_code_ttl_days)
-    return Deps(
+    deps = Deps(
         settings=settings,
         pool=pool,
         repos=repos,
@@ -85,6 +87,8 @@ def build_deps(settings: Settings, pool: AsyncConnectionPool | None = None) -> D
         relations=relations,
         poll_signal=asyncio.Event(),
     )
+    deps.recovery = RecoveryService(repos, verification, settings, lambda: deps.wecom)
+    return deps
 
 
 async def initialize_deps(deps: Deps) -> None:

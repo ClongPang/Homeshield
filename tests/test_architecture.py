@@ -23,6 +23,7 @@ DOMAIN_FILES = [
     "src/homeshield/core/annotate.py",
     "src/homeshield/core/relations.py",
     "src/homeshield/core/verification.py",
+    "src/homeshield/core/recovery.py",
     "src/homeshield/core/commands.py",
     "src/homeshield/core/push.py",
 ]
@@ -64,6 +65,23 @@ async def test_sqlite_is_confined_to_offline_kbbuild():
             assert "kbbuild" in path.parts, f"{path.relative_to(ROOT)} 不得在生产链路导入 sqlite3"
 
 
+async def test_core_never_imports_the_api_layer():
+    """依赖方向:组合根(server/deps)向下装配 api 与 core;core 反向依赖 api
+    会把 HTTP 协议与请求上下文泄漏进领域层。"""
+    for path in (ROOT / "src/homeshield/core").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                targets = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                targets = [node.module]
+            else:
+                continue
+            for name in targets:
+                assert not name.startswith("homeshield.api"), \
+                    f"{path.relative_to(ROOT)} 不得导入 api 层: {name}"
+
+
 async def test_http_route_handlers_are_async():
     methods = {"get", "post", "put", "patch", "delete"}
     for rel in (
@@ -84,3 +102,24 @@ async def test_http_route_handlers_are_async():
             )
             if route:
                 assert isinstance(node, ast.AsyncFunctionDef), f"{rel}:{node.lineno} route must be async"
+
+
+async def test_runtime_verdict_and_outbound_intents_share_one_commit_entry():
+    """判定与投递意图只能经唯一提交入口写入(规格 §6):绕过入口直调
+    verdict.insert 或 outbound.create_* 的运行时路径被静态守护拦截。"""
+    for method, receiver, allowed in (
+        ("insert", "verdict", {"src/homeshield/core/pipeline.py"}),
+        ("create_push", "outbound", {"src/homeshield/core/pipeline.py"}),
+        ("create_reply", "outbound", {"src/homeshield/core/pipeline.py"}),
+    ):
+        calls = set()
+        for path in (ROOT / "src/homeshield").rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                if node.func.attr != method or not isinstance(node.func.value, ast.Attribute):
+                    continue
+                if node.func.value.attr == receiver:
+                    calls.add(str(path.relative_to(ROOT)))
+        assert calls == allowed, f"{method} on {receiver} escaped the commit entry: {sorted(calls)}"

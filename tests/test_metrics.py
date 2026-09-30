@@ -33,7 +33,7 @@ async def test_report_labels_mock_as_plumbing_only():
     text = render_report(
         {},
         mode="mock",
-        dataset="data/samples/samples.jsonl",
+        dataset="data/datasets/core/samples.jsonl",
         n=1,
         data_profile={"synthetic": 1},
     )

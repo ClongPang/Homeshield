@@ -3,6 +3,7 @@ import asyncio
 
 from homeshield.core.errors import DuplicateMessage
 from homeshield.core.models import Level, Mode
+from homeshield.core.repo import repository_transaction
 
 
 async def test_concurrent_user_get_or_create_returns_one_user(deps):
@@ -82,10 +83,14 @@ async def test_concurrent_distinct_invites_respect_relation_capacity(deps):
 async def test_concurrent_alert_recording_is_idempotent(deps, relations):
     protected, _, relation_id = relations
     query_id = await deps.repos.query.insert(protected.id, "text", "危险消息", None)
-    verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "原因", "回复", 1, Mode.MOCK)
-    results = await asyncio.gather(*(
-        deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id) for _ in range(2)
-    ))
+    async with repository_transaction(deps.repos):
+        verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "原因", "回复", 1, Mode.MOCK)
+
+    async def record():
+        async with repository_transaction(deps.repos):
+            return await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
+
+    results = await asyncio.gather(*(record() for _ in range(2)))
     assert all(result["recipients"][0]["relation_id"] == relation_id for result in results)
     count = (await (await deps.conn.execute("SELECT COUNT(*) FROM alert WHERE verdict_id=%s", (verdict_id,))).fetchone())[0]
     assert count == 1

@@ -95,7 +95,7 @@ async def test_render_mentions_gaps(mini_contrast: Path):
 # ---- 真实对照集验收 ------------------------------------------------------
 
 async def test_real_contrast_set_contract():
-    path = Path("data/samples/benign_hard.jsonl")
+    path = Path("data/datasets/core/benign_hard.jsonl")
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(rows) >= 12
     for r in rows:
@@ -109,5 +109,5 @@ async def test_real_contrast_set_contract():
 async def test_real_contrast_loads_via_eval_dataset():
     from homeshield.eval.dataset import load_dataset
 
-    samples = load_dataset("data/samples/benign_hard.jsonl")
+    samples = load_dataset("data/datasets/core/benign_hard.jsonl")
     assert len(samples) == 14  # mechanics 扩展字段被 Sample 忽略

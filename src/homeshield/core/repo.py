@@ -1,5 +1,6 @@
 """Postgres repositories. Each public method borrows its own pooled connection."""
 from functools import wraps
+from contextlib import asynccontextmanager
 import json
 import secrets
 from contextvars import ContextVar
@@ -14,6 +15,38 @@ from homeshield.core.models import Level, Mode, User, utc_timestamp
 
 CODE_ALPHABET = "2346789ABCDEFGHJKMNPQRSTUVWXYZ"
 _ACTIVE_CONNECTION: ContextVar = ContextVar("homeshield_repo_connection", default=None)
+_IN_INTENT_TRANSACTION: ContextVar[bool] = ContextVar("homeshield_repo_intent_tx", default=False)
+
+
+@asynccontextmanager
+async def repository_transaction(repos):
+    """One connection and transaction for a result, alerts and outbound intents.
+
+    事务块内禁止 asyncio.create_task:新任务会复制本 ContextVar,在事务结束、
+    连接归还连接池之后仍然持有并使用它,造成跨请求串线。后台工作(派发、
+    SSE)一律在事务提交之后调度。
+    """
+    async with repos.pool.connection() as conn, conn.transaction():
+        token = _ACTIVE_CONNECTION.set(conn)
+        intent_tx = _IN_INTENT_TRANSACTION.set(True)
+        try:
+            yield
+        finally:
+            _ACTIVE_CONNECTION.reset(token)
+            _IN_INTENT_TRANSACTION.reset(intent_tx)
+
+
+def _require_intent_transaction() -> None:
+    """结果事实与投递意图的写入必须运行在 repository_transaction 内。
+
+    脱离共享事务的行锁会随连接归还立即提交:世代围栏失效、verdict 与
+    alert/outbound 原子性作废。静态守护(test_architecture)拦截文本级绕行,
+    此防护拦截运行时绕行。
+    """
+    if not _IN_INTENT_TRANSACTION.get():
+        raise RuntimeError(
+            "intent writes require repository_transaction; "
+            "call the pipeline commit entries or wrap explicitly")
 
 
 def _pool_repo_access(cls):
@@ -210,37 +243,100 @@ class InviteRepo(_Repo):
 class QueryRepo(_Repo):
 
     async def insert(self, user_id: int, content_type: str, content: str, msg_id: str | None,
-               kind: str = "query") -> int:
+               kind: str = "query", *, channel: str = "web", open_kfid: str | None = None,
+               session_epoch: int | None = None, lease_seconds: int = 300) -> int:
+        if channel not in {"web", "wecom"}:
+            raise ValidationError("new query channel must be web or wecom")
+        if channel == "wecom" and (not msg_id or not open_kfid or session_epoch is None):
+            raise ValidationError("wecom claim requires msg_id, open_kfid and session epoch")
+        if channel == "web" and open_kfid is not None:
+            raise ValidationError("web query cannot have open_kfid")
         try:
             async with self.conn.transaction():
                 now = utc_timestamp()
-                cur = await self.conn.execute("INSERT INTO query(user_id,content_type,content,msg_id,created_at,kind) "
-                                        "VALUES(%s,%s,%s,%s,to_timestamp(%s),%s) RETURNING id",
-                                        (user_id, content_type, content, msg_id, now, kind))
+                cur = await self.conn.execute(
+                    "INSERT INTO query(user_id,content_type,content,msg_id,created_at,kind,channel,open_kfid,"
+                    "session_epoch_at_claim,claim_token,lease_until) "
+                    "VALUES(%s,%s,%s,%s,to_timestamp(%s),%s,%s,%s,%s,%s,"
+                    "CASE WHEN %s='wecom' THEN now()+make_interval(secs => %s) ELSE NULL END) RETURNING id",
+                    (user_id, content_type, content, msg_id, now, kind, channel, open_kfid,
+                     session_epoch, 1 if channel == "wecom" else None, channel, lease_seconds),
+                )
                 query_id = int((await cur.fetchone())["id"])
                 await self.conn.execute("INSERT INTO query_relation(query_id,relation_id) "
                                   "SELECT %s,id FROM guard_relation WHERE protected_user_id=%s AND ended_at IS NULL",
                                   (query_id, user_id))
         except UniqueViolation as exc:
             # 只把 MsgId 幂等键冲突映射为重复消息;其余约束违例原样抛出,不冒充重复
-            if msg_id and exc.diag.constraint_name == "uq_query_msg_id":
+            if msg_id and exc.diag.constraint_name in {
+                "uq_query_web_msg_id", "uq_query_wecom_msg_id", "uq_query_legacy_msg_id"
+            }:
                 raise DuplicateMessage(msg_id) from exc
             raise
         return query_id
 
-    async def find_by_msg_id(self, msg_id: str) -> dict | None:
-        row = await (await self.conn.execute("SELECT id,user_id FROM query WHERE msg_id=%s", (msg_id,))).fetchone()
+    async def find_by_msg_id(self, msg_id: str, *, channel: str = "web",
+                             open_kfid: str | None = None) -> dict | None:
+        if channel == "wecom":
+            row = await (await self.conn.execute(
+                "SELECT id,user_id,channel,open_kfid,outcome_kind,claim_token,lease_until FROM query "
+                "WHERE channel='wecom' AND open_kfid=%s AND msg_id=%s",
+                (open_kfid, msg_id),
+            )).fetchone()
+        else:
+            row = await (await self.conn.execute(
+                "SELECT id,user_id,channel,open_kfid,outcome_kind,claim_token,lease_until FROM query "
+                "WHERE msg_id=%s AND channel IN ('web','legacy') ORDER BY (channel='web') DESC LIMIT 1",
+                (msg_id,),
+            )).fetchone()
         return dict(row) if row else None
+
+    async def lock_for_result(self, query_id: int, claim_token: int | None) -> dict:
+        _require_intent_transaction()
+        row = await (await self.conn.execute("SELECT * FROM query WHERE id=%s FOR UPDATE", (query_id,))).fetchone()
+        if row is None:
+            raise ValidationError("query not found")
+        if row["channel"] == "wecom" and row["claim_token"] != claim_token:
+            raise ValidationError("stale query claim")
+        if row["outcome_kind"] is not None:
+            raise ValidationError("query result already committed")
+        return dict(row)
+
+    async def set_outcome(self, query_id: int, kind: str, *, degraded_reply: str | None = None,
+                          delivery_notice: str = "") -> None:
+        _require_intent_transaction()
+        await self.conn.execute(
+            "UPDATE query SET outcome_kind=%s,degraded_reply=COALESCE(%s,degraded_reply),"
+            "delivery_notice=%s WHERE id=%s",
+            (kind, degraded_reply, delivery_notice, query_id),
+        )
+
+    async def list_expired(self, limit: int = 100) -> list[dict]:
+        rows = await (await self.conn.execute(
+            "SELECT id FROM query WHERE channel='wecom' AND outcome_kind IS NULL "
+            "AND lease_until<now() ORDER BY lease_until,id LIMIT %s", (limit,),
+        )).fetchall()
+        return [dict(row) for row in rows]
+
+    async def takeover(self, query_id: int, lease_seconds: int) -> dict | None:
+        row = await (await self.conn.execute(
+            "UPDATE query SET claim_token=claim_token+1,lease_until=now()+make_interval(secs => %s) "
+            "WHERE id=%s AND channel='wecom' AND outcome_kind IS NULL AND lease_until<now() "
+            "RETURNING *", (lease_seconds, query_id),
+        )).fetchone()
+        return dict(row) if row else None
+
+    async def overdue_without_result(self, age_seconds: int = 900, claim_count: int = 3) -> list[dict]:
+        rows = await (await self.conn.execute(
+            "SELECT id,claim_token,created_at FROM query WHERE channel='wecom' AND outcome_kind IS NULL "
+            "AND (created_at<now()-make_interval(secs => %s) OR claim_token >= %s) ORDER BY created_at LIMIT 100",
+            (age_seconds, claim_count),
+        )).fetchall()
+        return [dict(row) for row in rows]
 
     async def get(self, query_id: int) -> dict | None:
         row = await (await self.conn.execute("SELECT * FROM query WHERE id=%s", (query_id,))).fetchone()
         return dict(row) if row else None
-
-    async def record_degraded_reply(self, query_id: int, reply: str) -> None:
-        async with self.conn.transaction():
-            await self.conn.execute(
-                "UPDATE query SET degraded_reply=%s WHERE id=%s", (reply, query_id)
-            )
 
     async def update_transcript(self, query_id: int, transcript: str) -> None:
         async with self.conn.transaction(): await self.conn.execute("UPDATE query SET transcript=%s WHERE id=%s AND content_type='image'", (transcript, query_id))
@@ -338,6 +434,7 @@ class VerdictRepo(_Repo):
 
     async def insert(self, query_id: int, level: Level, cited_ids: list[str], features_snapshot: list[dict], reason: str,
                reply: str, latency_ms: int, mode: Mode, context_snapshot: str | None = None) -> int:
+        _require_intent_transaction()
         context = json.loads(context_snapshot) if isinstance(context_snapshot, str) else context_snapshot
         async with self.conn.transaction():
             cur = await self.conn.execute(
@@ -357,6 +454,10 @@ class VerdictRepo(_Repo):
         row = await (await self.conn.execute("SELECT * FROM verdict WHERE id=%s", (verdict_id,))).fetchone()
         return dict(row) if row else None
 
+    async def for_query(self, query_id: int) -> dict | None:
+        row = await (await self.conn.execute("SELECT * FROM verdict WHERE query_id=%s", (query_id,))).fetchone()
+        return dict(row) if row else None
+
     async def notification_context(self, verdict_id: int) -> dict | None:
         row = await (await self.conn.execute(
             "SELECT v.id verdict_id,v.query_id,v.level,v.cited_ids,q.user_id,q.content_type,q.content,q.created_at "
@@ -370,6 +471,7 @@ class VerdictRepo(_Repo):
 class AlertRepo(_Repo):
 
     async def record_alerts_for_verdict(self, verdict_id: int, query_id: int) -> dict:
+        _require_intent_transaction()
         now = utc_timestamp()
         async with self.conn.transaction():
             queryer = await (await self.conn.execute("SELECT user_id FROM query WHERE id=%s", (query_id,))).fetchone()
@@ -392,6 +494,17 @@ class AlertRepo(_Repo):
                                    "newly_created": created})
             return {"queryer_id": int(queryer["user_id"]), "recipients": recipients}
 
+    async def existing_for_verdict(self, verdict_id: int) -> list[dict]:
+        """提交时已入账且关系仍活跃的 alert,SSE 扇出据此复读,不重算事实。"""
+        rows = await (await self.conn.execute(
+            "SELECT a.id alert_id,a.relation_id,a.name_at_alert,a.delivered_at,"
+            "r.protector_user_id user_id FROM alert a "
+            "JOIN guard_relation r ON r.id=a.relation_id "
+            "WHERE a.verdict_id=%s AND r.ended_at IS NULL ORDER BY a.id",
+            (verdict_id,),
+        )).fetchall()
+        return [dict(row) for row in rows]
+
     async def event_context(self, alert_id: int) -> dict | None:
         row = await (await self.conn.execute("SELECT a.id alert_id,a.verdict_id,a.relation_id,a.name_at_alert,a.delivered_at,"
             "r.protector_user_id user_id,r.mute FROM alert a JOIN guard_relation r ON r.id=a.relation_id "
@@ -403,6 +516,19 @@ class AlertRepo(_Repo):
             "r.protector_user_id user_id,r.mute,u.openid,u.token FROM alert a JOIN guard_relation r ON r.id=a.relation_id "
             'JOIN "user" u ON u.id=r.protector_user_id WHERE a.id=%s AND r.ended_at IS NULL AND r.mute=FALSE', (alert_id,))).fetchone()
         return dict(row) if row else None
+
+    async def push_skip_reason(self, alert_id: int) -> str:
+        row = await (await self.conn.execute(
+            "SELECT r.ended_at,r.mute FROM alert a JOIN guard_relation r ON r.id=a.relation_id "
+            "WHERE a.id=%s", (alert_id,),
+        )).fetchone()
+        if row is None:
+            return "alert_missing"
+        if row["ended_at"] is not None:
+            return "relation_ended"
+        if row["mute"]:
+            return "relation_muted"
+        return "route_unavailable"
 
     async def list_for_user(self, user_id: int, relation_id: int | None = None, limit: int = 100) -> list[dict]:
         sql = ("SELECT a.id alert_id,a.verdict_id,a.relation_id,a.name_at_alert,a.delivered_at,a.read_at,v.level,q.content "
@@ -636,6 +762,116 @@ class KfCursorRepo(_Repo):
         )
 
 
+@_pool_repo_access
+class OutboundRepo(_Repo):
+    async def create_reply(self, query_id: int, to_user_id: int) -> int:
+        _require_intent_transaction()
+        row = await (await self.conn.execute(
+            "INSERT INTO outbound(kind,query_id,to_user_id) VALUES('reply',%s,%s) "
+            "ON CONFLICT(query_id) WHERE kind='reply' DO UPDATE SET query_id=excluded.query_id RETURNING id",
+            (query_id, to_user_id),
+        )).fetchone()
+        return int(row["id"])
+
+    async def create_push(self, query_id: int, alert_id: int, to_user_id: int) -> int:
+        _require_intent_transaction()
+        row = await (await self.conn.execute(
+            "INSERT INTO outbound(kind,query_id,alert_id,to_user_id) VALUES('push',%s,%s,%s) "
+            "ON CONFLICT(alert_id) WHERE kind='push' DO UPDATE SET alert_id=excluded.alert_id RETURNING id",
+            (query_id, alert_id, to_user_id),
+        )).fetchone()
+        return int(row["id"])
+
+    async def for_query(self, query_id: int) -> list[dict]:
+        rows = await (await self.conn.execute(
+            "SELECT * FROM outbound WHERE query_id=%s ORDER BY (kind='reply') DESC,id", (query_id,),
+        )).fetchall()
+        return [dict(row) for row in rows]
+
+    async def due_ids(self, limit: int = 100) -> list[int]:
+        rows = await (await self.conn.execute(
+            "SELECT id FROM outbound WHERE (state='pending' AND next_attempt_at<=now()) "
+            "OR (state='leased' AND lease_until<now()) ORDER BY id LIMIT %s", (limit,),
+        )).fetchall()
+        return [int(row["id"]) for row in rows]
+
+    async def claim(self, outbound_id: int, lease_seconds: int, max_attempts: int) -> dict | None:
+        async with self.conn.transaction():
+            row = await (await self.conn.execute(
+                "SELECT * FROM outbound WHERE id=%s AND ((state='pending' AND next_attempt_at<=now()) "
+                "OR (state='leased' AND lease_until<now())) FOR UPDATE SKIP LOCKED",
+                (outbound_id,),
+            )).fetchone()
+            if row is None:
+                return None
+            if int(row["attempts"]) >= max_attempts:
+                # 租约耗尽的行可能带着上一次尝试的具体错误类别,保留它供人工处置;
+                # 从未记录过错误(如调用前进程即死)才写占位类别
+                failed = await (await self.conn.execute(
+                    "UPDATE outbound SET state='failed',lease_until=NULL,"
+                    "last_error=COALESCE(last_error,'lease_expired_limit') WHERE id=%s RETURNING last_error",
+                    (outbound_id,),
+                )).fetchone()
+                return {"id": outbound_id, "state": "failed", "last_error": failed["last_error"]}
+            claimed = await (await self.conn.execute(
+                "UPDATE outbound SET state='leased',attempts=attempts+1,lease_token=lease_token+1,"
+                "lease_until=now()+make_interval(secs => %s) WHERE id=%s RETURNING *",
+                (lease_seconds, outbound_id),
+            )).fetchone()
+            return dict(claimed)
+
+    async def owns_lease(self, outbound_id: int, token: int) -> bool:
+        row = await (await self.conn.execute(
+            "SELECT 1 FROM outbound WHERE id=%s AND state='leased' AND lease_token=%s "
+            "AND lease_until>now()", (outbound_id, token),
+        )).fetchone()
+        return row is not None
+
+    async def finish(self, outbound_id: int, token: int, state: str,
+                     error: str | None = None, delay_seconds: int = 0) -> bool:
+        if state not in {"accepted", "skipped", "failed", "pending"}:
+            raise ValueError("invalid outbound state")
+        cur = await self.conn.execute(
+            "UPDATE outbound SET state=%s,lease_until=NULL,last_error=%s,"
+            "next_attempt_at=CASE WHEN %s='pending' THEN now()+make_interval(secs => %s) "
+            "ELSE next_attempt_at END,sent_at=CASE WHEN %s='accepted' THEN now() ELSE NULL END "
+            "WHERE id=%s AND state='leased' AND lease_token=%s",
+            (state, error, state, delay_seconds, state, outbound_id, token),
+        )
+        return cur.rowcount == 1
+
+    async def failed(self, limit: int = 100) -> list[dict]:
+        rows = await (await self.conn.execute(
+            "SELECT id,kind,query_id,alert_id,to_user_id,attempts,last_error,created_at "
+            "FROM outbound WHERE state='failed' ORDER BY id LIMIT %s", (limit,),
+        )).fetchall()
+        return [dict(row) for row in rows]
+
+    async def backlog_status(self) -> dict:
+        row = await (await self.conn.execute("""
+            SELECT COUNT(*) FILTER (WHERE state='pending' AND next_attempt_at<=now()) AS due_pending,
+                   COUNT(*) FILTER (WHERE state='leased' AND lease_until<now()) AS expired_leased,
+                   COUNT(*) FILTER (WHERE state='failed') AS failed,
+                   COALESCE(MAX(EXTRACT(EPOCH FROM now()-created_at)) FILTER
+                       (WHERE state='pending' AND next_attempt_at<=now()),0) AS oldest_due_seconds
+            FROM outbound
+        """)).fetchone()
+        return {"due_pending": int(row["due_pending"]),
+                "expired_leased": int(row["expired_leased"]),
+                "failed": int(row["failed"]),
+                "oldest_due_seconds": int(row["oldest_due_seconds"])}
+
+    async def requeue(self, outbound_id: int) -> bool:
+        # 保留 last_error:重排后若再次失败,新旧错误类别在 finish 时覆盖更新;
+        # 提前清空会丢失人工处置时唯一可见的失败原因
+        cur = await self.conn.execute(
+            "UPDATE outbound SET state='pending',attempts=0,lease_token=lease_token+1,"
+            "lease_until=NULL,next_attempt_at=now() WHERE id=%s AND state='failed'",
+            (outbound_id,),
+        )
+        return cur.rowcount == 1
+
+
 @dataclass
 class Repos:
     pool: AsyncConnectionPool
@@ -649,9 +885,10 @@ class Repos:
     incident: IncidentRepo
     wecom_member: WecomMemberRepo
     kf_cursor: KfCursorRepo
+    outbound: OutboundRepo
 
 
 def make_repos(pool: AsyncConnectionPool) -> Repos:
     return Repos(pool, UserRepo(pool), RelationRepo(pool), InviteRepo(pool), QueryRepo(pool),
                  VerdictRepo(pool), AlertRepo(pool), CorrectionRepo(pool), IncidentRepo(pool),
-                 WecomMemberRepo(pool), KfCursorRepo(pool))
+                 WecomMemberRepo(pool), KfCursorRepo(pool), OutboundRepo(pool))

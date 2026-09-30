@@ -16,12 +16,11 @@ from fastapi.responses import PlainTextResponse, RedirectResponse
 from homeshield.core import messages
 from homeshield.core.channels.wecom import WeComCryptoError
 from homeshield.core.deps import Deps
-from homeshield.core.errors import DuplicateMessage
 from homeshield.core.pg_events import KF_PULL_CHANNEL
-from homeshield.core.push import PushService, oauth_error_text
+from homeshield.core.push import PushService
 from homeshield.core.triage import classify
 from homeshield.core.verification import VerificationService
-from homeshield.core.commands import handle_relation_command
+from homeshield.core.commands import handle_relation_command, is_relation_command
 
 logger = logging.getLogger(__name__)
 OPENID_PREFIX = "wxkf:"
@@ -225,7 +224,13 @@ async def _handle_message(deps: Deps, verification: VerificationService, m: dict
 
     if m.get("msgtype") == "text":
         text = m.get("text", {}).get("content", "")
-        response = await handle_relation_command(deps.relations, deps.repos, deps.settings, user, "text", text)
+        try:
+            response = await handle_relation_command(deps.relations, deps.repos, deps.settings, user, "text", text)
+        except Exception:
+            if is_relation_command(text):
+                logger.error("wecom relation command failed msg_id=%s", m.get("msgid"), exc_info=True)
+                return  # commands remain outside the durable ledger
+            raise
         if response is not None:
             await reply(response)
             await _send_console_link(deps, ch, kfid, eid, user.token,
@@ -238,12 +243,7 @@ async def _handle_message(deps: Deps, verification: VerificationService, m: dict
             await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
             return
         if triage == "ack":
-            try:
-                await verification.verify(user=user, content=text, content_type="text",
-                                          channel="wecom", msg_id=m.get("msgid"))
-            except Exception:
-                logger.warning("wecom ack persistence failed", exc_info=True)
-            await reply(messages.ACK_QUERY_REPLY)
+            await _run_query(deps, verification, ch, kfid, eid, user, text, "text", m.get("msgid"))
             await _send_console_link(deps, ch, kfid, eid, user.token, first_message)
             return
         await _run_query(deps, verification, ch, kfid, eid, user, text, None, m.get("msgid"))
@@ -298,27 +298,50 @@ def _flatten_merged(merged: dict) -> str:
 
 async def _run_query(deps: Deps, verification: VerificationService, ch, kfid: str, eid: str,
                      user, content: str, ctype: str, msg_id: str | None) -> None:
+    if not msg_id:
+        logger.error("wecom query/ack without msg_id kfid=%s", kfid)
+        try:
+            await ch.kf_send_msg(kfid, eid, messages.LOOK_FAILED)
+        except Exception:
+            logger.warning("wecom missing-id reply failed", exc_info=True)
+        return
     session_epoch = await deps.repos.incident.current_epoch(user.id)
     try:
         outcome = await verification.verify(user=user, content=content, content_type=ctype,
-                                            channel="wecom", msg_id=msg_id, session_epoch=session_epoch)
-    except DuplicateMessage:
-        return
+                                            channel="wecom", msg_id=msg_id, session_epoch=session_epoch,
+                                            open_kfid=kfid)
     except ValueError:
         try:
             await ch.kf_send_msg(kfid, eid, messages.LOOK_FAILED)
         except Exception:
             logger.warning("wecom reply failed", exc_info=True)
         return
-    if outcome.duplicate or outcome.result is None:
+    except Exception:
+        # 判定或提交失败,但本条消息可能已持久认领:有认领记录则游标照常推进,
+        # 由回收者完成;认领前失败上抛阻塞游标,等待重拉
+        previous = await deps.repos.query.find_by_msg_id(msg_id, channel="wecom", open_kfid=kfid)
+        if previous is not None and int(previous["user_id"]) == user.id:
+            logger.error("wecom claimed query awaiting recovery query_id=%s", previous["id"], exc_info=True)
+            return
+        raise
+    if outcome.duplicate:
+        previous = await deps.repos.query.get(outcome.query_id)
+        if previous and previous["outcome_kind"] is not None:
+            await _dispatch_durable_query(deps, outcome.query_id)
+        return
+    if outcome.result is None:
         return
     result = outcome.result
     logger.info("wecom query processed openid=%s level=%s", OPENID_PREFIX + eid,
                 result.verdict.level.value if result.verdict else "degraded")
+    await _dispatch_durable_query(deps, outcome.query_id)
+
+
+async def _dispatch_durable_query(deps: Deps, query_id: int) -> None:
     try:
-        await ch.kf_send_msg(kfid, eid, result.reply)
+        await deps.recovery.dispatch_query(query_id, wait_reply=True)
     except Exception:
-        logger.warning("wecom reply failed", exc_info=True)
+        logger.warning("wecom outbound scheduling failed query_id=%s", query_id, exc_info=True)
 
 
 async def _send_console_link(deps: Deps, ch, kfid: str, eid: str, token: str, first_message: bool) -> None:

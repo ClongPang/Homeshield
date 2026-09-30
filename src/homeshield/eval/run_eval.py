@@ -1,6 +1,6 @@
 """一条命令复现评测数字:
 
-    uv run python -m eval.run_eval --dataset data/samples/samples.jsonl --mode mock
+    uv run python -m eval.run_eval --dataset data/datasets/core/samples.jsonl --mode mock
 """
 import argparse
 import asyncio
@@ -66,14 +66,14 @@ async def _run(args) -> None:
         settings, database_url=resolve_eval_database_url(args.database_url))
     await ensure_database(settings.database_url)
     if args.supply:
-        dataset = args.dataset or "data/samples/fraud_r1_cross_message.jsonl"
+        dataset = args.dataset or "data/datasets/derived/fraud_r1/cross_message.jsonl"
         out = args.out or ("docs/reports/session_report.md" if args.supply != "off"
                            else "data/eval_out/session_off.json")
         result = await run_session_evaluation(dataset, settings, args.supply, out)
         print(result)
         return
 
-    dataset = args.dataset or "data/samples/samples.jsonl"
+    dataset = args.dataset or "data/datasets/core/samples.jsonl"
     out = args.out or "docs/reports/report.md"
     samples = load_dataset(dataset)
     profile = Counter(s.source.split(":", 1)[0] for s in samples)

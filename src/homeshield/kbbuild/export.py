@@ -149,7 +149,7 @@ def export_cross_message(
     conn: sqlite3.Connection,
     out: str | Path,
     *,
-    benign_path: str | Path = "data/samples/two_sided_v0.jsonl",
+    benign_path: str | Path = "data/datasets/restricted/two_sided_v0.jsonl",
     lang: str = "zh",
     seed: int = 42,
 ) -> dict[str, int]:
@@ -202,7 +202,7 @@ def export_cross_message(
             "scam", "author_draft:unreviewed", "impersonate_police")
 
     benign: list[dict] = []
-    for path in [Path(benign_path), Path("data/samples/benign_hard.jsonl")]:
+    for path in [Path(benign_path), Path("data/datasets/core/benign_hard.jsonl")]:
         if path.exists():
             benign += [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
                        if line.strip() and json.loads(line).get("label") in {"benign", "edge"}]

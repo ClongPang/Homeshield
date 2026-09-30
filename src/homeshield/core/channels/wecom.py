@@ -148,17 +148,16 @@ class WeComChannel:
             raise RuntimeError(f"wecom media/get failed: {data.get('errcode')} {data.get('errmsg')}")
         return resp.content
 
-    async def send_session_message(self, openid: str, text: str) -> bool:
+    async def send_session_message_result(self, openid: str, text: str) -> dict | None:
         """告警回落:未登记成员映射的 wxkf 联防者,向其客服会话直发(best-effort,
-        受 48h 窗口约束)。成功返回 True。"""
+        受 48h 窗口约束)。保留平台错误码,持久派发据此分类失败;None 表示无路由。"""
         if not openid.startswith("wxkf:"):
-            return False
+            return None
         eid = openid[len("wxkf:"):]
         accounts = await self.list_kf_accounts()
         if not accounts:
-            return False
-        res = await self.kf_send_msg(accounts[0]["open_kfid"], eid, text)
-        return res.get("errcode") == 0 and not res.get("fail_list")
+            return None
+        return await self.kf_send_msg(accounts[0]["open_kfid"], eid, text)
 
     # ---- 应用消息(告警触达微信插件) ----------------------------------
     async def send_app_message(self, corp_userids: list[str], text: str) -> dict:

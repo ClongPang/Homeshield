@@ -1,4 +1,5 @@
 """企微(微信客服)消息流:派发器 + 轮询单次,离线 mock 全链路。"""
+import asyncio
 from dataclasses import replace
 
 
@@ -7,7 +8,6 @@ from homeshield.core import messages
 from homeshield.core.channels.wecom import WeComChannel
 from homeshield.core.config import Settings
 from homeshield.core.deps import build_deps
-from homeshield.core.models import Level
 
 EID = "wmEtest0001"
 KFID = "wkAtest0001"
@@ -33,18 +33,23 @@ class StubWecomChannel:
         self.session_alerts = []  # (openid, text)
         self.media = {}
         self.next_sync = {"errcode": 0, "msg_list": [], "next_cursor": ""}
+        self.reply_response = {"errcode": 0}
+        self.app_response = {"errcode": 0}
 
     async def kf_send_msg(self, open_kfid, touser, text):
         self.sent.append((open_kfid, touser, text))
+        return self.reply_response
 
     async def kf_send_welcome(self, code, text):
         self.welcomes.append((code, text))
 
     async def send_app_message(self, corp_userids, text):
         self.app_messages.append((corp_userids, text))
+        return self.app_response
 
-    async def send_session_message(self, openid, text):
+    async def send_session_message_result(self, openid, text):
         self.session_alerts.append((openid, text))
+        return self.reply_response
 
     async def download_media(self, media_id):
         return self.media[media_id]
@@ -94,6 +99,21 @@ async def test_relation_command_invite(deps):
     deps, ch = await _deps(deps)
     await wecom_api.handle_wecom_messages(deps, deps.verification, [_text_msg("邀请 妈妈")])
     assert "邀请码" in ch.sent[0][2]
+    # 称呼知情:回显称呼并讲明其在提醒文案中的用途(v2.34 验收期补的盲区修复)
+    assert "你把对方称作「妈妈」" in ch.sent[0][2]
+    assert "你护着的「妈妈」查询了可疑消息" in ch.sent[0][2]
+
+
+async def test_replayed_invite_command_stays_outside_durable_query_ledger(deps):
+    deps, ch = await _deps(deps)
+    msg = _text_msg("邀请 妈妈", "invite-replay")
+    await wecom_api.handle_wecom_messages(deps, deps.verification, [msg])
+    await wecom_api.handle_wecom_messages(deps, deps.verification, [msg])
+    user = await deps.repos.users.get_by_openid("wxkf:" + EID)
+    invites = await deps.repos.invite.list_for_creator(user.id)
+    assert len(invites) == 2 and invites[0]["code"] != invites[1]["code"]
+    assert len(ch.sent) == 3  # two command replies, one first-contact link
+    assert await deps.repos.query.find_by_msg_id("invite-replay", channel="wecom", open_kfid=KFID) is None
 
 
 async def test_unsupported_msgtype_gets_guidance(deps):
@@ -158,13 +178,95 @@ async def test_poll_once_keeps_cursor_when_message_processing_fails(deps, monkey
     assert await deps.repos.kf_cursor.get(KFID) is None
 
 
-async def test_alert_router_wecom_wiring(deps):
+async def test_claim_database_failure_keeps_cursor_for_redelivery(deps, monkeypatch):
+    deps, ch = await _deps(deps)
+    ch.next_sync = {"errcode": 0, "msg_list": [_text_msg("请转账", "unclaimed-db-failure")],
+                    "next_cursor": "must-not-advance"}
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("simulated claim failure")
+
+    monkeypatch.setattr(deps.repos.query, "insert", fail)
+    await wecom_api.poll_once(deps, deps.verification)
+    assert await deps.repos.kf_cursor.get(KFID) is None
+    assert await deps.repos.query.find_by_msg_id(
+        "unclaimed-db-failure", channel="wecom", open_kfid=KFID) is None
+
+
+async def test_cursor_advances_after_durable_claim_when_reply_is_rejected(deps):
+    deps, ch = await _deps(deps)
+    ch.reply_response = {"errcode": 95001}
+    ch.next_sync = {"errcode": 0, "msg_list": [_text_msg("请转账", "reply-rejected")],
+                    "next_cursor": "after-rejected-reply"}
+    await wecom_api.poll_once(deps, deps.verification)
+    assert await deps.repos.kf_cursor.get(KFID) == "after-rejected-reply"
+    query = await deps.repos.query.find_by_msg_id("reply-rejected", channel="wecom", open_kfid=KFID)
+    assert query and query["outcome_kind"] == "verdict"
+    rows = await deps.repos.outbound.for_query(query["id"])
+    assert rows[0]["state"] == "pending" and rows[0]["last_error"] == "wecom_err_95001"
+
+
+async def test_cursor_advances_when_immediate_dispatch_lookup_fails(deps, monkeypatch):
+    deps, ch = await _deps(deps)
+    ch.next_sync = {"errcode": 0, "msg_list": [_text_msg("请转账", "dispatch-lookup-failed")],
+                    "next_cursor": "after-dispatch-lookup-failed"}
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("dispatch lookup unavailable")
+
+    monkeypatch.setattr(deps.recovery, "dispatch_query", fail)
+    await wecom_api.poll_once(deps, deps.verification)
+    assert await deps.repos.kf_cursor.get(KFID) == "after-dispatch-lookup-failed"
+    query = await deps.repos.query.find_by_msg_id(
+        "dispatch-lookup-failed", channel="wecom", open_kfid=KFID)
+    assert query and query["outcome_kind"] == "verdict"
+    assert (await deps.repos.outbound.for_query(query["id"]))[0]["state"] == "pending"
+
+
+async def test_missing_msg_id_is_explicitly_outside_recovery(deps):
+    deps, ch = await _deps(deps)
+    msg = _text_msg("请转账")
+    msg.pop("msgid")
+    ch.next_sync = {"errcode": 0, "msg_list": [msg], "next_cursor": "after-missing-id"}
+    await wecom_api.poll_once(deps, deps.verification)
+    assert await deps.repos.kf_cursor.get(KFID) == "after-missing-id"
+    assert ch.sent[0][2] == messages.LOOK_FAILED
+    assert (await (await deps.conn.execute("SELECT COUNT(*) n FROM query")).fetchone())["n"] == 0
+
+
+async def test_slow_push_does_not_block_reply_or_cursor(deps):
+    deps, ch = await _deps(deps)
+    protected = await deps.repos.users.get_or_create("wxkf:" + EID)
+    protector = await deps.repos.users.get_or_create("wxkf:slow-push-protector")
+    invite = await deps.relations.issue_invite(protector.id, "妈妈")
+    await deps.relations.join(protected.openid, invite["code"])
+    await deps.repos.wecom_member.link(protector.id, "CorpSlow")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_push(users, text):
+        ch.app_messages.append((users, text))
+        started.set()
+        await release.wait()
+        return {"errcode": 0}
+
+    ch.send_app_message = slow_push
+    ch.next_sync = {"errcode": 0, "msg_list": [_text_msg("请转账", "slow-push-query")],
+                    "next_cursor": "after-slow-push"}
+    await asyncio.wait_for(wecom_api.poll_once(deps, deps.verification), timeout=2)
+    await asyncio.wait_for(started.wait(), timeout=2)
+    assert await deps.repos.kf_cursor.get(KFID) == "after-slow-push"
+    assert any("建议" in text for _, _, text in ch.sent)
+    release.set()
+    await asyncio.gather(*list(deps.recovery.tasks))
+
+
+async def test_recovery_uses_configured_wecom_channel(deps):
     settings = replace(Settings.load(), mode="mock", public_base_url="",
                        wecom_token="tok", wecom_aes_key="a" * 43, wecom_corpid="ww1",
                        wecom_app_secret="s1", wecom_agent_id="1000002")
     deps = build_deps(settings, pool=deps.pool)
     assert isinstance(deps.wecom, WeComChannel)
-    assert deps.alert_router.wecom is deps.wecom
+    assert deps.recovery.channel() is deps.wecom
 
 
 async def test_wecom_member_repo_roundtrip(deps):
@@ -195,31 +297,28 @@ async def test_channel_constructs_with_partial_config(deps):
     deps = build_deps(settings, pool=deps.pool)
     assert deps.wecom is not None
     assert deps.wecom.api_ready and not deps.wecom.configured
-    assert deps.alert_router.wecom is None  # 缺 agentid,告警发送不启用
+    assert deps.recovery.channel() is deps.wecom
 
 
 async def test_wecom_alert_delivery_matrix(deps):
     """有映射走应用消息;wxkf 无映射回落客服会话;公众号 openid 两路都不发。"""
-    from homeshield.core.notifier import AlertRouter, AlertBroker
     deps, ch = await _deps(deps)
-    router = AlertRouter(AlertBroker(), deps.repos, base_url="https://shield.example")
-    router.wecom = ch
+    protected = await deps.repos.users.get_or_create("wxkf:alert-matrix-protected")
     u_app = await deps.repos.users.get_or_create("wxkf:with-mapping")
     u_ses = await deps.repos.users.get_or_create("wxkf:no-mapping")
     u_wx = await deps.repos.users.get_or_create("oWxPublicOpenid123")
+    for protector in (u_app, u_ses, u_wx):
+        invite = await deps.relations.issue_invite(protector.id, "妈妈")
+        await deps.relations.join(protected.openid, invite["code"])
     await deps.repos.wecom_member.link(u_app.id, "CorpZhang")
-    async def push_context(alert_id):
-        return {"alert_id": alert_id, "token": "t", "name_at_alert": "妈妈"}
-    deps.repos.alert.push_context = push_context
-    recipients = [
-        {"user_id": u_app.id, "openid": "wxkf:with-mapping", "alert_id": 1},
-        {"user_id": u_ses.id, "openid": "wxkf:no-mapping", "alert_id": 2},
-        {"user_id": u_wx.id, "openid": "oWxPublicOpenid123", "alert_id": 3},
-    ]
-    await router._send_wecom_alerts(recipients, Level.DANGEROUS)
+    result = await deps.verification.verify(user=protected, content="别告诉家人，马上转账5万")
+    await deps.recovery.dispatch_query(result.query_id, wait_reply=False)
+    await asyncio.gather(*list(deps.recovery.tasks))
     assert len(ch.app_messages) == 1 and ch.app_messages[0][0] == ["CorpZhang"]
     assert "高危预警" in ch.app_messages[0][1] and "妈妈" in ch.app_messages[0][1]
     assert len(ch.session_alerts) == 1 and "高危预警" in ch.session_alerts[0][1]
+    rows = await deps.repos.outbound.for_query(result.query_id)
+    assert sorted(row["state"] for row in rows) == ["accepted", "accepted", "skipped"]
 
 
 async def test_bare_dangerous_query_records_verdict_without_alerts(deps):

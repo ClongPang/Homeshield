@@ -6,6 +6,7 @@ import pytest
 from homeshield.core.errors import ValidationError
 from homeshield.core.feedback import CorrectionService
 from homeshield.core.models import Level, Mode
+from homeshield.core.repo import repository_transaction
 
 
 async def _case_data(deps, level=Level.DANGEROUS, protector_count=0):
@@ -17,9 +18,10 @@ async def _case_data(deps, level=Level.DANGEROUS, protector_count=0):
         _, rid, _ = await deps.relations.join(queryer.openid, invite["code"])
         await deps.repos.relation.update(rid, queryer.id, inverse_name=f"称呼{i}")
     query_id = await deps.repos.query.insert(queryer.id, "text", "这是一条原查询内容", None)
-    verdict_id = await deps.repos.verdict.insert(query_id, level, [], [], "原始理由", "原始回复", 1, Mode.MOCK)
-    if level is Level.DANGEROUS:
-        await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
+    async with repository_transaction(deps.repos):
+        verdict_id = await deps.repos.verdict.insert(query_id, level, [], [], "原始理由", "原始回复", 1, Mode.MOCK)
+        if level is Level.DANGEROUS:
+            await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
     return queryer, protectors, query_id, verdict_id
 
 

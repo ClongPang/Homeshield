@@ -58,7 +58,7 @@ async def test_cases_cover_every_class_3x():
 async def test_fr3_gate_a_smoke_set_over_90():
     """Gate A:规格 90% 线,作用在人工标注的国内话术冷启动集。"""
     labeled = [
-        s for s in load_dataset("data/samples/samples.jsonl")
+        s for s in load_dataset("data/datasets/core/samples.jsonl")
         if s.label.value == "scam" and s.scam_type
     ]
     rate, misses = await _hit_rate(labeled)
@@ -73,7 +73,7 @@ async def test_fr3_gate_b_proxy_floor_55():
     这部分不追平,语义泛化由 EMBED 通道与真实回流解决。
     """
     labeled = [
-        s for s in load_dataset("data/samples/fraud_r1_base.jsonl")
+        s for s in load_dataset("data/datasets/derived/fraud_r1/base.jsonl")
         if s.label.value == "scam" and s.scam_type
     ]
     rate, misses = await _hit_rate(labeled)
@@ -82,7 +82,7 @@ async def test_fr3_gate_b_proxy_floor_55():
 
 async def test_fr3_hit_rate_on_benign_hard_not_scam_biased():
     """对照:硬正常样本的 top-3 不应系统性指向单一类目(检索不应给 judge 制造锚定)。"""
-    labeled = list(load_dataset("data/samples/benign_hard.jsonl"))
+    labeled = list(load_dataset("data/datasets/core/benign_hard.jsonl"))
     retr = Retriever(_cases(), None, top_k=3)
     uniform = 0
     for s in labeled:

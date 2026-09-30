@@ -1,6 +1,7 @@
 """Personal-token APIs for directed relations, alerts, queries and correction votes."""
 import asyncio
 import json
+import logging
 import time
 
 from fastapi import APIRouter, HTTPException, Query
@@ -8,10 +9,12 @@ from fastapi.responses import StreamingResponse
 
 from homeshield.api.schemas import CorrectionIn, InviteIn, QueryIn, RelationPatchIn, TokenIn
 from homeshield.core.deps import Deps
-from homeshield.core.errors import DuplicateMessage, HomeshieldError
+from homeshield.core.errors import DuplicateMessage, HomeshieldError, ValidationError
 from homeshield.core.feedback import CorrectionService
 from homeshield.core.models import User
 from homeshield.core.verification import VerificationService
+
+logger = logging.getLogger(__name__)
 
 # 控制台直接展示 detail;服务层机器码在此收口为可读文案(v2.8 先例),未知错误兜底同口径
 CORRECTION_ERROR_TEXT = {
@@ -46,13 +49,19 @@ def build_relation_router(deps: Deps, verification: VerificationService,
         try:
             result = await verification.verify(user=user, content=body.content, content_type=body.content_type,
                                                channel="web", msg_id=body.msg_id)
-        except DuplicateMessage as exc:
+        except (DuplicateMessage, ValidationError) as exc:
             raise HTTPException(409, "duplicate message") from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         if result.duplicate or result.result is None:
             raise HTTPException(409, "duplicate message")
         pipeline_result = result.result
+        if pipeline_result.verdict_id is not None:
+            try:
+                await deps.recovery.dispatch_query(pipeline_result.query_id, wait_reply=False)
+            except Exception:
+                logger.warning("query outbound scheduling failed query_id=%s",
+                               pipeline_result.query_id, exc_info=True)
         return {
             "kind": result.kind,
             "query_id": pipeline_result.query_id,

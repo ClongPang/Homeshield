@@ -5,7 +5,7 @@
 必须在该对照集上证明 FPR 不升,而覆盖不足的对照集会让 FPR 数字失真。
 
 用法:
-    uv run python -m eval.contrast --dataset data/samples/benign_hard.jsonl
+    uv run python -m eval.contrast --dataset data/datasets/core/benign_hard.jsonl
 
 行格式:eval.dataset.Sample 兼容(JSONL),扩展字段 mechanics 为人工标注
 的机制 id 列表;缺省时按 mechanics.markers 子串自动推导(仅用于覆盖统计)。
@@ -99,7 +99,7 @@ def render_contrast_report(report: dict) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser("contrast")
-    ap.add_argument("--dataset", default="data/samples/benign_hard.jsonl")
+    ap.add_argument("--dataset", default="data/datasets/core/benign_hard.jsonl")
     args = ap.parse_args()
     print(render_contrast_report(check_contrast_dataset_coverage(args.dataset)))
 

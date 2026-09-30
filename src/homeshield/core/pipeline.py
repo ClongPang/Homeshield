@@ -48,7 +48,7 @@ from homeshield.core.models import (
     max_level,
 )
 from homeshield.core.reply import ReplyGenerator, add_delivery_notice
-from homeshield.core.repo import Repos
+from homeshield.core.repo import Repos, repository_transaction
 from homeshield.core.retrieval import Retriever
 
 logger = logging.getLogger(__name__)
@@ -175,7 +175,7 @@ class Pipeline:
     supply_window_seconds: int = 604800
     supply_max_items: int = 10
 
-    async def run(self, message: Message, query_id: int) -> PipelineResult:
+    async def run(self, message: Message, query_id: int, *, claim_token: int | None = None) -> PipelineResult:
         t0 = time.monotonic()
         try:
             text = await self._extract_message_text(message)
@@ -188,16 +188,31 @@ class Pipeline:
             extraction = await self._extract_features_and_cases(conversation)
         except DegradeError as de:
             # 阶段1-2 失败(如图片转写):尚无任何确定性结论,整体降级
-            return self._build_degraded_result(query_id, de.user_message, t0)
+            result = self._build_degraded_result(query_id, de.user_message, t0)
+            await self.commit_outcome(query_id, claim_token, "degraded", degraded_reply=result.reply)
+            return result
         supplied = await self._supply(message, query_id, text) if self.config.supply_features else []
         try:
             verdict = await self._judge_conversation(conversation, extraction)
         except DegradeError as de:
             # 阶段3 失败:规则下限不依赖 LLM,是确定性结论,降级口径不得低于它
-            return self._build_degraded_result(query_id, de.user_message, t0, floor=extraction.rule_floor)
+            result = self._build_degraded_result(query_id, de.user_message, t0, floor=extraction.rule_floor)
+            await self.commit_outcome(query_id, claim_token, "degraded", degraded_reply=result.reply)
+            return result
         return await self._persist_verdict_and_publish_event(
-            message, query_id, conversation.render(), extraction, verdict, t0, supplied
+            message, query_id, conversation.render(), extraction, verdict, t0, supplied,
+            claim_token=claim_token,
         )
+
+    async def commit_outcome(self, query_id: int, claim_token: int | None, kind: str,
+                             *, degraded_reply: str | None = None) -> None:
+        """降级/ACK 的唯一提交入口:世代核对、结果标记与 reply 意图同事务。
+        verdict 走 _persist_verdict_and_publish_event;两者构成规格的结果事实入口。"""
+        async with repository_transaction(self.repos):
+            query = await self.repos.query.lock_for_result(query_id, claim_token)
+            await self.repos.query.set_outcome(query_id, kind, degraded_reply=degraded_reply)
+            if query["channel"] == "wecom":
+                await self.repos.outbound.create_reply(query_id, int(query["user_id"]))
 
     # ---- 阶段 1:归一化 ------------------------------------------------
     async def _extract_message_text(self, message: Message) -> str:
@@ -361,6 +376,8 @@ class Pipeline:
         verdict: JudgeOutput,
         t0: float,
         supplied: list[SupplyItem] | None = None,
+        *,
+        claim_token: int | None = None,
     ) -> PipelineResult:
         supplied = supplied or []
         synthetic = []
@@ -420,24 +437,37 @@ class Pipeline:
                            "matched_values": item.matched_values} for item in supplied],
                 "synthetic_ids": [f.id for f in synthetic], "floor_level": cross_floor.value,
             }, ensure_ascii=False)
-        verdict_id = await self.repos.verdict.insert(
-            query_id,
-            verdict.level,
-            cited,
-            [f.model_dump() for f in extraction.features + synthetic],
-            verdict.reason,
-            reply,
-            latency_ms,
-            self.judge.mode if isinstance(self.judge.mode, Mode) else Mode(self.judge.mode),
-            context_snapshot=snapshot,
-        )
-        await self.bus.publish(
-            event := VerdictCompleted(
-                message=message, verdict=verdict, reply=reply,
-                query_id=query_id, verdict_id=verdict_id,
+        async with repository_transaction(self.repos):
+            query = await self.repos.query.lock_for_result(query_id, claim_token)
+            verdict_id = await self.repos.verdict.insert(
+                query_id,
+                verdict.level,
+                cited,
+                [f.model_dump() for f in extraction.features + synthetic],
+                verdict.reason,
+                reply,
+                latency_ms,
+                self.judge.mode if isinstance(self.judge.mode, Mode) else Mode(self.judge.mode),
+                context_snapshot=snapshot,
             )
-        )
-        user_reply = add_delivery_notice(reply, event.queryer_notice)
+            fanout = await self.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
+            recipients = fanout["recipients"]
+            names = [r["inverse_name"] or f"联防者 #{r['relation_id']}" for r in recipients]
+            notice = "查询提醒已加入" + "、".join(names) + "的提醒列表" if names else ""
+            await self.repos.query.set_outcome(query_id, "verdict", delivery_notice=notice)
+            for recipient in recipients:
+                await self.repos.outbound.create_push(
+                    query_id, int(recipient["alert_id"]), int(recipient["user_id"])
+                )
+            if query["channel"] == "wecom":
+                await self.repos.outbound.create_reply(query_id, int(query["user_id"]))
+        event = VerdictCompleted(message=message, verdict=verdict, reply=reply,
+                                 query_id=query_id, verdict_id=verdict_id)
+        try:
+            await self.bus.publish(event)
+        except Exception:
+            logger.warning("post-commit verdict event failed; durable alert remains", exc_info=True)
+        user_reply = add_delivery_notice(reply, notice)
         return PipelineResult(
             query_id=query_id,
             verdict_id=verdict_id,

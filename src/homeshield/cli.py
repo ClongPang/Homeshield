@@ -2,8 +2,10 @@
 import argparse
 import asyncio
 import json
+import logging
 
 from homeshield.core.config import Settings
+from homeshield.core.db import migrate_crash_recovery
 from homeshield.core.deps import build_deps, initialize_deps, make_pipeline
 from homeshield.core.logsetup import setup_logging
 from homeshield.core.models import ContentType, Message
@@ -15,6 +17,11 @@ def main() -> None:
     parser = argparse.ArgumentParser("homeshield")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init-db", help="create the current schema")
+    sub.add_parser("migrate-crash-recovery", help="upgrade v4 data during a stopped-worker maintenance window")
+    sub.add_parser("outbound-failed", help="list failed durable deliveries")
+    sub.add_parser("outbound-status", help="show pending, expired and failed delivery backlog")
+    requeue = sub.add_parser("outbound-requeue", help="retry one failed durable delivery")
+    requeue.add_argument("--id", type=int, required=True)
     link = sub.add_parser("link", help="print a user's personal console link")
     link.add_argument("--user-id", type=int, required=True)
     link.add_argument("--base-url", default="http://localhost:8000")
@@ -28,9 +35,22 @@ def main() -> None:
 async def _run(args) -> None:
     deps = build_deps(Settings.load())
     try:
+        if args.cmd == "migrate-crash-recovery":
+            await migrate_crash_recovery(deps.pool)
+            print("schema v5 ready; inspect historical legacy rows before resuming workers")
+            return
         await initialize_deps(deps)
         if args.cmd == "init-db":
             print("db ready")
+        elif args.cmd == "outbound-failed":
+            print(json.dumps(await deps.repos.outbound.failed(), ensure_ascii=False, indent=2))
+        elif args.cmd == "outbound-status":
+            print(json.dumps(await deps.repos.outbound.backlog_status(), ensure_ascii=False))
+        elif args.cmd == "outbound-requeue":
+            if not await deps.repos.outbound.requeue(args.id):
+                raise SystemExit("outbound is not failed or does not exist")
+            logging.getLogger(__name__).warning("manual outbound requeue id=%s", args.id)
+            print(f"outbound {args.id} queued")
         elif args.cmd == "link":
             user = await deps.repos.users.get(args.user_id)
             if user is None: raise SystemExit("user not found")

@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from homeshield.core.models import Level, Mode
+from homeshield.core.repo import repository_transaction
 from homeshield.core.relations import RelationError, RelationService
 
 
@@ -113,8 +114,9 @@ async def test_query_snapshot_alert_mute_rename_and_ended_access(deps):
     await deps.repos.relation.update(r2, p2.id, mute=True)
     qid = await deps.repos.query.insert(queryer.id, "text", "转账", None)
     assert {r["id"] for r in await deps.repos.query.list_relations_for_query(qid)} == {r1, r2}
-    vid = await deps.repos.verdict.insert(qid, Level.DANGEROUS, [], [], "reason", "reply", 1, Mode.MOCK)
-    fanout = await deps.repos.alert.record_alerts_for_verdict(vid, qid)
+    async with repository_transaction(deps.repos):
+        vid = await deps.repos.verdict.insert(qid, Level.DANGEROUS, [], [], "reason", "reply", 1, Mode.MOCK)
+        fanout = await deps.repos.alert.record_alerts_for_verdict(vid, qid)
     assert len(fanout["recipients"]) == 2
     alert1 = next(r for r in fanout["recipients"] if r["relation_id"] == r1)
     alert2 = next(r for r in fanout["recipients"] if r["relation_id"] == r2)
@@ -137,8 +139,9 @@ async def test_relation_added_after_intake_does_not_receive_old_query(deps):
     qid = await deps.repos.query.insert(queryer.id, "text", "danger", None)
     protector = await deps.repos.users.get_or_create("snapshot:p")
     await _link(deps, protector, queryer)
-    vid = await deps.repos.verdict.insert(qid, Level.DANGEROUS, [], [], "reason", "reply", 1, Mode.MOCK)
-    fanout = await deps.repos.alert.record_alerts_for_verdict(vid, qid)
+    async with repository_transaction(deps.repos):
+        vid = await deps.repos.verdict.insert(qid, Level.DANGEROUS, [], [], "reason", "reply", 1, Mode.MOCK)
+        fanout = await deps.repos.alert.record_alerts_for_verdict(vid, qid)
     assert fanout["recipients"] == []
     assert (await (await deps.conn.execute("SELECT COUNT(*) FROM alert")).fetchone())[0] == 0
 
@@ -150,9 +153,9 @@ async def test_ended_snapshot_relation_and_late_replacement_do_not_receive_old_q
     query_id = await deps.repos.query.insert(queryer.id, "text", "危险查询", None)
     assert await deps.relations.end(protector.id, old_relation) == "by_protector"
     new_relation, _ = await _link(deps, protector, queryer, "新称呼")
-    verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "reason", "reply", 1, Mode.MOCK)
-
-    fanout = await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
+    async with repository_transaction(deps.repos):
+        verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "reason", "reply", 1, Mode.MOCK)
+        fanout = await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
 
     assert fanout["recipients"] == []
     assert (await deps.repos.relation.get(new_relation))["ended_at"] is None
@@ -165,7 +168,8 @@ async def test_alert_record_racing_with_relation_end_never_leaves_sendable_alert
     protector = await deps.repos.users.get_or_create("alert-race:protector")
     relation_id, _ = await _link(deps, protector, queryer, "家人")
     query_id = await deps.repos.query.insert(queryer.id, "text", "危险查询", None)
-    verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "reason", "reply", 1, Mode.MOCK)
+    async with repository_transaction(deps.repos):
+        verdict_id = await deps.repos.verdict.insert(query_id, Level.DANGEROUS, [], [], "reason", "reply", 1, Mode.MOCK)
     ready = 0
     gate = asyncio.Event()
 
@@ -177,7 +181,8 @@ async def test_alert_record_racing_with_relation_end_never_leaves_sendable_alert
 
     async def record():
         await rendezvous()
-        return await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
+        async with repository_transaction(deps.repos):
+            return await deps.repos.alert.record_alerts_for_verdict(verdict_id, query_id)
 
     async def end():
         await rendezvous()

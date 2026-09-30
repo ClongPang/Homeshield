@@ -24,7 +24,6 @@ class VerdictCompleted:
     reply: str
     query_id: int
     verdict_id: int
-    queryer_notice: str = ""
 
 
 Handler = Callable[[Any], Any] # 接收 1 个任意类型参数、返回任意类型的函数

@@ -5,6 +5,7 @@ customer-service channel pulls messages on a poller and replies via kf API.
 Routes: api/relations.py (personal data) and api/wecom.py (WeCom channel).
 """
 import asyncio
+import logging
 import pathlib
 from contextlib import asynccontextmanager
 
@@ -22,6 +23,7 @@ from homeshield.core.pg_events import notification_bridge
 from homeshield.core.push import PushService
 
 WEB_DIR = pathlib.Path(__file__).parent / "web"
+logger = logging.getLogger(__name__)
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.load()
@@ -31,20 +33,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await initialize_deps(deps)
+        try:
+            await deps.recovery.sweep_once()
+        except Exception:
+            # 启动瞬间 DB 抖动不应阻止进程起来;周期扫描会补上这一轮
+            logger.warning("startup recovery sweep failed; periodic sweep will retry", exc_info=True)
+        recovery_task = asyncio.create_task(deps.recovery.run())
         bridge = asyncio.create_task(notification_bridge(deps))
         poller = None
         if deps.wecom is not None and deps.wecom.api_ready:
             poller = asyncio.create_task(wecom_poller(deps, deps.verification))
         app.state.notification_task = bridge
         app.state.poller_task = poller
+        app.state.recovery_task = recovery_task
         try:
             yield
         finally:
-            tasks = [task for task in (poller, bridge) if task is not None]
+            tasks = [task for task in (poller, bridge, recovery_task) if task is not None]
             for task in tasks:
                 task.cancel()
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            await deps.recovery.close()
             await deps.pool.close()
 
     app = FastAPI(title="Homeshield", lifespan=lifespan)   # 这个 app 就是后续 uvicorn module:app 启动时引用的对象
