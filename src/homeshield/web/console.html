@@ -29,9 +29,9 @@ main{max-width:850px;margin:auto;padding:20px}.top{display:flex;justify-content:
 <section id="votes" class="section"><h2>待我投票</h2><div id="voteList"></div></section>
 <section id="push" class="section">
   <div class="card"><h2>推送通道</h2><div id="pushStatus"></div><div id="pushReason" class="notice hidden"></div><div id="pushActions" class="actions"></div>
-  <p class="muted">开通后，你护着的家人的查询预警会经「服务通知」实时送达你的微信，不再依赖客服会话窗口。</p></div>
+  <p class="muted">开通后，你护着的家人的查询预警会经「服务通知」实时送达你的微信。</p></div>
   <div id="pushQrCard" class="card hidden"><h2>第一步：关注微信插件</h2><div id="pushQrImg"></div><p class="muted">扫码或长按识别关注插件；这是接收预警的入口，关注后请继续完成绑定。</p></div>
-  <div id="pushMobileCard" class="card hidden"><h2>改用手机号开通</h2><div class="row"><input id="pushMobile" type="text" maxlength="11" placeholder="你在企业通讯录里的手机号"/><button id="pushEnroll">提交</button></div><div id="pushMobileMsg" class="muted"></div><p class="muted">微信授权走不通时的备用方式：填你在企业通讯录里的手机号即可绑定。</p></div>
+  <div id="pushMobileCard" class="card hidden"><h2>使用手机号开通</h2><div class="row"><input id="pushMobile" type="text" maxlength="11" placeholder="接收微信消息的手机号"/><button id="pushEnroll">提交</button></div><div id="pushMobileMsg" class="muted"></div></div>
 </section>
 </main><script>
 const token=new URLSearchParams(location.search).get("token")||"";const $=id=>document.getElementById(id);let relations={guardings:[],guardians:[]},eventSource=null;
@@ -56,7 +56,7 @@ const pushErrors={not_member:"未检测到企业成员身份。请确认你已�
 async function loadPush(){const d=await api("/api/push/status");const box=$("pushStatus");box.replaceChildren(node("b",d.text));if(d.bound_via)box.append(node("div",`绑定方式：${d.bound_via==="oauth"?"微信授权":"手机号"}`,"meta"));
 const reason=$("pushReason");if(d.reason){reason.textContent=d.reason;reason.classList.remove("hidden")}else reason.classList.add("hidden");
 const act=$("pushActions");act.replaceChildren();
-if(d.next==="provision"){if(d.oauth_available)act.append(btn("开通推送",async()=>{location.href=`/wecom/oauth/start?token=${encodeURIComponent(token)}`}));else box.append(node("div","微信授权开通暂不可用（需 HTTPS 且可信域名备案配置完成），可先用下方手机号开通。","muted"));if(d.mobile_available)$("pushMobileCard").classList.remove("hidden");else $("pushMobileCard").classList.add("hidden")}
+if(d.next==="provision"){if(d.oauth_available)act.append(btn("开通推送",async()=>{location.href=`/wecom/oauth/start?token=${encodeURIComponent(token)}`}));if(d.mobile_available)$("pushMobileCard").classList.remove("hidden");else $("pushMobileCard").classList.add("hidden")}
 if(d.next==="confirm")act.append(btn("我已收到测试消息，确认",async()=>{const r=await api("/api/push/verify",{method:"POST",body:{}});msg(r.text);await loadPush()}));
 if(d.next==="retest")act.append(btn("重发测试消息",async()=>{const r=await api("/api/push/retest",{method:"POST",body:{}});msg(r.text);await loadPush()}));
 if(d.status!=="unbound")act.append(btn("关闭推送",async()=>{if(!confirm("关闭后，预警将不再主动推送到你的微信，确定？"))return;const r=await api("/api/push/unbind",{method:"POST",body:{}});msg(r.text);await loadPush()},"secondary"));

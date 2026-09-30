@@ -68,7 +68,7 @@ async def handle_relation_command(relations: RelationService, repos: Repos, sett
         incoming = [f"#{r['id']} {r['name']}" for r in data["guardians"]]
         result = "我护着：" + ("、".join(outgoing) if outgoing else "暂无") + "\n护着我：" + ("、".join(incoming) if incoming else "暂无")
         if not outgoing and not incoming:
-            result += "\n还没有联防。回复「邀请 称呼」发起联防；也可以直接转发可疑消息给我查。"
+            result += "\n还没有联防。回复「邀请 称呼（称呼将用于后续告警消息）」发起联防；也可以直接转发可疑消息给我查。"
         url = user.entry_url(settings.public_base_url)
         if url:
             result += f"\n个人控制台：{url}"
