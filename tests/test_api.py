@@ -197,3 +197,22 @@ async def test_stream_event_is_user_scoped_and_contains_alert_relation_snapshot(
             await stream.aclose()
 
     await read_event()
+
+
+async def test_kf_landing_page_and_qr_asset(client, tmp_path):
+    """客服入口页公开可访问;二维码资产缺失时 404,放置后按扩展名给出图片类型。"""
+    page = await client.get("/kf")
+    assert page.status_code == 200 and "小盾" in page.text
+    assert (await client.get("/kf/qr")).status_code == 404  # 资产未放置时如实降级
+
+    qr = tmp_path / "kf.jpg"
+    qr.write_bytes(b"\xff\xd8fake-jpeg")
+    settings = replace(Settings.load(), mode="mock", wecom_kf_qr_path=str(qr),
+                       wecom_corpid="", wecom_agent_id="", wecom_app_secret="", wecom_kf_secret="",
+                       wecom_token="", wecom_aes_key="", public_base_url="")
+    app = create_app(settings)
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            resp = await c.get("/kf/qr")
+            assert resp.status_code == 200
+            assert resp.headers["content-type"].startswith("image/jpeg")

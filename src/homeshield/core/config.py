@@ -39,6 +39,7 @@ class Settings:
     push_self_enroll: bool = False  # 手机号未命中时是否自助入录;通讯录写权限属企业级信任决策,默认关
     push_state_ttl: int = 600  # OAuth 绑定凭证有效期(秒),一次性防重放
     wecom_plugin_qr_path: str = "deploy/assets/wecom_plugin_qr.png"  # 微信插件邀请二维码资产,运营者可替换
+    wecom_kf_qr_path: str = "deploy/assets/wecom_kf_qr.png"  # 微信客服入口二维码资产(/kf 落地页展示)
     public_base_url: str = ""
     max_relations: int = 10
     invite_code_ttl_days: int = 7
@@ -88,6 +89,7 @@ class Settings:
             push_self_enroll=os.getenv("PUSH_SELF_ENROLL", "false").strip().lower() in ("1", "true", "yes", "on"),
             push_state_ttl=int(os.getenv("PUSH_STATE_TTL", "600")),
             wecom_plugin_qr_path=os.getenv("WECOM_PLUGIN_QR_PATH", "deploy/assets/wecom_plugin_qr.png"),
+            wecom_kf_qr_path=os.getenv("WECOM_KF_QR_PATH", "deploy/assets/wecom_kf_qr.png"),
             public_base_url=os.getenv("PUBLIC_BASE_URL", ""),
             max_relations=int(os.getenv("MAX_RELATIONS", "10")),
             invite_code_ttl_days=int(os.getenv("INVITE_CODE_TTL_DAYS", "7")),

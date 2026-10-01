@@ -10,7 +10,7 @@ import pathlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from homeshield.api.push import build_push_router
 from homeshield.api.relations import build_relation_router
@@ -82,6 +82,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/console")
     async def console():
         return FileResponse(WEB_DIR / "console.html")
+
+    @app.get("/kf")
+    async def kf_page():
+        """客服入口落地页:公开展示小盾二维码,新用户扫码/长按识别进会话。"""
+        return FileResponse(WEB_DIR / "kf.html")
+
+    @app.get("/kf/qr")
+    async def kf_qr():
+        path = pathlib.Path(settings.wecom_kf_qr_path)
+        if not path.is_file():
+            return PlainTextResponse("客服二维码未配置", status_code=404)
+        media_type = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+        return FileResponse(path, media_type=media_type)
 
     @app.get("/alert/{alert_id}")
     async def alert_page(alert_id: int):
