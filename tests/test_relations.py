@@ -21,7 +21,8 @@ async def test_invitation_creates_one_directed_relation_and_reverse_is_independe
     rel = await deps.repos.relation.get(ab)
     assert (rel["protector_user_id"], rel["protected_user_id"], rel["name"]) == (a.id, b.id, "妈妈")
     assert (await deps.relations.list_for_user(a.id))["guardings"][0]["name"] == "妈妈"
-    assert (await deps.relations.list_for_user(b.id))["guardians"][0]["name"] == f"联防者 #{ab}"
+    assert (await deps.relations.list_for_user(b.id))["guardians"][0]["name"] == "联防者"  # 未设置反向称呼的兜底,不内嵌编号
+    assert (await deps.relations.list_for_user(b.id))["guardians"][0]["inverse_name"] is None
     ba, _ = await _link(deps, b, a, "儿子")
     assert ba != ab
     assert len((await deps.relations.list_for_user(a.id))["guardings"]) == 1

@@ -122,7 +122,7 @@ class RelationRepo(_Repo):
             "SELECT id,name,mute,created_at FROM guard_relation WHERE protector_user_id=%s AND ended_at IS NULL ORDER BY id",
             (user_id,))).fetchall()
         guardians = await (await self.conn.execute(
-            "SELECT id,COALESCE(NULLIF(inverse_name,''),'联防者 #'||id) name FROM guard_relation "
+            "SELECT id,inverse_name,COALESCE(NULLIF(inverse_name,''),'联防者') name FROM guard_relation "
             "WHERE protected_user_id=%s AND ended_at IS NULL ORDER BY id", (user_id,))).fetchall()
         return {"guardings": [dict(r) for r in guardings], "guardians": [dict(r) for r in guardians]}
 

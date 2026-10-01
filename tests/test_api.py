@@ -95,7 +95,7 @@ async def test_invite_preview_and_personal_relationship_management(client):
     assert "token" not in preview.json()
     _, rid, _ = await deps.relations.join(b.openid, created["code"])
     assert (await client.get("/api/relations", params={"token": a.token})).json()["guardings"][0]["name"] == "妈妈"
-    assert (await client.get("/api/relations", params={"token": b.token})).json()["guardians"][0]["name"] == f"联防者 #{rid}"
+    assert (await client.get("/api/relations", params={"token": b.token})).json()["guardians"][0]["name"] == "联防者"  # 未设置反向称呼的兜底,不内嵌编号
     assert (await client.patch(f"/api/relations/{rid}", json={"token": b.token, "inverse_name": "儿子"})).status_code == 200
     assert (await client.get("/api/relations", params={"token": b.token})).json()["guardians"][0]["name"] == "儿子"
     invites = (await client.get("/api/relations/invites", params={"token": a.token})).json()["invites"]

@@ -49,7 +49,7 @@ async def handle_relation_command(relations: RelationService, repos: Repos, sett
                 "already_exists": "这条联防关系已经建立，无需重复绑定。",
                 "limit": f"你或邀请者的活跃联防已达上限（{settings.max_relations} 条）。",
             }.get(exc.reason, "绑定暂时未完成，请稍后重试。")
-        return ("已建立联防关系。对方会收到你的查询提醒，提醒里以 TA 给你的称呼指代你，可在控制台查看与设置；"
+        return ("已建立联防关系。对方会收到你的查询提醒，提醒里以 TA 给你的称呼指代你，你可在控制台设置自己对 TA 的称呼；"
                 "你主动纠正其他判定时，原查询会供其投票查看；"
                 "回复「我的联防」查看，回复「解除 #" + str(relation_id) + "」可停止。")
     if invite_name is not None:
@@ -69,6 +69,8 @@ async def handle_relation_command(relations: RelationService, repos: Repos, sett
         result = "我护着：" + ("、".join(outgoing) if outgoing else "暂无") + "\n护着我：" + ("、".join(incoming) if incoming else "暂无")
         if not outgoing and not incoming:
             result += "\n还没有联防。回复「邀请 称呼（称呼将用于后续告警消息）」发起联防；也可以直接转发可疑消息给我查。"
+        elif any(r["inverse_name"] in (None, "") for r in data["guardians"]):
+            result += "\n「护着我」显示的是你对 TA 的称呼，还没设置过的显示为「联防者」，可在控制台设置。"
         url = user.entry_url(settings.public_base_url)
         if url:
             result += f"\n个人控制台：{url}"

@@ -348,6 +348,7 @@ async def test_invite_bind_direction_and_old_group_hint(deps):
     await wecom_api.handle_wecom_messages(deps, deps.verification, [bind_msg])
     bind_reply = next(t for _, _, t in ch.sent if "已建立联防关系" in t)
     assert "解除" in bind_reply and "投票查看" in bind_reply
+    assert "设置自己对 TA 的称呼" in bind_reply  # 保守口径:不回显邀请方的称呼,只给出口
     old_msg = dict(bind_msg, msgid="old1", text={"content": "我的群"})
     await wecom_api.handle_wecom_messages(deps, deps.verification, [old_msg])
     assert next(t for _, _, t in ch.sent if t.startswith("命令已更新"))
@@ -356,6 +357,12 @@ async def test_invite_bind_direction_and_old_group_hint(deps):
     rel = await (await deps.conn.execute('SELECT * FROM guard_relation WHERE protector_user_id=%s AND protected_user_id=%s',
                             (protector.id, protected.id))).fetchone()
     assert rel and rel["name"] == "妈妈"
+    # 护着我侧兜底(v2.34 验收期):未设置反向称呼时显示"联防者"(不内嵌编号)并给设置指引
+    mine_msg = dict(bind_msg, msgid="mine1", text={"content": "我的联防"})
+    await wecom_api.handle_wecom_messages(deps, deps.verification, [mine_msg])
+    mine_reply = next(t for _, _, t in ch.sent if t.startswith("我护着：暂无"))
+    assert f"护着我：#{rel['id']} 联防者" in mine_reply
+    assert "还没设置过的显示为「联防者」" in mine_reply
 
 
 async def test_my_relations_empty_shows_guidance_and_link(deps):
