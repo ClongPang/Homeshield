@@ -36,6 +36,32 @@ _STRONG_PHONE_RE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _STRONG_CARD_RE = re.compile(r"(?<!\d)\d{16,19}(?!\d)")
 
 
+def redact_retrieval_text(text: str) -> str:
+    """遮蔽检索副本中的规则识别强值，保留原文和标点。"""
+    spans: list[tuple[int, int, str]] = []
+    url_spans: list[tuple[int, int]] = []
+    for match in _STRONG_URL_RE.finditer(text):
+        value = re.split(r"[，。！？；、（）【】《》\"'<>]", match.group(0), maxsplit=1)[0]
+        stripped = value.rstrip(".,;:!?)]}/")
+        # 裁剪不得跌破 scheme:退化输入(如裸"https://")整段按原样遮蔽,不留残渣
+        if "://" not in stripped:
+            stripped = value
+        value = stripped
+        end = match.start() + len(value)
+        if end > match.start():
+            spans.append((match.start(), end, "链接"))
+            # 只豁免被"链接"替换覆盖的部分;贪婪 \S+ 越过标点吞进的号码仍需遮蔽
+            url_spans.append((match.start(), end))
+    for pattern in (_STRONG_PHONE_RE, _STRONG_CARD_RE):
+        for match in pattern.finditer(text):
+            if any(match.start() < end and match.end() > start for start, end in url_spans):
+                continue
+            spans.append((match.start(), match.end(), "账号"))
+    for start, end, replacement in sorted(spans, reverse=True):
+        text = text[:start] + replacement + text[end:]
+    return text
+
+
 def extract_strong_values(text: str) -> set[str]:
     values = set()
     for pattern, is_url in ((_STRONG_URL_RE, True), (_STRONG_PHONE_RE, False),

@@ -28,6 +28,8 @@ class Settings:
     chat_provider_name: str = ""  # 判定 / 特征补抽 / 回复
     transcribe_provider_name: str = ""  # 图片转写;留空回落 chat
     embed_provider_name: str = ""  # 向量检索;留空退化为纯关键词
+    embed_dimensions: int | None = None  # 截断维度(MRL);None=模型默认。切换须重嵌案例库并升 PIPELINE_VERSION
+    embed_batch_size: int = 20  # 单批条数;实测 v4/v3 端点仅收 10,qwen3.7 系收 20
     # 企业微信(微信客服):corpid/密钥用于 API 调用,token/aes_key 用于回调验签与加解密
     wecom_corpid: str = ""
     wecom_agent_id: str = ""
@@ -79,6 +81,8 @@ class Settings:
             chat_provider_name=os.getenv("CHAT_PROVIDER", "").upper(),
             transcribe_provider_name=os.getenv("TRANSCRIBE_PROVIDER", "").upper(),
             embed_provider_name=os.getenv("EMBED_PROVIDER", "").upper(),
+            embed_dimensions=(int(d) if (d := os.getenv("EMBED_DIMENSIONS", "").strip()) else None),
+            embed_batch_size=max(1, int(os.getenv("EMBED_BATCH_SIZE", "20"))),
             wecom_corpid=os.getenv("WECOM_CORPID", ""),
             wecom_agent_id=os.getenv("WECOM_AGENT_ID", ""),
             wecom_app_secret=os.getenv("WECOM_APP_SECRET", ""),

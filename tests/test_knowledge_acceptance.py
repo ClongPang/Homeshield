@@ -1,20 +1,14 @@
-"""FR-3 验收:骗术知识库完整性与 top-3 检索命中率(运行时 query 构造路径)。
-
-门限设计(防过拟合代理集,见《判定模型_设计教训》§4/§5):
-- Gate A(规格 90% 线):作用在**产品自有分布**——samples.jsonl 冷启动集(人工标注,
-  国内真实话术体裁);
-- Gate B(回归地板 60%):作用在 Fraud-R1 代理集——其境外体裁子集(约 1/3,美式服务
-  钓鱼等)超出中文长辈分布,命中率天花板受词汇脱节限制;地板只防回归,不冒充质量结论。
-  生产环境的语义泛化由 EMBED 向量通道承担,词汇缺口的最终解法是真实回流。
-"""
+"""FR-3 retrieval acceptance at the production top-2 setting."""
 import json
 from collections import Counter
 from pathlib import Path
 
-from homeshield.core.features import extract_rule_features
+import pytest
+
 from homeshield.core.knowledge.taxonomy import REGISTRY
-from homeshield.core.models import KbCase
-from homeshield.core.retrieval import Retriever
+from homeshield.core.models import Conversation, KbCase, Turn
+from homeshield.core.pipeline import extract_conversation_rule_specs
+from homeshield.core.retrieval import DEFAULT_TOP_K, Retriever, build_retrieval_query
 from homeshield.eval.dataset import load_dataset
 
 CASES_PATH = Path(__file__).resolve().parents[1] / "src/homeshield/core/knowledge/cases.json"
@@ -24,69 +18,74 @@ def _cases() -> list[KbCase]:
     return [KbCase(**c) for c in json.loads(CASES_PATH.read_text(encoding="utf-8"))]
 
 
-def _runtime_query(text: str) -> str:
-    """与 pipeline._extract_features_and_cases 完全一致的检索 query 构造。"""
-    specs = extract_rule_features(text)
-    return (" ".join(s.value for s in specs) + " " + text[:80]).strip()
+def _query(sample) -> str:
+    conv = (Conversation(turns=[Turn(text=text) for text in sample.turns])
+            if sample.turns else Conversation.from_marked(sample.text))
+    return build_retrieval_query(conv, extract_conversation_rule_specs(conv))
 
 
 async def _hit_rate(samples: list) -> tuple[float, list[str]]:
-    retr = Retriever(_cases(), None, top_k=3)
+    retriever = Retriever(_cases())
     hits, misses = 0, []
-    for s in samples:
-        got = await retr.search_cases(_runtime_query(s.text))
-        if any(c.scam_type == s.scam_type for c in got):
+    for sample in samples:
+        result = await retriever.search(_query(sample))
+        if any(hit.case.scam_type == sample.scam_type for hit in result.hits):
             hits += 1
         else:
-            misses.append(f"{s.id}({s.scam_type})")
-    return hits / len(samples), misses
+            misses.append(f"{sample.id}({sample.scam_type})")
+    return hits / len(samples) if samples else 0, misses
 
 
-async def test_registry_16_classes():
+async def test_registry_and_case_coverage():
     assert len(REGISTRY) == 16
-
-
-async def test_cases_cover_every_class_3x():
     cases = _cases()
-    by_type = Counter(c.scam_type for c in cases)
-    assert set(by_type) == set(REGISTRY), f"类目缺案例: {set(REGISTRY) - set(by_type)}"
-    assert min(by_type.values()) >= 3, f"每类 ≥3 条被违反: {by_type}"
-    for c in cases:
-        assert c.tactic and c.markers and c.advice and c.name
+    by_type = Counter(case.scam_type for case in cases)
+    assert set(by_type) == set(REGISTRY)
+    assert min(by_type.values()) >= 3
+    assert all(case.tactic and case.markers and case.advice and case.name for case in cases)
+    assert DEFAULT_TOP_K == 2
 
 
 async def test_fr3_gate_a_smoke_set_over_90():
-    """Gate A:规格 90% 线,作用在人工标注的国内话术冷启动集。"""
-    labeled = [
-        s for s in load_dataset("data/datasets/core/samples.jsonl")
-        if s.label.value == "scam" and s.scam_type
-    ]
-    rate, misses = await _hit_rate(labeled)
+    samples = [s for s in load_dataset("data/datasets/core/samples.jsonl")
+               if s.label.value == "scam" and s.scam_type]
+    rate, misses = await _hit_rate(samples)
     assert rate >= 0.9, f"Gate A 未达 90%: {rate:.2%}, miss={misses}"
 
 
-async def test_fr3_gate_b_proxy_floor_55():
-    """Gate B:代理集回归地板(防知识库/检索回归),不作为质量结论。
+def _gate_b_samples():
+    path = Path("data/datasets/derived/fraud_r1/base.jsonl")
+    if not path.exists():
+        pytest.skip("缺少 derived/fraud_r1/base.jsonl；发布验收状态为 incomplete")
+    samples = [s for s in load_dataset(path) if s.label.value == "scam" and s.scam_type]
+    assert len(samples) == 27, f"Gate B 样本数变化，需人工复核规格: {len(samples)}"
+    return samples
 
-    地板取值 = 2026-09-26 基线(55.56%)取整,明示出处;其缺口主因是
-    Fraud-R1 境外体裁子集(美式服务钓鱼等,约 1/3)超出产品分布——
-    这部分不追平,语义泛化由 EMBED 通道与真实回流解决。
+
+async def test_fr3_gate_b_release_gate_55():
+    """Gate B 发布线（spec:55%，≥15/27），主指标为生产 top-2。
+
+    2026-10-01 达线：知识库补收类型定义词/体裁词后 18/27（66.67%）。
+    增强为 C01/C13/C14 补"刷单"（案例 tactic 自述词，检索索引缺收）、
+    C28 补"资金调拨/履约保证金"与 C50 补"教育局"（公函体冒充类型的
+    特征词，非针对单条样本）；Gate A、casework 与冻结基线逐分对照无回退。
+    不得以改 top-k、降门槛或改代理标签维持该门限（spec REQ-008）。
     """
-    labeled = [
-        s for s in load_dataset("data/datasets/derived/fraud_r1/base.jsonl")
-        if s.label.value == "scam" and s.scam_type
-    ]
-    rate, misses = await _hit_rate(labeled)
-    assert rate >= 0.55, f"Gate B 回归地板失守: {rate:.2%}, miss={misses}"
+    rate, misses = await _hit_rate(_gate_b_samples())
+    assert rate >= 0.55, f"Gate B top-2 发布线未达: {rate:.2%}, miss={misses}"
 
 
-async def test_fr3_hit_rate_on_benign_hard_not_scam_biased():
-    """对照:硬正常样本的 top-3 不应系统性指向单一类目(检索不应给 judge 制造锚定)。"""
+async def test_fr3_benign_hard_no_anchor_clustering():
+    """benign_hard 的第二名关键词分数 <0.1：正常消息至多弱匹配单一案例。
+
+    防止检索给 judge 制造"多案例聚簇"式锚定。0.1 阈值沿用规格对旧实现
+    的同口径观察（第二名均 <0.1）；新实现实测最大 0.0896（BH-003）。
+    第一名允许更高：官方原型消息（如航班退改签通知）合法命中其同类型参考卡。
+    """
     labeled = list(load_dataset("data/datasets/core/benign_hard.jsonl"))
-    retr = Retriever(_cases(), None, top_k=3)
-    uniform = 0
-    for s in labeled:
-        got = await retr.search_cases(_runtime_query(s.text))
-        if len({c.scam_type for c in got}) == 1:
-            uniform += 1
-    assert uniform <= len(labeled), "检索行为异常"
+    retriever = Retriever(_cases())
+    for sample in labeled:
+        result = await retriever.search(_query(sample))
+        scores = sorted((hit.keyword_score for hit in result.hits), reverse=True)
+        second = scores[1] if len(scores) > 1 else 0.0
+        assert second < 0.1, f"{sample.id} 检索出现多案例聚簇: 2nd={second:.4f}"

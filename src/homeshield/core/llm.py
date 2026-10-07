@@ -14,8 +14,6 @@ from typing import Any, Protocol
 from homeshield.core.config import Provider, Settings
 from homeshield.core.errors import DegradeError
 
-_EMBED_BATCH = 20  # 部分供应商(如 DashScope)单批上限 25,留余量
-
 
 class LLMPort(Protocol):
     async def chat_json(self, task: str, system: str, user: str, schema: dict) -> dict: ...
@@ -91,6 +89,10 @@ class OpenAICompatLLM:
             raise ValueError("MODE=llm 需要至少一个供应商(<NAME>_API_KEY / <NAME>_BASE_URL)")
         self._transcribe = settings.get_transcription_provider()
         self._embed = settings.get_embedding_provider()
+        if settings.embed_dimensions is not None and settings.embed_dimensions <= 0:
+            raise ValueError("EMBED_DIMENSIONS 必须为正整数,留空表示用模型默认维度")
+        self._embed_dimensions = settings.embed_dimensions
+        self._embed_batch = settings.embed_batch_size
         self._clients: dict[str, Any] = {}
 
     def get_provider_for_task(self, task: str) -> Provider:
@@ -101,6 +103,13 @@ class OpenAICompatLLM:
         if task == "transcribe":
             return self._transcribe or self._chat
         return self._chat
+
+    @property
+    def embedding_label(self) -> str:
+        """向量供应商标识(日志/评测报告用);未配置向量通道时为 unknown。"""
+        if self._embed is None:
+            return "provider=unknown model=unknown"
+        return f"provider={self._embed.name} model={self._embed.model}"
 
     def _get_client_and_model(self, provider: Provider):
         if provider.name not in self._clients:
@@ -140,10 +149,26 @@ class OpenAICompatLLM:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         client, model = self._get_client_and_model(self.get_provider_for_task("embed"))
         out: list[list[float]] = []
-        for i in range(0, len(texts), _EMBED_BATCH):  # 部分供应商单批限 25,分批兜底
-            batch = texts[i : i + _EMBED_BATCH] or texts
-            resp = await client.embeddings.create(model=model, input=batch)
-            out.extend(d.embedding for d in resp.data)
+        for i in range(0, len(texts), self._embed_batch):  # 批条数按端点上限定(EMBED_BATCH_SIZE)
+            batch = texts[i : i + self._embed_batch] or texts
+            kwargs: dict[str, Any] = {"model": model, "input": batch}
+            if self._embed_dimensions is not None:  # 留空 = 模型默认维度
+                kwargs["dimensions"] = self._embed_dimensions
+            resp = await client.embeddings.create(**kwargs)
+            data = list(resp.data)
+            if len(data) != len(batch):
+                raise ValueError("embedding response count mismatch")
+            ordered: list[list[float] | None] = [None] * len(batch)
+            for item in data:
+                index = getattr(item, "index", None)
+                if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(batch):
+                    raise ValueError("invalid embedding response index")
+                if ordered[index] is not None:
+                    raise ValueError("duplicate embedding response index")
+                ordered[index] = item.embedding
+            if any(vector is None for vector in ordered):
+                raise ValueError("missing embedding response index")
+            out.extend(vector for vector in ordered if vector is not None)
         return out
 
     async def transcribe_image(self, image_b64: str, hint: str) -> str:

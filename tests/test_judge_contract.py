@@ -95,3 +95,18 @@ async def test_safe_confidence_floor_independent_of_constrained():
     judge = FixedJudge(JudgeOutput(level=Level.SAFE, confidence=10, cited_ids=["F99"], reason="x"))
     with pytest.raises(DegradeError):
         await judge_with_validation(_input(), judge, constrained=False, safe_confidence_floor=60)
+
+
+async def test_retrieved_case_prompt_is_reference_not_verdict_evidence():
+    class PromptSpy(MockLLM):
+        system = ""
+
+        async def chat_json(self, task, system, user, schema):
+            self.system = system
+            return {"level": "safe", "confidence": 80, "cited_ids": [], "reason": "无证据"}
+
+    llm = PromptSpy()
+    await LLMJudge(llm).judge(_input(), constrained=False)
+    assert "依据当前消息原文和特征分级" in llm.system
+    assert "案例相似不能替代当前消息证据" in llm.system
+    assert "只依据给出的特征与检索案例" not in llm.system

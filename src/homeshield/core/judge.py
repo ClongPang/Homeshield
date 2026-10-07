@@ -107,7 +107,8 @@ class LLMJudge:
 
     async def judge(self, inp: JudgeInput, *, constrained: bool) -> JudgeOutput:
         system = (
-            "你是家庭反诈判定引擎,只依据给出的特征与检索案例分级:safe/suspicious/dangerous。"
+            "你是家庭反诈判定引擎,依据当前消息原文和特征分级:safe/suspicious/dangerous。"
+            "检索案例仅作类型与建议参考,案例相似不能替代当前消息证据。"
             "输出 JSON。"
         )
         if constrained:

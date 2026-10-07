@@ -1,6 +1,7 @@
 """组合根(Composition Root):唯一知道具体实现的地方。"""
 import json
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,11 +19,12 @@ from homeshield.core.notifier import AlertBroker, AlertRouter, wire_alerts
 from homeshield.core.pipeline import Pipeline, PipelineConfig
 from homeshield.core.reply import LLMReply, ReplyGenerator, TemplateReply
 from homeshield.core.repo import Repos, make_repos
-from homeshield.core.retrieval import Retriever
+from homeshield.core.retrieval import DEFAULT_TOP_K, Retriever
 from homeshield.core.verification import VerificationService
 from homeshield.core.recovery import RecoveryService
 
 KB_PATH = Path(__file__).parent / "knowledge" / "cases.json"
+logger = logging.getLogger(__name__)
 
 
 def load_cases(path: Path = KB_PATH) -> list[KbCase]:
@@ -60,9 +62,18 @@ def build_deps(settings: Settings, pool: AsyncConnectionPool | None = None) -> D
     broker = AlertBroker()
     wecom = WeComChannel(settings) if settings.wecom_corpid else None
     llm = make_llm(settings)
-    retriever = Retriever(
-        load_cases(), llm if settings.llm_enabled and settings.get_embedding_provider() else None
-    )
+    cases = load_cases()
+    embed_provider = settings.get_embedding_provider() if settings.llm_enabled else None
+    retriever = Retriever(cases, llm if embed_provider else None)
+    if settings.llm_enabled and embed_provider is None:
+        logger.warning("retrieval mode=keyword_fallback configured without embedding provider")
+    elif embed_provider:
+        logger.info("retrieval mode=hybrid cases=%d top_k=%d keyword_weight=%s provider=%s model=%s",
+                    len(cases), DEFAULT_TOP_K, retriever.keyword_weight,
+                    embed_provider.name, embed_provider.model)
+    else:
+        logger.info("retrieval mode=keyword cases=%d top_k=%d keyword_weight=%s",
+                    len(cases), DEFAULT_TOP_K, retriever.keyword_weight)
     judge: Judge = LLMJudge(llm) if settings.llm_enabled else MockJudge(settings.mock_judge_delay_seconds)
     reply: ReplyGenerator = LLMReply(llm) if settings.llm_enabled else TemplateReply()
     router = wire_alerts(bus, broker, repos)

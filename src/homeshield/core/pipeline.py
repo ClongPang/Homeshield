@@ -49,14 +49,27 @@ from homeshield.core.models import (
 )
 from homeshield.core.reply import ReplyGenerator, add_delivery_notice
 from homeshield.core.repo import Repos, repository_transaction
-from homeshield.core.retrieval import Retriever
+from homeshield.core.retrieval import Retriever, build_retrieval_query
 
 logger = logging.getLogger(__name__)
 _NON_MONEY_TRANSFER_VALUES = {"给我验证码"}  # 旧规则将其标为 transfer;跨条资金下限不得借此触发
 
 # 判定行为语义版本:凡影响判定输出的变更(词表/提示词/分级语义/检索/模型默认)
 # 必须递增;断点续跑与评测缓存据此失效,防止用旧引擎的分数冒充新引擎。
-PIPELINE_VERSION = "1.2.0"
+PIPELINE_VERSION = "1.3.1"  # 1.3.1: 嵌入维度配置化(EMBED_DIMENSIONS,生产 256)
+
+
+def extract_conversation_rule_specs(conversation: Conversation) -> list[FeatureSpec]:
+    """逐轮抽取规则特征并补充跨轮升级信号，供产品与离线评测共用。"""
+    specs: list[FeatureSpec] = []
+    for idx, turn in enumerate(conversation.turns, 1):
+        for spec in extract_rule_features(turn.text):
+            spec.turn = idx
+            specs.append(spec)
+    escalation = detect_escalation_feature(specs)
+    if escalation is not None:
+        specs.append(escalation)
+    return specs
 
 
 @dataclass(frozen=True)
@@ -229,16 +242,8 @@ class Pipeline:
     # ---- 阶段 2:特征抽取 + 检索 ----------------------------------------
     async def _extract_features_and_cases(self, conversation: Conversation) -> Extraction:
         rendered = conversation.render()
-        rule_specs: list[FeatureSpec] = []
-        for idx, turn in enumerate(conversation.turns, 1):
-            for spec in extract_rule_features(turn.text):
-                spec.turn = idx  # 逐轮归属:升级检测与证据定位依赖轮次
-                rule_specs.append(spec)
-        escalation = detect_escalation_feature(rule_specs)
-        if escalation is not None:
-            rule_specs.append(escalation)
-        # 检索 query:特征值 + 原文片段——纯特征值在弱特征消息(如仅卡号)下失效
-        retrieval_query = (" ".join(s.value for s in rule_specs) + " " + rendered[:80]).strip()
+        rule_specs = extract_conversation_rule_specs(conversation)
+        retrieval_query = build_retrieval_query(conversation, rule_specs)
         sup_task = (
             asyncio.ensure_future(supplement_features_with_llm(self.llm, rendered))
             if self.config.llm_features

@@ -5,9 +5,23 @@ from homeshield.core.features import (
     assign_feature_ids,
     extract_rule_features,
     get_rule_risk_floor,
+    redact_retrieval_text,
     supplement_features_with_llm,
 )
 from homeshield.core.models import Level
+
+
+def test_redact_covers_phone_after_url_even_when_url_match_swallows_it():
+    # URL 正则 \S+ 会贪婪越过标点;遮蔽范围必须同步裁剪,否则号码明文泄漏
+    assert redact_retrieval_text("点 https://x.com/abc，打13800138000") == "点 链接，打账号"
+    assert redact_retrieval_text("点 https://x.com/abc，打1234567890123456") == "点 链接，打账号"
+    # 号码在 URL 值内部时仍整体替换为链接,不重复遮蔽
+    assert redact_retrieval_text("https://x.com/r/13800138000/home") == "链接"
+    assert redact_retrieval_text("打 13800138000 再点 https://x.com/abc") == "打 账号 再点 链接"
+    # 退化输入:裸 scheme 后直接接标点,整段遮蔽不留"://"残渣
+    assert redact_retrieval_text("详情 https://，速看") == "详情 链接，速看"
+    # 真实 URL 尾部标点照常裁剪,不把标点算进链接
+    assert redact_retrieval_text("见 https://x.com/a。") == "见 链接。"
 
 
 async def test_get_rule_risk_floor():
